@@ -1,0 +1,31 @@
+/* 
+ 语音识别服务器的子服务注册信息： /service/speech/instance_id 
+ 服务名称：/service/speech 
+ 实例 ID: instance_id 每个能够提供用户操作服务的子服务器唯
+一 ID 
+ 当服务发现的时候，通过 /service/speech 进行服务发现，就可以发现所
+有的能够提供用户操作的实例信息了 
+*/ 
+syntax = "proto3"; 
+package chatnow; 
+ 
+option cc_generic_services = true; 
+/* brief: 请求 */
+message SpeechRecognitionReq { 
+    string request_id = 1;          // 请求ID
+    bytes speech_content = 2;       // 语言数据
+    optional string user_id = 3;    //用户ID (option 表示可选项)
+    optional string session_id = 4; //登录会话ID -- 网关进行身份鉴权
+} 
+/* brief: 响应 */
+message SpeechRecognitionRsp { 
+    string request_id = 1;          // 请求ID
+    bool success = 2;               // 请求处理结果标志
+    optional string errmsg = 3;     // 失败原因
+    string recognition_result = 4;  // 识别后的文字数据
+} 
+// brief: 语音识别 Rpc 服务及接口定义
+service SpeechService { 
+    rpc SpeechRecognition(SpeechRecognitionReq) returns (SpeechRecognitionRsp); 
+}
+ 
