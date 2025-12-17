@@ -3,6 +3,9 @@
 #include <brpc/channel.h>
 #include "logger.hpp"
 
+namespace chatnow
+{
+
 /* brief: 封装单个服务的信道管理类 */
 class ServiceChannel 
 {
@@ -134,3 +137,5 @@ private:
     std::unordered_set<std::string> _follow_services;
     std::unordered_map<std::string, ServiceChannel::ptr> _services;
 };
+
+}

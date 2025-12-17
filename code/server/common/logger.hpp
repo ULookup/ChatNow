@@ -6,6 +6,9 @@
 #include <spdlog/async.h>
 #include <iostream>
 
+namespace chatnow
+{
+
 // mode - 运行模式: true-发布模式 | false-调试模式
 
 std::shared_ptr<spdlog::logger> g_default_logger;
@@ -27,9 +30,11 @@ void init_logger(bool mode, const std::string &filename, int32_t level) {
     g_default_logger->set_pattern("[%n][%H:%M:%S][%t]%^[%l]%$%v");
 }
 
-#define LOG_TRACE(format, ...) g_default_logger->trace(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
-#define LOG_DEBUG(format, ...) g_default_logger->debug(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
-#define LOG_INFO(format, ...) g_default_logger->info(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
-#define LOG_WARN(format, ...) g_default_logger->warn(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
-#define LOG_ERROR(format, ...) g_default_logger->error(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
-#define LOG_FATAL(format, ...) g_default_logger->critical(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_TRACE(format, ...) chatnow::g_default_logger->trace(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_DEBUG(format, ...) chatnow::g_default_logger->debug(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_INFO(format, ...) chatnow::g_default_logger->info(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_WARN(format, ...) chatnow::g_default_logger->warn(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_ERROR(format, ...) chatnow::g_default_logger->error(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+#define LOG_FATAL(format, ...) chatnow::g_default_logger->critical(std::string("[{}:{}] ") + format, __FILE__, __LINE__, ##__VA_ARGS__)
+
+}

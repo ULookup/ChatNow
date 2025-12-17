@@ -4,6 +4,9 @@
 #include <memory>
 #include "logger.hpp"
 
+namespace chatnow
+{
+
 bool Serialize(const Json::Value &val, std::string &dst) {
     // 先定义 Json::StreamWriter 工厂类 Json::StreamWriterBuilder
     Json::StreamWriterBuilder swb;
@@ -228,3 +231,5 @@ private:
     Json::Value _should;
     std::shared_ptr<elasticlient::Client> _client;
 };
+
+}

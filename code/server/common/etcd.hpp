@@ -7,6 +7,9 @@
 #include <etcd/Value.hpp>
 #include "../common/logger.hpp"
 
+namespace chatnow
+{
+
 static constexpr int keepAliveTime = 3;
 
 /* brief: 服务注册客户端类 */
@@ -76,3 +79,5 @@ private:
     std::shared_ptr<etcd::Watcher> _watcher;
     uint64_t _lease_id;
 };
+
+}

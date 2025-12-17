@@ -5,7 +5,7 @@
 #include <openssl/opensslv.h>
 #include "logger.hpp"
 
-namespace ChatNow::common 
+namespace chatnow
 {
 
 class MQClient
