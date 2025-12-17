@@ -15,14 +15,14 @@ public:
     ~SpeechServiceImpl() = default;
     void SpeechRecognition(google::protobuf::RpcController *controller,
                         const ::chatnow::SpeechRecognitionReq *request,
-                        ::chatnow::SpeechRecognitionRes *response,
+                        ::chatnow::SpeechRecognitionRsp *response,
                         ::google::protobuf::Closure *done)
     {
         brpc::ClosureGuard rpc_guard(done);
         //1. 取出请求中的语言数据
         //2. 调用语音 SDK 模块进行语音识别，得到响应
         std::string err;
-        std::string res = _asr_client->recognize(requst->speech_content(), err);
+        std::string res = _asr_client->recognize(request->speech_content(), err);
         if(res.empty()) {
             LOG_ERROR("{} 语音识别失败!", request->request_id());
             response->set_request_id(request->request_id());
@@ -44,8 +44,9 @@ class SpeechServer
 public:
     using ptr = std::shared_ptr<SpeechServer>;
 
-    SpeechServer(const ASRClient::ptr &asr_client,const Registry::ptr &reg_client, const std::shared_ptr<brpc::Server> &server) {}
-    ~SpeechServer() {}
+    SpeechServer(const ASRClient::ptr &asr_client,const Registry::ptr &reg_client, const std::shared_ptr<brpc::Server> &server) 
+        : _asr_client(asr_client), _reg_client(reg_client), _rpc_server(server) {}
+    ~SpeechServer() = default;
     /* brief: 搭建RPC服务器，并启动服务器 */
     void start() {
         _rpc_server->RunUntilAskedToQuit();
@@ -54,7 +55,7 @@ private:
     ASRClient::ptr _asr_client;
     Registry::ptr _reg_client;
     std::shared_ptr<brpc::Server> _rpc_server;
-}
+};
 
 /* 建造者模式: 将对象真正的构造过程封装，便于后期扩展和调整 */
 class SpeechServerBuilder
@@ -74,11 +75,14 @@ public:
         _reg_client->registry(service_name, access_host);
     }
     /* brief: 构造RPC服务器对象，并添加服务 */
-    void make_rpc_server(uint16_t port, uint32_t timeout, uint8_t num_threads) {
+    void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
+        if(!_asr_client) {
+            LOG_ERROR("还未初始化语音识别模块");
+            abort();
+        }
         _rpc_server = std::make_shared<brpc::Server>();
-
-        SpeechServiceImpl speech_service;
-        int ret = _rpc_server->AddService(&speech_service);
+        SpeechServiceImpl *speech_service = new SpeechServiceImpl(_asr_client);
+        int ret = _rpc_server->AddService(speech_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
             abort();
@@ -87,7 +91,7 @@ public:
         brpc::ServerOptions options;
         options.idle_timeout_sec = timeout;
         options.num_threads = num_threads;
-        ret = _rpc_serer->Start(port, &options);
+        ret = _rpc_server->Start(port, &options);
         if(ret == -1) {
             LOG_ERROR("服务启动失败!");
             abort();
@@ -103,14 +107,14 @@ public:
         if(!_rpc_server) {
             LOG_ERROR("还未初始化RPC服务器模块");
         }
-        SpeechServer::ptr server == std::make_shared<SpeechServer>(_asr_client, _reg_client, _rpc_server);
+        SpeechServer::ptr server = std::make_shared<SpeechServer>(_asr_client, _reg_client, _rpc_server);
         return server;
     }
 private:
     ASRClient::ptr _asr_client;
     Registry::ptr _reg_client;
     std::shared_ptr<brpc::Server> _rpc_server;
-}
+};
 
 }
 

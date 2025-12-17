@@ -9,9 +9,9 @@ DEFINE_string(base_service, "/service", "服务监控根目录");
 DEFINE_string(instance_name, "/speech_service/instance", "服务监控根目录");
 DEFINE_string(access_host, "127.0.0.1:10001", "当前实例的外部访问地址");
 
-DEFINE_string(listen_port, 10001, "RPC服务器监听端口");
-DEFINE_string(rpc_timeout, -1, "RPC调用超时时间");
-DEFINE_string(rpc_threads, 1, "RPC的IO线程数量");
+DEFINE_int32(listen_port, 10001, "RPC服务器监听端口");
+DEFINE_int32(rpc_timeout, -1, "RPC调用超时时间");
+DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
 
 
 DEFINE_string(app_id, "121352894", "语言平台ID");
@@ -24,7 +24,7 @@ int main(int argc, char *argv[])
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::SpeechServerBuilder ssb;
-    ssb.make_asr_object(FLAGS_app_id, FLAGS_api_keym FLAGS_secret_key);
+    ssb.make_asr_object(FLAGS_app_id, FLAGS_api_key, FLAGS_secret_key);
     ssb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
     ssb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
 
