@@ -20,6 +20,7 @@ public:
     User(const std::string &uid, const std::string &mail) 
         : _user_id(uid), _mail(mail), _nickname(uid) {}
 
+    void user_id(const std::string &uid) { _user_id = uid; }
     std::string user_id() const { return _user_id; }
 
     odb::nullable<std::string> nickname() { return _nickname; }
@@ -34,8 +35,8 @@ public:
     odb::nullable<std::string> mail() { return _mail; }
     void mail(const std::string &val) { _mail = val; }
 
-    odb::nullable<std::string> avarta_id() { return _avarta_id; }
-    void avarta_id(const std::string &val) { _avarta_id = val; }
+    odb::nullable<std::string> avatar_id() { return _avatar_id; }
+    void avatar_id(const std::string &val) { _avatar_id = val; }
 private:
     friend class odb::access;
 
@@ -51,7 +52,7 @@ private:
     #pragma db type("varchar(64)")  index unique // 给用户邮箱建立索引
     odb::nullable<std::string> _mail;     //用户邮箱，不一定存在
     #pragma db type("varchar(64)") 
-    odb::nullable<std::string> _avarta_id; //用户头像文件ID，不一定存在    
+    odb::nullable<std::string> _avatar_id; //用户头像文件ID，不一定存在    
 };
 
 }
