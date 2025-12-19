@@ -64,7 +64,7 @@ public:
                 bool enabled = true)
     {
         Json::Value fields;
-        fields["typer"] = type;
+        fields["type"] = type;
         fields["analyzer"] = analyzer;
         if(enabled == false) fields["enabled"] = enabled;
         _properties[key] = fields;
@@ -82,6 +82,7 @@ public:
             LOG_ERROR("索引序列化失败");
             return false;
         }
+        LOG_TRACE("{}", body);
         // 发起搜索请求
         try {
             auto rsp = _client->index(_name, _type, index_id, body);
@@ -110,7 +111,7 @@ public:
             const std::string &name,
             const std::string &type = "_doc") :
             _name(name), _type(type), _client(client) {}
-    ESInsert &append(const std::string &key, const std::string &val) { _item[key] = key; return *this; }
+    ESInsert &append(const std::string &key, const std::string &val) { _item[key] = val; return *this; }
     bool insert(const std::string id = "") {
         std::string body;
         bool ret = Serialize(_item, body);
@@ -119,6 +120,7 @@ public:
             return false;
         }
         // 发起搜索请求
+        LOG_TRACE("{}", body);
         try {
             auto rsp = _client->index(_name, _type, id, body);
             if(rsp.status_code < 200 || rsp.status_code >= 300) {
@@ -204,6 +206,7 @@ public:
             LOG_ERROR("索引序列化失败");
             return false;
         }
+        LOG_TRACE("{}", body);
         // 发起搜索请求
         cpr::Response rsp;
         try {
