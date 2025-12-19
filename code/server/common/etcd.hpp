@@ -5,7 +5,7 @@
 #include <etcd/Response.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/Value.hpp>
-#include "../common/logger.hpp"
+#include "logger.hpp"
 
 namespace chatnow
 {
