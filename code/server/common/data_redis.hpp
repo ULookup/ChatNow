@@ -25,6 +25,7 @@ public:
 class Session
 {
 public:
+    using ptr = std::shared_ptr<Session>;
     Session(const std::shared_ptr<sw::redis::Redis> &redis_client) : _redis_client(redis_client) {}
     void append(const std::string &ssid, const std::string &uid) { _redis_client->set(ssid, uid); }
     void remove(const std::string &ssid) { _redis_client->del(ssid); }
@@ -36,6 +37,7 @@ private:
 class Status
 {
 public:
+    using ptr = std::shared_ptr<Status>;
     Status(const std::shared_ptr<sw::redis::Redis> &redis_client) : _redis_client(redis_client) {}
     void append(const std::string &uid) { _redis_client->set(uid, ""); }
     void remove(const std::string &uid) { _redis_client->del(uid); }
@@ -51,6 +53,7 @@ private:
 class Codes
 {
 public:
+    using ptr = std::shared_ptr<Codes>;
     Codes(const std::shared_ptr<sw::redis::Redis> &redis_client) : _redis_client(redis_client) {}
     void append(const std::string &cid, const std::string &code, const std::chrono::milliseconds &ttl = std::chrono::milliseconds(60000)) { _redis_client->set(cid, code, ttl); }
     void remove(const std::string &cid) { _redis_client->del(cid); }
