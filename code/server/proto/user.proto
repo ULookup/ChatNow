@@ -42,11 +42,11 @@ message UserLoginRsp {
 } 
 //---------------------------- 
 //手机号验证码获取 
-message PhoneVerifyCodeReq { 
+message MailVerifyCodeReq { 
     string request_id = 1; 
-    string phone_number = 2; 
+    string mail_number = 2; 
 } 
-message PhoneVerifyCodeRsp { 
+message MailVerifyCodeRsp { 
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3; 
@@ -54,25 +54,25 @@ message PhoneVerifyCodeRsp {
 } 
 //---------------------------- 
 //手机号注册 
-message PhoneRegisterReq { 
+message MailRegisterReq { 
     string request_id = 1; 
-    string phone_number = 2; 
+    string mail_number = 2; 
     string verify_code_id = 3; 
     string verify_code = 4; 
 } 
-message PhoneRegisterRsp { 
+message MailRegisterRsp { 
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3; 
 } 
 //---------------------------- //手机号登录 
-message PhoneLoginReq { 
+message MailLoginReq { 
     string request_id = 1; 
-    string phone_number = 2; 
+    string mail_number = 2; 
     string verify_code_id = 3; 
     string verify_code = 4; 
 } 
-message PhoneLoginRsp { 
+message MailLoginRsp { 
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3; 
@@ -144,15 +144,15 @@ message SetUserDescriptionRsp {
 } 
 //---------------------------- 
 //用户手机修改 
-message SetUserPhoneNumberReq { 
+message SetUserMailNumberReq { 
     string request_id = 1; 
     optional string user_id = 2; 
     optional string session_id = 3; 
-    string phone_number = 4; 
-    string phone_verify_code_id = 5; 
-    string phone_verify_code = 6; 
+    string mail_number = 4; 
+    string mail_verify_code_id = 5; 
+    string mail_verify_code = 6; 
 } 
-message SetUserPhoneNumberRsp {  
+message SetUserMailNumberRsp {  
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3; 
@@ -161,13 +161,13 @@ message SetUserPhoneNumberRsp {
 service UserService { 
     rpc UserRegister(UserRegisterReq) returns (UserRegisterRsp); 
     rpc UserLogin(UserLoginReq) returns (UserLoginRsp); 
-    rpc GetPhoneVerifyCode(PhoneVerifyCodeReq) returns (PhoneVerifyCodeRsp); 
-    rpc PhoneRegister(PhoneRegisterReq) returns (PhoneRegisterRsp); 
-    rpc PhoneLogin(PhoneLoginReq) returns (PhoneLoginRsp); 
+    rpc GetMailVerifyCode(MailVerifyCodeReq) returns (MailVerifyCodeRsp); 
+    rpc MailRegister(MailRegisterReq) returns (MailRegisterRsp); 
+    rpc MailLogin(MailLoginReq) returns (MailLoginRsp); 
     rpc GetUserInfo(GetUserInfoReq) returns (GetUserInfoRsp); 
     rpc GetMultiUserInfo(GetMultiUserInfoReq) returns (GetMultiUserInfoRsp); 
     rpc SetUserAvatar(SetUserAvatarReq) returns (SetUserAvatarRsp); 
     rpc SetUserNickname(SetUserNicknameReq) returns (SetUserNicknameRsp); 
     rpc SetUserDescription(SetUserDescriptionReq) returns (SetUserDescriptionRsp); 
-    rpc SetUserPhoneNumber(SetUserPhoneNumberReq) returns (SetUserPhoneNumberRsp); 
+    rpc SetUserMailNumber(SetUserMailNumberReq) returns (SetUserMailNumberRsp); 
 } 

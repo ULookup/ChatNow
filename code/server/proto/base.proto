@@ -7,7 +7,7 @@ message UserInfo {
     string user_id = 1;//用户 ID 
     string nickname = 2;//昵称 
     string description = 3;//个人签名/描述 
-    string phone = 4; //绑定手机号 
+    string mail = 4; //绑定手机号 
     bytes avatar = 5;//头像照片，文件内容使用二进制 
 } 
  
