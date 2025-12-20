@@ -68,8 +68,8 @@ private:
 class ServiceManager
 {
 public:
-    using ptr = std::shared_ptr<ServiceChannel>;
-    ServiceManager() {}
+    using ptr = std::shared_ptr<ServiceManager>;
+    ServiceManager() = default;
     /* brief: 获取指定服务的节点信道 */
     ServiceChannel::ChannelPtr choose(const std::string &service_name) {
         std::unique_lock<std::mutex> lock(_mutex);
