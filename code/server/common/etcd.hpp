@@ -56,6 +56,7 @@ public:
             // 然后进行事件监控，监控数据发生的改变并调用回调处理
             _watcher = std::make_shared<etcd::Watcher>(*_client.get(), basedir, std::bind(&Discovery::callback, this, std::placeholders::_1), true);
         }
+    ~Discovery() { _watcher->Cancel(); }
 private:
     void callback(const etcd::Response &resp) {
         if(resp.is_ok() == false) {
