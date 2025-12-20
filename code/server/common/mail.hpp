@@ -24,6 +24,8 @@ public:
 class MailClient : public CodeClient
 {
 public:
+    using ptr = std::shared_ptr<MailClient>;
+
     /* brief: 初始化全局配置，保存服务配置信息 */
     MailClient(const mail_settings &settings) : _settings(settings) {
         auto ret = curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -101,6 +103,8 @@ public:
         LOG_DEBUG("发送邮件成功: {}-{}", to, code);
         return true;
     }
+    /* brief: 获取settings  */
+    mail_settings settings() { return _settings; }
 private:
     /* brief: 构造邮件正文 */
     std::stringstream codeBody(const std::string &to, const std::string &code) {
