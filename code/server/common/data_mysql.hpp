@@ -30,6 +30,8 @@ public:
 class UserTable
 {
 public:
+    using ptr = std::shared_ptr<UserTable>;
+    
     UserTable(const std::shared_ptr<odb::core::database> &db) : _db(db) {}
     bool insert(std::shared_ptr<User> &user) {
         try {
