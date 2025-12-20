@@ -33,6 +33,19 @@ std::string uuid() {
     ss << std::setw(4) << std::setfill('0') << std::hex << tmp;
     return ss.str();
 }
+/* brief: 生成一个4位验证码 */
+std::string verifyCode() {
+    //1. 生成6个0~9随机数字(1字节-转换为16进制字符) -- 生成12位16进制字符
+    std::random_device rd; //实例化设备随机数对象--用于生成随机数种子
+    std::mt19937 generator(rd()); // 以设备随机数为种子，实例化伪随机数对象 
+    std::uniform_int_distribution<int> distribution(0, 9); //限定数据范围
+
+    std::stringstream ss;
+    for(int i = 0; i < 4; ++i) {
+        ss <<distribution(generator);
+    }
+    return ss.str();
+}
 /* brief: 实现读取一个文件的所有数据，放入body */
 bool readFile(const std::string &filename, std::string &body) {
     std::ifstream ifs(filename, std::ios::binary | std::ios::in);
