@@ -135,7 +135,7 @@ public:
         std::string password = request->password();
         //2. 通过昵称获取用户信息，进行密码是否一致的判断
         auto user = _mysql_user->select_by_nickname(nickname);
-        if(!user || password != *user->password()) {
+        if(!user || password != user->password()) {
             LOG_ERROR("请求ID: {} - 用户名或密码错误 - {} - {}", request->request_id(), nickname, password);
             return err_response(request->request_id(), "用户名或密码错误");
         }
@@ -326,10 +326,10 @@ public:
         //3. 根据用户信息中的头像ID，从文件服务器获取头像文件数据，组织完整用户信息
         UserInfo *user_info = response->mutable_user_info();
         user_info->set_user_id(user->user_id());
-        if(user->nickname()) user_info->set_nickname(*user->nickname());
-        if(user->description()) user_info->set_description(*user->description());
-        if(user->mail()) user_info->set_mail(*user->mail());
-        if(user->avatar_id()) {
+        user_info->set_nickname(user->nickname());
+        user_info->set_description(user->description());
+        user_info->set_mail(user->mail());
+        if(!user->avatar_id().empty()) {
             //1.从信道管理对象中，获取到连接了文件管理子服务的channel
             auto channel = _mm_channels->choose(_file_service_name);
             if(!channel) {
@@ -341,7 +341,7 @@ public:
             GetSingleFileReq req;
             GetSingleFileRsp rsp;
             req.set_request_id(request->request_id());
-            req.set_file_id(*user->avatar_id());
+            req.set_file_id(user->avatar_id());
 
             brpc::Controller cntl;
             stub.GetSingleFile(&cntl, &req, &rsp, nullptr);
@@ -393,7 +393,8 @@ public:
         GetMultiFileRsp rsp;
         req.set_request_id(request->request_id());
         for(auto &user : users) {
-            req.add_file_id_list(*user.avatar_id());
+            if(user.avatar_id().empty()) continue;
+            req.add_file_id_list(user.avatar_id());
         }
         brpc::Controller cntl;
         stub.GetMultiFile(&cntl, &req, &rsp, nullptr);
@@ -407,10 +408,10 @@ public:
             auto file_map = rsp.mutable_file_data();   //批量文件请求的响应中的map
             UserInfo user_info;
             user_info.set_user_id(user.user_id());
-            if(user.nickname()) user_info.set_nickname(*user.nickname());
-            if(user.description()) user_info.set_description(*user.description());
-            if(user.mail()) user_info.set_mail(*user.mail());
-            if(user.avatar_id()) user_info.set_avatar((*file_map)[*user.avatar_id()].file_content());
+            user_info.set_nickname(user.nickname());
+            user_info.set_description(user.description());
+            user_info.set_mail(user.mail());
+            user_info.set_avatar((*file_map)[user.avatar_id()].file_content());
             (*user_map)[user_info.user_id()] = user_info;
         }
         response->set_request_id(request->request_id());
@@ -469,7 +470,7 @@ public:
             return err_response(request->request_id(), "更新数据库用户头像ID失败");              
         }
         //5. 更新 ES 服务器中用户信息
-        ret = _es_user->append_data(user->user_id(), *user->mail(), *user->nickname(), *user->description(), *user->avatar_id());
+        ret = _es_user->append_data(user->user_id(), user->mail(), user->nickname(), user->description(), user->avatar_id());
         if(ret == false) {
             LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户头像ID失败: {}", request->request_id(), avatar_id);
             return err_response(request->request_id(), "更新 ES搜索引擎 用户头像ID失败");                      
@@ -515,9 +516,9 @@ public:
             return err_response(request->request_id(), "更新数据库用户昵称失败");                
         }
         //5. 更新 ES 服务中，用户信息
-        ret = _es_user->append_data(user->user_id(), *user->mail(), *user->nickname(), *user->description(), *user->avatar_id());
+        ret = _es_user->append_data(user->user_id(), user->mail(), user->nickname(), user->description(), user->avatar_id());
         if(ret == false) {
-            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户昵称失败: {}", request->request_id(), *user->nickname());
+            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户昵称失败: {}", request->request_id(), user->nickname());
             return err_response(request->request_id(), "更新 ES搜索引擎 用户昵称失败");                      
         }
         //6. 组织响应
@@ -555,9 +556,9 @@ public:
             return err_response(request->request_id(), "更新数据库用户签名失败");                
         }
         //4. 更新 ES 服务中，用户信息
-        ret = _es_user->append_data(user->user_id(), *user->mail(), *user->nickname(), *user->description(), *user->avatar_id());
+        ret = _es_user->append_data(user->user_id(), user->mail(), user->nickname(), user->description(), user->avatar_id());
         if(ret == false) {
-            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户签名失败: {}", request->request_id(), *user->description());
+            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户签名失败: {}", request->request_id(), user->description());
             return err_response(request->request_id(), "更新 ES搜索引擎 用户签名失败");                      
         }
         //5. 组织响应
@@ -603,9 +604,9 @@ public:
             return err_response(request->request_id(), "更新数据库用户邮箱失败");                
         }
         //5. 更新 ES 服务中，用户信息
-        ret = _es_user->append_data(user->user_id(), *user->mail(), *user->nickname(), *user->description(), *user->avatar_id());
+        ret = _es_user->append_data(user->user_id(), user->mail(), user->nickname(), user->description(), user->avatar_id());
         if(ret == false) {
-            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户邮箱失败: {}", request->request_id(), *user->mail());
+            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 用户邮箱失败: {}", request->request_id(), user->mail());
             return err_response(request->request_id(), "更新 ES搜索引擎 用户邮箱失败");                      
         }
         //6. 组织响应
