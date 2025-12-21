@@ -55,7 +55,7 @@ class Codes
 public:
     using ptr = std::shared_ptr<Codes>;
     Codes(const std::shared_ptr<sw::redis::Redis> &redis_client) : _redis_client(redis_client) {}
-    void append(const std::string &cid, const std::string &code, const std::chrono::milliseconds &ttl = std::chrono::milliseconds(60000)) { _redis_client->set(cid, code, ttl); }
+    void append(const std::string &cid, const std::string &code, const std::chrono::milliseconds &ttl = std::chrono::milliseconds(300000)) { _redis_client->set(cid, code, ttl); }
     void remove(const std::string &cid) { _redis_client->del(cid); }
     sw::redis::OptionalString code(const std::string &cid) { return _redis_client->get(cid); }
 private:
