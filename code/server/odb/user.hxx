@@ -23,19 +23,34 @@ public:
     void user_id(const std::string &uid) { _user_id = uid; }
     std::string user_id() const { return _user_id; }
 
-    odb::nullable<std::string> nickname() { return _nickname; }
+    std::string nickname() { 
+        if(!_nickname) return std::string(); 
+        return *_nickname;
+    }
     void nickname(const std::string &val) { _nickname = val; }
 
-    odb::nullable<std::string> description() { return _description; }
+    std::string description() { 
+        if(!_description) return std::string();
+        return *_description; 
+    }
     void description(const std::string &val) { _description = val; }
 
-    odb::nullable<std::string> password() { return _password; }
+    std::string password() { 
+        if(!_password) return std::string();
+        return *_password; 
+    }
     void password(const std::string &val) { _password = val; }
 
-    odb::nullable<std::string> mail() { return _mail; }
+    std::string mail() { 
+        if(!_mail) return std::string();
+        return *_mail; 
+    }
     void mail(const std::string &val) { _mail = val; }
 
-    odb::nullable<std::string> avatar_id() { return _avatar_id; }
+    std::string avatar_id() { 
+        if(!_avatar_id) return std::string();
+        return *_avatar_id; 
+    }
     void avatar_id(const std::string &val) { _avatar_id = val; }
 private:
     friend class odb::access;
