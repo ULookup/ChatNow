@@ -100,12 +100,15 @@ public:
     SpeechServer::ptr build() {
         if(!_asr_client) {
             LOG_ERROR("还未初始化语音识别模块");
+            abort();
         }
         if(!_reg_client) {
             LOG_ERROR("还未初始化服务注册模块");
+            abort();
         }
         if(!_rpc_server) {
             LOG_ERROR("还未初始化RPC服务器模块");
+            abort();
         }
         SpeechServer::ptr server = std::make_shared<SpeechServer>(_asr_client, _reg_client, _rpc_server);
         return server;
