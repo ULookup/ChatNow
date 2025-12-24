@@ -4,7 +4,7 @@
 #include "logger.hpp"   // 日志模块封装
 #include "rabbitmq.hpp"
 #include "channel.hpp"
-#include "data_mysql.hpp"
+#include "mysql_chat_session_member.hpp"
 #include "utils.hpp"
 #include "base.pb.h"
 #include "user.pb.h"
