@@ -111,7 +111,8 @@ public:
             const std::string &name,
             const std::string &type = "_doc") :
             _name(name), _type(type), _client(client) {}
-    ESInsert &append(const std::string &key, const std::string &val) { _item[key] = val; return *this; }
+    template<typename T>
+    ESInsert &append(const std::string &key, const T &val) { _item[key] = val; return *this; }
     bool insert(const std::string id = "") {
         std::string body;
         bool ret = Serialize(_item, body);
@@ -191,10 +192,27 @@ public:
         _should.append(match);
         return *this;
     }
+    ESSearch &append_must_term(const std::string &key, const std::string &val) {
+        Json::Value field;
+        field[key] = val;
+        Json::Value term;
+        term["term"] = field;
+        _must.append(term);
+        return *this;
+    }
+    ESSearch &append_must_match(const std::string &key, const std::string &val) {
+        Json::Value field;
+        field[key] = val;
+        Json::Value match;
+        match["match"] = field;
+        _must.append(match);
+        return *this;
+    }
     Json::Value search() {
         Json::Value cond;
         if(_must_not.empty() == false) cond["must_not"] = _must_not;
         if(_should.empty() == false) cond["should"] = _should;
+        if(_must.empty() == false) cond["must"] = _must;
         Json::Value query;
         query["bool"] = cond;
         Json::Value root;
@@ -231,6 +249,7 @@ private:
     std::string _name;
     std::string _type;
     Json::Value _must_not;
+    Json::Value _must;
     Json::Value _should;
     std::shared_ptr<elasticlient::Client> _client;
 };
