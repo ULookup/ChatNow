@@ -6,7 +6,7 @@
 #include "utils.hpp"        // 基础工具接口
 #include "mail.hpp"         // 邮箱验证
 #include "data_es.hpp"      // es数据管理客户端封装
-#include "data_mysql.hpp"   // mysql数据管理客户端封装
+#include "mysql_user.hpp"   // mysql数据管理客户端封装
 #include "data_redis.hpp"   // redis数据管理客户端封装
 #include "base.pb.h"
 #include "user.pb.h"        // protobuf框架代码
