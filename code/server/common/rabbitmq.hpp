@@ -66,6 +66,7 @@ public:
                 const std::string &msg, 
                 const std::string &routing_key = "routing_key") 
     {
+        LOG_DEBUG("向交换机 {}-{} 发布消息", exchange, routing_key);
         bool ret = _channel->publish(exchange, routing_key, msg);
         if(ret == false) {
             LOG_ERROR("{} 发布消息失败: ", exchange);
@@ -74,8 +75,8 @@ public:
         return true;
     }
     void consume(const std::string &queue, const MessageCallback &cb) {
-        auto callback = std::bind(cb, &_channel, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-        _channel->consume(queue, "consume-test")
+        LOG_DEBUG("开始订阅 {} 队列消息", queue);
+        _channel->consume(queue, "consume-tag")
                 .onReceived([this, cb](const AMQP::Message &message, uint64_t deliveryTag, bool redelivered){
                     cb(message.body(), message.bodySize());
                     _channel->ack(deliveryTag);
