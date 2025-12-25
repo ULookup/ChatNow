@@ -51,4 +51,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 # 7. 设置需要连接的库
 # 8. 设置安装路径
-INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)
+INSTALL(TARGETS ${target} ${test_client} RUNTIME DESTINATION bin)

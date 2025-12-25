@@ -31,7 +31,7 @@ endforeach()
 # 3.3 生成ODB框架代码
 # 3.3.1 添加所需的odb映射代码文件名称
 set(odb_path ${CMAKE_CURRENT_SOURCE_DIR}/../odb)
-set(odb_files chat_session_member.hxx user.hxx)
+set(odb_files chat_session_member.hxx)
 # 3.3.2 检查框架代码文件是否已经生成
 set(odb_hxx "")
 set(odb_cxx "")
@@ -68,12 +68,19 @@ target_link_libraries(${target} -lgflags -lspdlog
 
 set(test_client "transmite_client")
 # 4. 获取源码目录下的所有源码文件
-set(test_files "")
-aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
+set(test_files ${CMAKE_CURRENT_SOURCE_DIR}/test/transmite_client.cc)
 # 5. 声明目标及依赖
 add_executable(${test_client} ${test_files} ${proto_srcs})
 
 target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
+
+set(trans_user_client "trans_user_client")
+# 4. 获取源码目录下的所有源码文件
+set(trans_user_files ${CMAKE_CURRENT_SOURCE_DIR}/test/trans_user_client.cc)
+# 5. 声明目标及依赖
+add_executable(${trans_user_client} ${trans_user_files} ${proto_srcs})
+
+target_link_libraries(${trans_user_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
 
 # 6. 设置头文件默认搜索路径
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -82,4 +89,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../odb)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 # 7. 设置需要连接的库
 # 8. 设置安装路径
-INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)
+INSTALL(TARGETS ${target} ${trans_user_client} ${test_client} RUNTIME DESTINATION bin)
