@@ -31,7 +31,10 @@ public:
                         _user_service_name(user_service_name),
                         _mm_channels(channels),
                         _es_client(std::make_shared<ESMessage>(es_client)),
-                        _mysql_message_table(std::make_shared<MessageTable>(mysql_client)) {}
+                        _mysql_message_table(std::make_shared<MessageTable>(mysql_client)) 
+    {
+        _es_client->createIndex();
+    }
     ~MessageServiceImpl() = default;
     virtual void GetHistoryMsg(google::protobuf::RpcController* controller,
                        const ::chatnow::GetHistoryMsgReq* request,
@@ -53,10 +56,11 @@ public:
         //2. 从数据库中进行消息查询
         auto msg_list = _mysql_message_table->range(chat_ssid, stime, etime);
         //3. 统计所有文件类型消息的文件ID，并从文件子服务进行批量文件下载
-        std::vector<std::string> file_id_list;
+        std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
             if(msg.file_id().empty()) continue;
-            file_id_list.push_back(msg.file_id());
+            LOG_DEBUG("需要下载的文件ID: {}", msg.file_id());
+            file_id_list.insert(msg.file_id());
         }
         std::unordered_map<std::string, std::string> file_data_list;
         bool ret = _GetFile(rid, file_id_list, file_data_list);
@@ -65,14 +69,14 @@ public:
             return err_response(rid, "批量文件数据下载失败");
         }
         //4. 统计所有消息的发送者用户ID，从用户子服务进行批量用户信息获取
-        std::vector<std::string> user_id_list;
+        std::unordered_set<std::string> user_id_list;
         for(const auto &msg : msg_list) {
-            file_id_list.push_back(msg.user_id());
+            user_id_list.insert(msg.user_id());
         }
         std::unordered_map<std::string, UserInfo> user_list;
         ret = _GetUser(rid, user_id_list, user_list);
         if(ret == false) {
-            LOG_ERROR("请求ID {} - 批量用户信息获取失败");
+            LOG_ERROR("请求ID {} - 批量用户信息获取失败", rid);
             return err_response(rid, "批量用户信息获取失败");
         }
         //5. 组织响应
@@ -132,10 +136,11 @@ public:
         //2. 从数据库获取最近的消息元信息
         auto msg_list = _mysql_message_table->recent(chat_ssid, msg_count);
         //3. 组织消息中所有文件消息的文件ID，并从文件子服务进行文件下载
-        std::vector<std::string> file_id_list;
+        std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
             if(msg.file_id().empty()) continue;
-            file_id_list.push_back(msg.file_id());
+            LOG_DEBUG("需要下载的文件ID: {}", msg.file_id());
+            file_id_list.insert(msg.file_id());
         }
         std::unordered_map<std::string, std::string> file_data_list;
         bool ret = _GetFile(rid, file_id_list, file_data_list);
@@ -144,14 +149,14 @@ public:
             return err_response(rid, "批量文件数据下载失败");
         }
         //4. 组织消息中所有消息的用户ID，并从用户子服务进行用户信息查询
-        std::vector<std::string> user_id_list;
+        std::unordered_set<std::string> user_id_list;
         for(const auto &msg : msg_list) {
-            file_id_list.push_back(msg.user_id());
+            user_id_list.insert(msg.user_id());
         }
         std::unordered_map<std::string, UserInfo> user_list;
         ret = _GetUser(rid, user_id_list, user_list);
         if(ret == false) {
-            LOG_ERROR("请求ID {} - 批量用户信息获取失败");
+            LOG_ERROR("请求ID {} - 批量用户信息获取失败", rid);
             return err_response(rid, "批量用户信息获取失败");
         }
         //5. 组织响应
@@ -212,14 +217,14 @@ public:
         //2. 从ES搜索引擎进行关键字消息搜索，得到消息列表
         auto msg_list = _es_client->search(skey, chat_ssid);
         //3. 组织所有消息的用户ID，从用户子服务获取用户信息
-        std::vector<std::string> user_id_list;
+        std::unordered_set<std::string> user_id_list;
         for(const auto &msg : msg_list) {
-            user_id_list.push_back(msg.user_id());
+            user_id_list.insert(msg.user_id());
         }
         std::unordered_map<std::string, UserInfo> user_list;
         bool ret = _GetUser(rid, user_id_list, user_list);
         if(ret == false) {
-            LOG_ERROR("请求ID {} - 批量用户信息获取失败");
+            LOG_ERROR("请求ID {} - 批量用户信息获取失败", rid);
             return err_response(rid, "批量用户信息获取失败");
         }
         //4. 组织响应
@@ -238,6 +243,7 @@ public:
     }
 
     void onMessage(const char *body, size_t sz) {
+        LOG_DEBUG("收到新消息，进行存储处理！");
         //1. 取出序列化的消息内容进行反序列化
         chatnow::MessageInfo  message;
         bool ret = message.ParseFromArray(body, sz);
@@ -319,12 +325,12 @@ public:
     }
 private:
     bool _GetUser(const std::string &rid,
-                const std::vector<std::string> &user_id_list,
+                const std::unordered_set<std::string> &user_id_list,
                 std::unordered_map<std::string, UserInfo> &user_list)
     {
-        auto channel = _mm_channels->choose(_file_service_name);
+        auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
-            LOG_ERROR("{} 没有可供访问的用户子服务节点", _file_service_name);
+            LOG_ERROR("{} 没有可供访问的用户子服务节点", _user_service_name);
             return false;
         }
         UserService_Stub stub(channel.get());
@@ -348,7 +354,7 @@ private:
     }
 
     bool _GetFile(const std::string &rid, 
-                std::vector<std::string> &file_id_list, 
+                std::unordered_set<std::string> &file_id_list, 
                 std::unordered_map<std::string, std::string> &file_data_list) 
     {
         auto channel = _mm_channels->choose(_file_service_name);
@@ -441,6 +447,8 @@ private:
 class MessageServerBuilder
 {
 public:
+    /* brief: 构造es客户端对象 */
+    void make_es_object(const std::vector<std::string> host_list) { _es_client = ESClientFactory::create(host_list); }
     /* brief: 构造mysql客户端对象 */
     void make_mysql_object(const std::string &user,
                         const std::string &password,
@@ -462,6 +470,7 @@ public:
         _user_service_name = user_service_name;
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(_file_service_name);
+        _mm_channels->declared(_user_service_name);
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
         auto del_cb = std::bind(&ServiceManager::onServiceOffline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
 

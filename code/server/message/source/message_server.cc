@@ -31,6 +31,8 @@ DEFINE_string(mq_msg_exchange, "msg_exchange", "持久化消息的发布交换�
 DEFINE_string(mq_msg_queue, "msg_queue", "持久化消息的发布队列名称");
 DEFINE_string(mq_msg_binding_key, "msg_queue", "持久化消息的发布队列名称");
 
+DEFINE_string(es_host, "http://127.0.0.1:9200/", "ES搜索引擎服务器URL");
+
 
 int main(int argc, char *argv[])
 {
@@ -39,6 +41,7 @@ int main(int argc, char *argv[])
 
     chatnow::MessageServerBuilder msb;
     msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue, FLAGS_mq_msg_binding_key);
+    msb.make_es_object({FLAGS_es_host});
     msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service);
     msb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
