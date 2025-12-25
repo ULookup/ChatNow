@@ -22,11 +22,13 @@ public:
                         const ServiceManager::ptr &channels, 
                         const std::shared_ptr<odb::core::database> &mysql_client,
                         const std::string &exchange_name,
+                        const std::string &routing_key,
                         const MQClient::ptr &mq_client) 
                         : _user_service_name(user_service_name),
                         _mm_channels(channels),
                         _mysql_session_member_table(std::make_shared<ChatSessionMemberTable>(mysql_client)),
                         _exchange_name(exchange_name),
+                        _routing_key(routing_key),
                         _mq_client(mq_client) {}
     ~TransmiteServiceImpl() = default;
     void GetTransmitTarget(google::protobuf::RpcController *controller,
@@ -72,7 +74,7 @@ public:
         // 获取消息转发客户端用户列表
         auto target_list = _mysql_session_member_table->members(chat_ssid);
         // 将封装完毕的消息，发布到消息队列，待消息存储子服务进行消息持久化
-        bool ret = _mq_client->publish(_exchange_name, message.SerializeAsString());
+        bool ret = _mq_client->publish(_exchange_name, message.SerializeAsString(), _routing_key);
         if(ret == false) {
             LOG_ERROR("请求ID: {} - 持久化消息发布失败", rid);
             return err_response(rid, "持久化消息发布失败");
@@ -95,6 +97,7 @@ private:
 
     // 消息队列客户端句柄
     std::string _exchange_name;
+    std::string _routing_key;
     MQClient::ptr _mq_client;
 };
 
@@ -164,6 +167,7 @@ public:
                     const std::string &binding_key)
     {
         _exchange_name = exchange_name;
+        _routing_key = binding_key;
         _mq_client = std::make_shared<MQClient>(user, password, host); 
         _mq_client->declareComponents(exchange_name, queue_name, binding_key);
     }
@@ -182,7 +186,12 @@ public:
             abort();
         }
         _rpc_server = std::make_shared<brpc::Server>();
-        TransmiteServiceImpl *transmite_service = new TransmiteServiceImpl(_user_service_name, _mm_channels, _mysql_client, _exchange_name, _mq_client);
+        TransmiteServiceImpl *transmite_service = new TransmiteServiceImpl(_user_service_name, 
+                                                                        _mm_channels, 
+                                                                        _mysql_client, 
+                                                                        _exchange_name, 
+                                                                        _routing_key, 
+                                                                        _mq_client);
         int ret = _rpc_server->AddService(transmite_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -220,6 +229,7 @@ private:
     ServiceManager::ptr _mm_channels;
 
     std::string _exchange_name;
+    std::string _routing_key;
     MQClient::ptr _mq_client;
     
     Discovery::ptr _service_discover;   // 服务发现客户端
