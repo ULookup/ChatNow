@@ -67,14 +67,14 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lhiredis -lcpr -lelasticlient -ljsoncpp
     -lamqpcpp -lev)
 
-#set(test_client "user_client")
-## 4. 获取源码目录下的所有源码文件
-#set(test_files "")
-#aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
-## 5. 声明目标及依赖
-#add_executable(${test_client} ${test_files} ${proto_srcs})
-#
-#target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
+set(test_client "message_client")
+# 4. 获取源码目录下的所有源码文件
+set(test_files "")
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
+# 5. 声明目标及依赖
+add_executable(${test_client} ${test_files} ${proto_srcs})
+
+target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
 
 # 6. 设置头文件默认搜索路径
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -83,4 +83,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../odb)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 # 7. 设置需要连接的库
 # 8. 设置安装路径
-INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)
+INSTALL(TARGETS ${target} ${test_client} RUNTIME DESTINATION bin)
