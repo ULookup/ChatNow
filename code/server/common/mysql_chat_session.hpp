@@ -48,6 +48,29 @@ public:
         }
         return true;
     }
+    /* brief: 单聊会话的删除 -- 根据单聊会话的两个成员 */
+    bool remove(const std::string &uid, const std::string &pid) {
+        try {
+            odb::transaction trans(_db->begin());
+            
+            typedef odb::query<SingleChatSession> query;
+            auto res = _db->query_one<SingleChatSession>(query::csm1::user_id == uid && 
+                                                        query::csm2::user_id == pid &&
+                                                        query::css::chat_session_type == ChatSessionType::SINGLE);
+            std::string cssid = res->chat_session_id;
+            //step2: 删除会话成员里的对应数据
+            typedef odb::query<ChatSession> cquery;
+            _db->erase_query<ChatSession>(cquery::chat_session_id == cssid);
+            typedef odb::query<ChatSessionMember> mquery;
+            _db->erase_query<ChatSessionMember>(mquery::session_id == cssid);
+
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("删除会话失败 {}-{}: {}", uid, pid, e.what());
+            return false;
+        }
+        return true;
+    }
     std::shared_ptr<ChatSession> select(const std::string &ssid) {
         std::shared_ptr<ChatSession> res;
         try {
