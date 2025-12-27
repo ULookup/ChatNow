@@ -123,7 +123,7 @@ public:
             }
             service = sit->second;
         }
-        LOG_DEBUG("{} - {} 服务下线节点，进行删除管理");
+        LOG_DEBUG("{} - {} 服务下线节点，进行删除管理", service_name, host);
         service->remove(host);
     }
 private:
