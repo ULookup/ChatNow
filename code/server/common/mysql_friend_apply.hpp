@@ -30,6 +30,24 @@ public:
         }
         return true;
     }
+    /* brief: 判断是否已存在申请 */
+    bool exists(const std::string &uid, const std::string &pid) {
+        typedef odb::query<FriendApply> query;
+        typedef odb::result<FriendApply> result;
+        result r;
+        bool flag = false;
+        try {
+            odb::transaction trans(_db->begin());
+
+            r = _db->query<FriendApply>(query::user_id == uid && query::peer_id == pid);
+            flag = !r.empty();
+            
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("获取好友申请事件失败: {} - {}: {}", uid, pid, e.what());
+        }
+        return flag;
+    }
     /* brief: 删除好友申请 */
     bool remove(const std::string &uid, const std::string &pid) {
         try {
