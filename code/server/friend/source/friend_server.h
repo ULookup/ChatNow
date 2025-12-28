@@ -38,20 +38,6 @@ public:
                     _message_service_name(message_service_name),
                     _mm_channels(channel_manager) {}
     ~FriendServiceImpl() = default;
-    /* brief: 用户注册 */
-    virtual void UserRegister(::google::protobuf::RpcController* controller,
-                        const ::chatnow::UserRegisterReq* request,
-                        ::chatnow::UserRegisterRsp* response,
-                        ::google::protobuf::Closure* done)
-    {
-        brpc::ClosureGuard rpc_guard(done);
-        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
-            response->set_request_id(rid);
-            response->set_success(false);
-            response->set_errmsg(err_msg);
-            return;
-        };
-    }
     /* brief: 获取好友列表 */
     virtual void GetFriendList(::google::protobuf::RpcController* controller,
                         const ::chatnow::GetFriendListReq* request,
@@ -76,10 +62,12 @@ public:
         }
         //3. 从用户子服务批量获取用户信息
         std::unordered_map<std::string, UserInfo> user_list;
-        bool ret = GetUserInfo(rid, user_id_list, user_list);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 批量获取用户信息失败", rid);
-            return err_response(rid, "批量获取用户信息失败");
+        if(!user_id_list.empty()) {
+            bool ret = GetUserInfo(rid, user_id_list, user_list);
+            if(ret == false) {
+                LOG_ERROR("请求ID - {} 批量获取用户信息失败", rid);
+                return err_response(rid, "批量获取用户信息失败");
+            }
         }
         //4. 组织响应
         response->set_request_id(rid);
@@ -198,6 +186,11 @@ public:
         //4. 如果结果是同意：向数据库新增好友关系信息；新增单聊会话信息及会话成员
         std::string cssid;
         if(agree == true) {
+            ret = _mysql_relation->insert(uid, pid);
+            if(ret == false) {
+                LOG_ERROR("请求ID - {} 新增好友关系信息 {} - {} 失败", rid, uid, pid);
+                return err_response(rid, "新增好友关系信息失败");
+            }
             cssid = uuid();
             ChatSession cs(cssid, "", ChatSessionType::SINGLE);
             ret = _mysql_chat_session->insert(cs);
@@ -238,7 +231,8 @@ public:
         std::string skey = request->search_key();
         //2. 根据获取到的用户ID，从用户子服务器进行批量用户信息获取
         auto friend_id_list = _mysql_relation->friends(uid);
-        //2. 从ES搜索引擎进行用户信息搜索 -- 过滤掉当前好友
+        friend_id_list.push_back(uid);
+        //2. 从ES搜索引擎进行用户信息搜索 -- 过滤掉当前好友 和 自己
         std::unordered_set<std::string> user_id_list;
         auto search_res = _es_user->search(skey, friend_id_list);
         for(auto &it : search_res) {
