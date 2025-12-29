@@ -32,7 +32,10 @@ public:
                     _redis_codes(std::make_shared<Codes>(redis_client)),
                     _mail_client(std::make_shared<MailClient>(mail_client->settings())),
                     _file_service_name(file_service_name),
-                    _mm_channels(channel_manager) {}
+                    _mm_channels(channel_manager) 
+    {
+        _es_user->create_index();
+    }
     ~UserServiceImpl() = default;
     bool nickname_check(const std::string &nickname) { return nickname.size() < 22; }
     bool password_check(const std::string &password) {
