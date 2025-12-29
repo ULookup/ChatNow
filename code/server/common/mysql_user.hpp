@@ -91,6 +91,9 @@ public:
     std::vector<User> select_multi_users(const std::vector<std::string> &id_list) {
         // selcet * from user where id in ('id1', '1d2', ...)
         std::vector<User> res;
+        if(id_list.empty()) {
+            return res;
+        }
         try {
             //获取事务对象，开启事务
             odb::transaction trans(_db->begin());
