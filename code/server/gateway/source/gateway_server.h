@@ -3,6 +3,8 @@
 #include <brpc/server.h>
 #include <butil/logging.h>
 
+#include "httplib.h"
+
 #include "data_redis.hpp"
 #include "etcd.hpp"
 #include "logger.hpp"
@@ -19,6 +21,7 @@
 #include "message.pb.h"
 #include "friend.pb.h"
 #include "gateway.pb.h"
+#include "notify.pb.h"
 
 namespace chatnow
 {
@@ -56,6 +59,8 @@ namespace chatnow
 class GatewayServer
 {
 public:
+    using ptr = std::shared_ptr<GatewayServer>;
+
     GatewayServer(int websocket_port, 
                 int http_port,
                 const std::shared_ptr<sw::redis::Redis> &redis_client,
@@ -68,7 +73,7 @@ public:
                 const std::string &message_service_name,
                 const std::string &friend_service_name)
         : _redis_session(std::make_shared<Session>(redis_client)),
-        _redis_status(std::make_shared<Status>(redis_client),
+        _redis_status(std::make_shared<Status>(redis_client)),
         _mm_channels(channels),
         _service_discoverer(service_discoverer),
         _speech_service_name(speech_service_name),
@@ -76,59 +81,60 @@ public:
         _user_service_name(user_service_name),
         _transmite_service_name(transmite_service_name),
         _message_service_name(message_service_name),
-        _friend_service_name(friend_service_name)) 
+        _friend_service_name(friend_service_name),
+        _connections(std::make_shared<Connection>())
     {
         //1. 搭建websocket服务器
         _ws_server.set_access_channels(websocketpp::log::alevel::none);
         _ws_server.init_asio();
-        _ws_server.set_open_handler(&GatewayServer::onOpen);
-        _ws_server.set_close_handler(&GatewayServer::onClose);
-        auto ws_callback = std::bind(&GatewayServer::OnMessage, this, std::placeholders::_1, std::placeholders::_2);
+        _ws_server.set_open_handler(std::bind(&GatewayServer::onOpen, this, std::placeholders::_1));
+        _ws_server.set_close_handler(std::bind(&GatewayServer::onClose, this, std::placeholders::_1));
+        auto ws_callback = std::bind(&GatewayServer::onMessage, this, std::placeholders::_1, std::placeholders::_2);
         _ws_server.set_message_handler(ws_callback);
         _ws_server.set_reuse_addr(true);
         _ws_server.listen(websocket_port);
         _ws_server.start_accept();
 
         //2. 搭建http服务器
-        _http_server.Post(GET_MAIL_VERIFY_CODE,         std::bind(&GatewayServer::GetMailVerifyCode,         this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(USERNAME_REGISTER,            std::bind(&GatewayServer::UserRegister,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(USERNAME_LOGIN,               std::bind(&GatewayServer::UserLogin,                 this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(MAIL_REGISTER,                std::bind(&GatewayServer::MailRegister,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(MAIL_LOGIN,                   std::bind(&GatewayServer::MailLogin,                 this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_USER_INFO,                std::bind(&GatewayServer::GetUserInfo,               this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SET_AVATAR,                   std::bind(&GatewayServer::SetUserAvatar,             this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SET_NICKNAME,                 std::bind(&GatewayServer::SetUserNickname,           this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SET_DESCRIPTION,              std::bind(&GatewayServer::SetUserDescription,        this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SET_MAIL,                     std::bind(&GatewayServer::SetUserMailNumber,         this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_FRIEND_LIST,              std::bind(&GatewayServer::GetFriendList,             this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(ADD_FRIEND_APPLY,             std::bind(&GatewayServer::FriendAdd,                 this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(ADD_FRIEND_PROCESS,           std::bind(&GatewayServer::FriendAddProcess,          this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(REMOVE_FRIEND,                std::bind(&GatewayServer::FriendRemove,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SEARCH_FRIEND,                std::bind(&GatewayServer::FriendSearch,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_CHAT_SESSION_LIST,        std::bind(&GatewayServer::GetChatSessionList,        this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(CREATE_CHAT_SESSION,          std::bind(&GatewayServer::ChatSessionCreate,         this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_CHAT_SESSION_MEMBER,      std::bind(&GatewayServer::GetChatSessionMember,      this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_PENDING_FRIEND_EVENTS,    std::bind(&GatewayServer::GetPendingFriendEventList, this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_HISTORY,                  std::bind(&GatewayServer::GetHistoryMsg,             this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_RECENT,                   std::bind(&GatewayServer::GetRecentMsg,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SEARCH_HISTORY,               std::bind(&GatewayServer::MsgSearch,                 this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(NEW_MESSAGE,                  std::bind(&GatewayServer::GetTransmitTarget,         this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_SINGLE_FILE,              std::bind(&GatewayServer::GetSingleFile,             this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_MULTI_FILE,               std::bind(&GatewayServer::GetMultiFile,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(PUT_SINGLE_FILE,              std::bind(&GatewayServer::PutSingleFile,             this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(PUT_MULTI_FILE,               std::bind(&GatewayServer::PutMultiFile,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(RECOGNITION,                  std::bind(&GatewayServer::SpeechRecognition,         this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_MAIL_VERIFY_CODE,         (httplib::Server::Handler)std::bind(&GatewayServer::GetMailVerifyCode,         this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(USERNAME_REGISTER,            (httplib::Server::Handler)std::bind(&GatewayServer::UserRegister,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(USERNAME_LOGIN,               (httplib::Server::Handler)std::bind(&GatewayServer::UserLogin,                 this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MAIL_REGISTER,                (httplib::Server::Handler)std::bind(&GatewayServer::MailRegister,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MAIL_LOGIN,                   (httplib::Server::Handler)std::bind(&GatewayServer::MailLogin,                 this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_USER_INFO,                (httplib::Server::Handler)std::bind(&GatewayServer::GetUserInfo,               this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SET_AVATAR,                   (httplib::Server::Handler)std::bind(&GatewayServer::SetUserAvatar,             this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SET_NICKNAME,                 (httplib::Server::Handler)std::bind(&GatewayServer::SetUserNickname,           this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SET_DESCRIPTION,              (httplib::Server::Handler)std::bind(&GatewayServer::SetUserDescription,        this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SET_MAIL,                     (httplib::Server::Handler)std::bind(&GatewayServer::SetUserMailNumber,         this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_FRIEND_LIST,              (httplib::Server::Handler)std::bind(&GatewayServer::GetFriendList,             this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(ADD_FRIEND_APPLY,             (httplib::Server::Handler)std::bind(&GatewayServer::FriendAdd,                 this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(ADD_FRIEND_PROCESS,           (httplib::Server::Handler)std::bind(&GatewayServer::FriendAddProcess,          this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(REMOVE_FRIEND,                (httplib::Server::Handler)std::bind(&GatewayServer::FriendRemove,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SEARCH_FRIEND,                (httplib::Server::Handler)std::bind(&GatewayServer::FriendSearch,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_CHAT_SESSION_LIST,        (httplib::Server::Handler)std::bind(&GatewayServer::GetChatSessionList,        this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(CREATE_CHAT_SESSION,          (httplib::Server::Handler)std::bind(&GatewayServer::ChatSessionCreate,         this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_CHAT_SESSION_MEMBER,      (httplib::Server::Handler)std::bind(&GatewayServer::GetChatSessionMember,      this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_PENDING_FRIEND_EVENTS,    (httplib::Server::Handler)std::bind(&GatewayServer::GetPendingFriendEventList, this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_HISTORY,                  (httplib::Server::Handler)std::bind(&GatewayServer::GetHistoryMsg,             this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_RECENT,                   (httplib::Server::Handler)std::bind(&GatewayServer::GetRecentMsg,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SEARCH_HISTORY,               (httplib::Server::Handler)std::bind(&GatewayServer::MsgSearch,                 this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(NEW_MESSAGE,                  (httplib::Server::Handler)std::bind(&GatewayServer::NewMessage,                this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_SINGLE_FILE,              (httplib::Server::Handler)std::bind(&GatewayServer::GetSingleFile,             this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_MULTI_FILE,               (httplib::Server::Handler)std::bind(&GatewayServer::GetMultiFile,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(PUT_SINGLE_FILE,              (httplib::Server::Handler)std::bind(&GatewayServer::PutSingleFile,             this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(PUT_MULTI_FILE,               (httplib::Server::Handler)std::bind(&GatewayServer::PutMultiFile,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(RECOGNITION,                  (httplib::Server::Handler)std::bind(&GatewayServer::SpeechRecognition,         this, std::placeholders::_1, std::placeholders::_2));
 
         _http_thread = std::thread([this, http_port](){
             _http_server.listen("0.0.0.0", http_port);
-        })
+        });
         _http_thread.detach();
     }
     void start() {
         _ws_server.run();
     }
 private:
-    void onOpen(websocketpp::connection_hdl hd1) { LOG_DEBUG("WebSocket 长连接建立成功 {}", _ws_server.get_con_from_hdl(hdl).get()); }
+    void onOpen(websocketpp::connection_hdl hdl) { LOG_DEBUG("WebSocket 长连接建立成功 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get()); }
 
     void onClose(websocketpp::connection_hdl hdl) {
         LOG_DEBUG("WebSocket 长连接断开");
@@ -147,7 +153,7 @@ private:
         _redis_status->remove(uid);
         //3. 移除长连接管理数据
         _connections->remove(conn);
-        LOG_DEBUG("{} - {} - {} 长连接断开，清理缓存数据", conn->get(), uid, ssid);
+        LOG_DEBUG("{} - {} - {} 长连接断开，清理缓存数据", (size_t)conn.get(), uid, ssid);
     }
 
     void onMessage(websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
@@ -163,8 +169,8 @@ private:
             return;
         }
         //3. 在会话信息缓存中，查找会话信息
-        std::string ssid = request->session_id();
-        _redis_session->uid(ssid);
+        std::string ssid = request.session_id();
+        auto uid = _redis_session->uid(ssid);
         if(!uid) {
             //4. 会话信息不存在则关闭连接
             LOG_ERROR("长连接身份识别失败：未找到会话信息 {}", ssid);
@@ -173,17 +179,17 @@ private:
         }
         //5. 会话信息存在，则添加长连接管理
         _connections->insert(conn, *uid, ssid);
-        LOG_DEBUG("新增长连接管理: {} - {} - {}", conn.get(), *uid, ssid);
+        LOG_DEBUG("新增长连接管理: {} - {} - {}", (size_t)conn.get(), *uid, ssid);
     }
 
     void GetMailVerifyCode(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
         MailVerifyCodeReq req;
         MailVerifyCodeRsp rsp;
-        auto err_response = [&rso, &rsp, &response](const std::string &errmsg) -> void {
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_contetn(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -197,9 +203,10 @@ private:
             return err_response("未找到可提供业务的用户子服务节点");
         }
         UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
         stub.GetMailVerifyCode(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.Errortext());
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
@@ -210,10 +217,10 @@ private:
         //1. 取出http请求正文，将正文进行反序列化
         UserRegisterReq req;
         UserRegisterRsp rsp;
-        auto err_response = [&rso, &rsp, &response](const std::string &errmsg) -> void {
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_contetn(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -227,9 +234,10 @@ private:
             return err_response("未找到可提供业务的用户子服务节点");
         }
         UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
         stub.UserRegister(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.Errortext());
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
@@ -239,10 +247,10 @@ private:
         //1. 取出http请求正文，将正文进行反序列化
         UserLoginReq req;
         UserLoginRsp rsp;
-        auto err_response = [&rso, &rsp, &response](const std::string &errmsg) -> void {
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_contetn(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -256,9 +264,10 @@ private:
             return err_response("未找到可提供业务的用户子服务节点");
         }
         UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
         stub.UserLogin(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.Errortext());
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
@@ -268,10 +277,10 @@ private:
         //1. 取出http请求正文，将正文进行反序列化
         MailRegisterReq req;
         MailRegisterRsp rsp;
-        auto err_response = [&rso, &rsp, &response](const std::string &errmsg) -> void {
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_contetn(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -285,9 +294,10 @@ private:
             return err_response("未找到可提供业务的用户子服务节点");
         }
         UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
         stub.MailRegister(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.Errortext());
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
@@ -297,10 +307,10 @@ private:
         //1. 取出http请求正文，将正文进行反序列化
         MailLoginReq req;
         MailLoginRsp rsp;
-        auto err_response = [&rso, &rsp, &response](const std::string &errmsg) -> void {
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_contetn(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -314,37 +324,1012 @@ private:
             return err_response("未找到可提供业务的用户子服务节点");
         }
         UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
         stub.MailLogin(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.Errortext());
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
         response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
-    void GetUserInfo(const httplib::Request &request, httplib::Response &response);
-    void SetUserAvatar(const httplib::Request &request, httplib::Response &response);
-    void SetUserNickname(const httplib::Request &request, httplib::Response &response);
-    void SetUserDescription(const httplib::Request &request, httplib::Response &response);
-    void SetUserMailNumber(const httplib::Request &request, httplib::Response &response);
-    void GetFriendList(const httplib::Request &request, httplib::Response &response);
-    void FriendAdd(const httplib::Request &request, httplib::Response &response);
-    void FriendAddProcess(const httplib::Request &request, httplib::Response &response);
-    void FriendRemove(const httplib::Request &request, httplib::Response &response);
-    void FriendSearch(const httplib::Request &request, httplib::Response &response);
-    void GetChatSessionList(const httplib::Request &request, httplib::Response &response);
-    void ChatSessionCreate(const httplib::Request &request, httplib::Response &response);
-    void GetChatSessionMember(const httplib::Request &request, httplib::Response &response);
-    void GetPendingFriendEventList(const httplib::Request &request, httplib::Response &response);
-    void GetHistoryMsg(const httplib::Request &request, httplib::Response &response);
-    void GetRecentMsg(const httplib::Request &request, httplib::Response &response);
-    void MsgSearch(const httplib::Request &request, httplib::Response &response);
-    void GetTransmitTarget(const httplib::Request &request, httplib::Response &response);
-    void GetSingleFile(const httplib::Request &request, httplib::Response &response);
-    void GetMultiFile(const httplib::Request &request, httplib::Response &response);
-    void PutSingleFile(const httplib::Request &request, httplib::Response &response);
-    void PutMultiFile(const httplib::Request &request, httplib::Response &response);
-    void SpeechRecognition(const httplib::Request &request, httplib::Response &response);
+    void GetUserInfo(const httplib::Request &request, httplib::Response &response) {
+        //1. 取出http请求正文，将正文进行反序列化
+        GetUserInfoReq req;
+        GetUserInfoRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取用户信息请求正文反序列化失败");
+            return err_response("获取用户信息请求正文反序列化失败");
+        }
+        //2. 客户端身份识别与鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给用户子服务进行业务处理
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
+            return err_response("未找到可提供业务的用户子服务节点");
+        }
+        UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetUserInfo(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("用户子服务调用失败");
+        }
+        //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void SetUserAvatar(const httplib::Request &request, httplib::Response &response) {
+        //1. 取出http请求正文，将正文进行反序列化
+        SetUserAvatarReq req;
+        SetUserAvatarRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("设置用户头像请求正文反序列化失败");
+            return err_response("设置用户头像请求正文反序列化失败");
+        }
+        //2. 客户端身份识别与鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给用户子服务进行业务处理
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
+            return err_response("未找到可提供业务的用户子服务节点");
+        }
+        UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.SetUserAvatar(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("用户子服务调用失败");
+        }
+        //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void SetUserNickname(const httplib::Request &request, httplib::Response &response) {
+        //1. 取出http请求正文，将正文进行反序列化
+        SetUserNicknameReq req;
+        SetUserNicknameRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("设置用户昵称请求正文反序列化失败");
+            return err_response("设置用户昵称请求正文反序列化失败");
+        }
+        //2. 客户端身份识别与鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给用户子服务进行业务处理
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
+            return err_response("未找到可提供业务的用户子服务节点");
+        }
+        UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.SetUserNickname(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("用户子服务调用失败");
+        }
+        //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void SetUserDescription(const httplib::Request &request, httplib::Response &response) {
+        //1. 取出http请求正文，将正文进行反序列化
+        SetUserDescriptionReq req;
+        SetUserDescriptionRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("设置用户签名请求正文反序列化失败");
+            return err_response("设置用户签名请求正文反序列化失败");
+        }
+        //2. 客户端身份识别与鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给用户子服务进行业务处理
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
+            return err_response("未找到可提供业务的用户子服务节点");
+        }
+        UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.SetUserDescription(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("用户子服务调用失败");
+        }
+        //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void SetUserMailNumber(const httplib::Request &request, httplib::Response &response) {
+        //1. 取出http请求正文，将正文进行反序列化
+        SetUserMailNumberReq req;
+        SetUserMailNumberRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("设置用户邮箱请求正文反序列化失败");
+            return err_response("设置用户邮箱请求正文反序列化失败");
+        }
+        //2. 客户端身份识别与鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给用户子服务进行业务处理
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
+            return err_response("未找到可提供业务的用户子服务节点");
+        }
+        UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.SetUserMailNumber(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("用户子服务调用失败");
+        }
+        //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetFriendList(const httplib::Request &request, httplib::Response &response) {
+        //1. 取出http请求正文，将正文进行反序列化
+        GetFriendListReq req;
+        GetFriendListRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取好友列表请求正文反序列化失败");
+            return err_response("获取好友列表请求正文反序列化失败");
+        }
+        //2. 客户端身份识别与鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetFriendList(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //4. 得到好友子服务的响应后，将响应进行序列化作为http响应正文
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    std::shared_ptr<GetUserInfoRsp> _GetUserInfo(const std::string &rid, const std::string &uid) {
+        //1. 取出http请求正文，将正文进行反序列化
+        GetUserInfoReq req;
+        auto rsp = std::make_shared<GetUserInfoRsp>();
+        req.set_request_id(rid);
+        req.set_user_id(uid);
+        //3. 将请求转发给用户子服务进行业务处理
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
+            return std::shared_ptr<GetUserInfoRsp>();
+        }
+        UserService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetUserInfo(&cntl, &req, rsp.get(), nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return std::shared_ptr<GetUserInfoRsp>();
+        }
+        //4. 得到用户子服务的响应
+        return rsp;
+    }
+
+    void FriendAdd(const httplib::Request &request, httplib::Response &response) {
+        // 好友申请的业务处理中，好友子服务只是在数据库创建了申请事件
+        // 网关需要做的事件：当好友子服务将业务处理完毕后，如果处理成功 -- 需要通知被申请方
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        FriendAddReq req;
+        FriendAddRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("申请好友请求正文反序列化失败");
+            return err_response("申请好友请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.FriendAdd(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
+        auto conn = _connections->connection(*uid);
+        if(rsp.success() && conn) {
+            auto user_rsp = _GetUserInfo(req.request_id(), *uid);
+            if(!user_rsp) {
+                LOG_ERROR("请求ID - {} 获取当前客户端用户信息失败", req.request_id());
+                return err_response("获取当前客户端用户信息失败");
+            }
+            NotifyMessage notify;
+            notify.set_notify_type(NotifyType::FRIEND_ADD_APPLY_NOTIFY);
+            notify.mutable_friend_add_apply()->mutable_user_info()->CopyFrom(user_rsp->user_info());
+            conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void FriendAddProcess(const httplib::Request &request, httplib::Response &response) {
+        //好友申请处理
+        //1. 反序列化请求正文，提取要素：登录会话ID，处理结果，申请人
+        FriendAddProcessReq req;
+        FriendAddProcessRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("好友申请处理请求正文反序列化失败");
+            return err_response("好友申请处理请求正文反序列化失败");
+        }
+        //2. 客户端身份识别鉴权，并获取处理人用户ID
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.FriendAddProcess(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+
+
+        if(rsp.success()) {
+            auto process_user_rsp = _GetUserInfo(req.request_id(), *uid);
+            if(!process_user_rsp) {
+                LOG_ERROR("请求ID - {} 获取用户信息失败", req.request_id());
+                return err_response("获取用户信息失败");
+            }
+            auto apply_user_rsp = _GetUserInfo(req.request_id(), req.apply_user_id());
+            if(!apply_user_rsp) {
+                LOG_ERROR("请求ID - {} 获取用户信息失败", req.request_id());
+                return err_response("获取用户信息失败");
+            }
+            auto process_conn = _connections->connection(*uid);
+            auto apply_conn = _connections->connection(req.apply_user_id());
+            if(apply_conn) {
+                //4. 将处理结果给申请人进行通知
+                NotifyMessage notify;
+                notify.set_notify_type(NotifyType::FRIEND_ADD_PROCESS_NOTIFY);
+                auto process_result = notify.mutable_friend_process_result();
+                process_result->mutable_user_info()->CopyFrom(process_user_rsp->user_info());
+                process_result->set_agree(req.agree());
+                apply_conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            }
+            //5. 若处理结果是同意，需要创建有会话的通知
+            if(req.agree() && apply_conn) { // 对申请人的通知 -- 会话信息就是处理人信息
+                NotifyMessage notify;
+                notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
+                auto chat_session = notify.mutable_new_chat_session_info();
+                chat_session->mutable_chat_session_info()->set_single_chat_friend_id(*uid);
+                chat_session->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
+                chat_session->mutable_chat_session_info()->set_chat_session_name(process_user_rsp->user_info().nickname());
+                chat_session->mutable_chat_session_info()->set_avatar(process_user_rsp->user_info().avatar());
+                apply_conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            }
+            if(req.agree() && process_conn) { // 对处理人的通知 -- 会话信息就是申请人信息
+                NotifyMessage notify;
+                notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
+                auto chat_session = notify.mutable_new_chat_session_info();
+                chat_session->mutable_chat_session_info()->set_single_chat_friend_id(req.apply_user_id());
+                chat_session->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
+                chat_session->mutable_chat_session_info()->set_chat_session_name(apply_user_rsp->user_info().nickname());
+                chat_session->mutable_chat_session_info()->set_avatar(apply_user_rsp->user_info().avatar());
+                process_conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            }
+        }
+        //6. 对客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void FriendRemove(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        FriendRemoveReq req;
+        FriendRemoveRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("删除好友请求正文反序列化失败");
+            return err_response("删除好友请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.FriendRemove(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
+        auto conn = _connections->connection(req.peer_id());
+        if(rsp.success() && conn) {
+            NotifyMessage notify;
+            notify.set_notify_type(NotifyType::FRIEND_REMOVE_NOTIFY);
+            notify.mutable_friend_remove()->set_user_id(*uid);
+            conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void FriendSearch(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        FriendSearchReq req;
+        FriendSearchRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("用户搜索请求正文反序列化失败");
+            return err_response("用户搜索请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.FriendSearch(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetPendingFriendEventList(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetPendingFriendEventListReq req;
+        GetPendingFriendEventListRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取待处理好友申请请求正文反序列化失败");
+            return err_response("获取待处理好友申请请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetPendingFriendEventList(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetChatSessionList(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetChatSessionListReq req;
+        GetChatSessionListRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取聊天会话列表请求正文反序列化失败");
+            return err_response("获取聊天会话列表请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetChatSessionList(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetChatSessionMember(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetChatSessionMemberReq req;
+        GetChatSessionMemberRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取聊天会话成员列表请求正文反序列化失败");
+            return err_response("获取聊天会话成员列表请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetChatSessionMember(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void ChatSessionCreate(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        ChatSessionCreateReq req;
+        ChatSessionCreateRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("创建聊天会话请求正文反序列化失败");
+            return err_response("创建聊天会话请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给好友子服务进行业务处理
+        auto channel = _mm_channels->choose(_friend_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
+            return err_response("未找到可提供业务的好友子服务节点");
+        }
+        FriendService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.ChatSessionCreate(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("好友子服务调用失败");
+        }
+        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
+        if(rsp.success()) {
+            for(int i = 0; i < req.member_id_list_size(); ++i) {
+                auto conn = _connections->connection(req.member_id_list(i));
+                if(!conn) { continue; }
+                NotifyMessage notify;
+                notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
+                auto chat_session = notify.mutable_new_chat_session_info();
+                chat_session->mutable_chat_session_info()->CopyFrom(rsp.chat_session_info());
+                conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            }
+        }
+        //5. 向客户端进行响应
+        rsp.clear_chat_session_info();
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetHistoryMsg(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetHistoryMsgReq req;
+        GetHistoryMsgRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取历史消息请求正文反序列化失败");
+            return err_response("获取历史消息请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给消息存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_message_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的消息存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的消息存储子服务节点");
+        }
+        MsgStorageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetHistoryMsg(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("消息存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetRecentMsg(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetRecentMsgReq req;
+        GetRecentMsgRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取最近消息请求正文反序列化失败");
+            return err_response("获取最近消息请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给消息存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_message_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的消息存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的消息存储子服务节点");
+        }
+        MsgStorageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetRecentMsg(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("消息存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void MsgSearch(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        MsgSearchReq req;
+        MsgSearchRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("消息搜索请求正文反序列化失败");
+            return err_response("消息搜索请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给消息存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_message_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的消息存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的消息存储子服务节点");
+        }
+        MsgStorageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.MsgSearch(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("消息存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetSingleFile(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetSingleFileReq req;
+        GetSingleFileRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取单文件请求正文反序列化失败");
+            return err_response("获取单文件请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给文件存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_file_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的文件存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的文件存储子服务节点");
+        }
+        FileService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetSingleFile(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("文件存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void GetMultiFile(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        GetMultiFileReq req;
+        GetMultiFileRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("获取多文件请求正文反序列化失败");
+            return err_response("获取多文件请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给文件存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_file_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的文件存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的文件存储子服务节点");
+        }
+        FileService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetMultiFile(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("文件存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void PutSingleFile(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        PutSingleFileReq req;
+        PutSingleFileRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("上传单文件请求正文反序列化失败");
+            return err_response("上传单文件请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给文件存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_file_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的文件存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的文件存储子服务节点");
+        }
+        FileService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.PutSingleFile(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("文件存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void PutMultiFile(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        PutMultiFileReq req;
+        PutMultiFileRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("上传多文件请求正文反序列化失败");
+            return err_response("上传多文件请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给文件存储子服务进行业务处理
+        auto channel = _mm_channels->choose(_file_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的文件存储子服务节点", req.request_id());
+            return err_response("未找到可提供业务的文件存储子服务节点");
+        }
+        FileService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.PutMultiFile(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("文件存储子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void SpeechRecognition(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        SpeechRecognitionReq req;
+        SpeechRecognitionRsp rsp;
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("语音识别请求正文反序列化失败");
+            return err_response("语音识别请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给语音识别子服务进行业务处理
+        auto channel = _mm_channels->choose(_speech_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的语音识别子服务节点", req.request_id());
+            return err_response("未找到可提供业务的语音识别子服务节点");
+        }
+        SpeechService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.SpeechRecognition(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 语音识别子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("语音识别子服务调用失败");
+        }
+        //5. 向客户端进行响应
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void NewMessage(const httplib::Request &request, httplib::Response &response) {
+        //1. 正文反序列化，提取关键要素：登录会话ID
+        NewMessageReq req;
+        NewMessageRsp rsp;  //给客户端的响应
+        GetTransmitTargetRsp target_rsp; //给请求子服务的响应
+        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
+            rsp.set_success(false);
+            rsp.set_errmsg(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        bool ret = req.ParseFromString(request.body);
+        if(ret == false) {
+            LOG_ERROR("新消息请求正文反序列化失败");
+            return err_response("新消息请求正文反序列化失败");
+        }
+        //2. 客户端身份识别和鉴权
+        std::string ssid = req.session_id();
+        auto uid = _redis_session->uid(ssid);
+        if(!uid) {
+            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
+            return err_response("获取登录会话关联用户信息失败");
+        }
+        req.set_user_id(*uid);
+        //3. 将请求转发给消息转发子服务进行业务处理
+        auto channel = _mm_channels->choose(_transmite_service_name);
+        if(!channel) {
+            LOG_ERROR("请求ID - {} 未找到可提供业务的消息转发子服务节点", req.request_id());
+            return err_response("未找到可提供业务的消息转发子服务节点");
+        }
+        MsgTransmitService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        stub.GetTransmitTarget(&cntl, &req, &target_rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("请求ID - {} 消息转发子服务调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response("消息转发子服务调用失败");
+        }
+        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
+        if(target_rsp.success()) {
+            for(int i = 0; i < target_rsp.target_id_list_size(); ++i) {
+                auto conn = _connections->connection(target_rsp.target_id_list(i));
+                if(!conn) { continue; }
+                NotifyMessage notify;
+                notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
+                auto msg_info = notify.mutable_new_message_info();
+                msg_info->mutable_message_info()->CopyFrom(target_rsp.message());
+                conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            }
+        }
+        //5. 向客户端进行响应
+        rsp.set_request_id(req.request_id());
+        rsp.set_success(target_rsp.success());
+        rsp.set_errmsg(target_rsp.errmsg());
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
 private:
     Session::ptr _redis_session;
     Status::ptr _redis_status;
@@ -404,7 +1389,7 @@ public:
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
         auto del_cb = std::bind(&ServiceManager::onServiceOffline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
 
-        _service_discover = std::make_shared<Discovery>(reg_host, base_service_name, put_cb, del_cb);
+        _service_discoverer = std::make_shared<Discovery>(reg_host, base_service_name, put_cb, del_cb);
     }
     void make_server_object(int websocket_port, int http_port)
     {
@@ -416,7 +1401,7 @@ public:
             LOG_ERROR("还未初始化 Redis 客户端模块");
             abort();
         }
-        if(!_service_discover) {
+        if(!_service_discoverer) {
             LOG_ERROR("还未初始化服务发现模块");
             abort();
         } 
@@ -451,6 +1436,6 @@ private:
     std::string _friend_service_name;
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discoverer;
-}
+};
 
 }
