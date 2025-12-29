@@ -30,7 +30,7 @@ public:
 
         _uid_connections.insert(std::make_pair(uid, conn));
         _conn_clients.insert(std::make_pair(conn, Client(uid, ssid)));
-        LOG_DEBUG("新增长连接用户信息: {} - {} - {}", conn.get(), uid, ssid);
+        LOG_DEBUG("新增长连接用户信息: {} - {} - {}", (size_t)conn.get(), uid, ssid);
     }
 
     server_t::connection_ptr connection(const std::string &uid) {
@@ -50,7 +50,7 @@ public:
 
         auto it = _conn_clients.find(conn);
         if(it == _conn_clients.end()) {
-            LOG_ERROR("获取-未找到长连接 {} 对应的客户端信息", conn.get());
+            LOG_ERROR("获取-未找到长连接 {} 对应的客户端信息", (size_t)conn.get());
             return false;
         }
         LOG_DEBUG("获取长连接对应的客户端信息成功");
@@ -64,7 +64,7 @@ public:
 
         auto it = _conn_clients.find(conn);
         if(it == _conn_clients.end()) {
-            LOG_ERROR("删除-未找到长连接 {} 对应的客户端信息", conn.get());
+            LOG_ERROR("删除-未找到长连接 {} 对应的客户端信息", (size_t)conn.get());
             return;
         }
         LOG_ERROR("删除长连接对应的客户端信息成功");
