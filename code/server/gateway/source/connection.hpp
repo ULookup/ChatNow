@@ -67,7 +67,7 @@ public:
             LOG_ERROR("删除-未找到长连接 {} 对应的客户端信息", (size_t)conn.get());
             return;
         }
-        LOG_ERROR("删除长连接对应的客户端信息成功");
+        LOG_DEBUG("删除长连接对应的客户端信息成功");
         _uid_connections.erase(it->second.uid);
         _conn_clients.erase(it);
     }
