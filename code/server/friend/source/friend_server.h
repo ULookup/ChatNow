@@ -333,10 +333,7 @@ public:
             chat_session_info->set_avatar(user_list[f.friend_id].avatar());
             MessageInfo msg;
             ret = GetRecentMsg(rid, f.chat_session_id, msg);
-            if(ret == false) {
-                LOG_ERROR("请求ID - {} 获取会话消息失败", rid);
-                return err_response(rid, "获取会话消息失败");
-            }
+            if(ret == false) { continue; }
             chat_session_info->mutable_prev_message()->CopyFrom(msg);
         }
         for(const auto &f : group_chat_list) {
@@ -345,10 +342,7 @@ public:
             chat_session_info->set_chat_session_name(f.chat_session_name);
             MessageInfo msg;
             ret = GetRecentMsg(rid, f.chat_session_id, msg);
-            if(ret == false) {
-                LOG_ERROR("请求ID - {} 获取会话消息失败", rid);
-                return err_response(rid, "获取会话消息失败");
-            }
+            if(ret == false) { continue; }
             chat_session_info->mutable_prev_message()->CopyFrom(msg);
         }
         response->set_request_id(rid);
@@ -493,8 +487,9 @@ private:
             }
             if(rsp.msg_list_size() > 0) {
                 msg.CopyFrom(rsp.msg_list(0));
+                return true;
             }
-            return true;
+            return false;
         }
 private:
     ESUser::ptr _es_user;
