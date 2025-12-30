@@ -156,6 +156,15 @@ private:
         LOG_DEBUG("{} - {} - {} 长连接断开，清理缓存数据", (size_t)conn.get(), uid, ssid);
     }
 
+    void keepAlive(server_t::connection_ptr conn) {
+        if(!conn || conn->get_state() !=  websocketpp::session::state::value::open) {
+            LOG_DEBUG("非正常连接状态，结束连接保活");
+            return;
+        } 
+        conn->ping("");
+        _ws_server.set_timer(60000, std::bind(&GatewayServer::keepAlive, this, conn));
+    }
+
     void onMessage(websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
         // 收到第一条消息后，根据消息中的会话ID进行身份识别，将客户端长连接添加管理
         //1. 取出长连接对应的连接对象
@@ -180,6 +189,7 @@ private:
         //5. 会话信息存在，则添加长连接管理
         _connections->insert(conn, *uid, ssid);
         LOG_DEBUG("新增长连接管理: {} - {} - {}", (size_t)conn.get(), *uid, ssid);
+        keepAlive(conn);
     }
 
     void GetMailVerifyCode(const httplib::Request &request, httplib::Response &response) {
@@ -189,7 +199,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -210,7 +220,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
 
     void UserRegister(const httplib::Request &request, httplib::Response &response) {
@@ -220,7 +230,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -241,7 +251,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void UserLogin(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -250,7 +260,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -271,7 +281,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MailRegister(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -280,7 +290,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -301,7 +311,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MailLogin(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -310,7 +320,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -331,7 +341,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetUserInfo(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -340,7 +350,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -369,7 +379,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserAvatar(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -378,7 +388,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -407,7 +417,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserNickname(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -416,7 +426,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -445,7 +455,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserDescription(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -454,7 +464,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -483,7 +493,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserMailNumber(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -492,7 +502,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -521,7 +531,7 @@ private:
             return err_response("用户子服务调用失败");
         }
         //4. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetFriendList(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -530,7 +540,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -559,7 +569,7 @@ private:
             return err_response("好友子服务调用失败");
         }
         //4. 得到好友子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
 
     std::shared_ptr<GetUserInfoRsp> _GetUserInfo(const std::string &rid, const std::string &uid) {
@@ -594,7 +604,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -623,8 +633,9 @@ private:
             return err_response("好友子服务调用失败");
         }
         //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
-        auto conn = _connections->connection(*uid);
+        auto conn = _connections->connection(req.request_id());
         if(rsp.success() && conn) {
+            LOG_DEBUG("找到被申请人 {} 长连接, 对其进行好友申请通知", req.request_id());
             auto user_rsp = _GetUserInfo(req.request_id(), *uid);
             if(!user_rsp) {
                 LOG_ERROR("请求ID - {} 获取当前客户端用户信息失败", req.request_id());
@@ -636,7 +647,7 @@ private:
             conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void FriendAddProcess(const httplib::Request &request, httplib::Response &response) {
         //好友申请处理
@@ -646,7 +657,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -721,7 +732,7 @@ private:
             }
         }
         //6. 对客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void FriendRemove(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -730,7 +741,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -761,13 +772,14 @@ private:
         //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
         auto conn = _connections->connection(req.peer_id());
         if(rsp.success() && conn) {
+            LOG_DEBUG("对被删除人 {} 进行好友删除通知", req.peer_id());
             NotifyMessage notify;
             notify.set_notify_type(NotifyType::FRIEND_REMOVE_NOTIFY);
             notify.mutable_friend_remove()->set_user_id(*uid);
             conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void FriendSearch(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -776,7 +788,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -805,7 +817,7 @@ private:
             return err_response("好友子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetPendingFriendEventList(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -814,7 +826,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -843,7 +855,7 @@ private:
             return err_response("好友子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetChatSessionList(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -852,7 +864,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -881,7 +893,7 @@ private:
             return err_response("好友子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetChatSessionMember(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -890,7 +902,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -919,7 +931,7 @@ private:
             return err_response("好友子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void ChatSessionCreate(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -928,7 +940,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -970,7 +982,7 @@ private:
         }
         //5. 向客户端进行响应
         rsp.clear_chat_session_info();
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetHistoryMsg(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -979,7 +991,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1008,7 +1020,7 @@ private:
             return err_response("消息存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetRecentMsg(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1017,7 +1029,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1046,7 +1058,7 @@ private:
             return err_response("消息存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MsgSearch(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1055,7 +1067,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1084,7 +1096,7 @@ private:
             return err_response("消息存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetSingleFile(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1093,7 +1105,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1122,7 +1134,7 @@ private:
             return err_response("文件存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetMultiFile(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1131,7 +1143,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1160,7 +1172,7 @@ private:
             return err_response("文件存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void PutSingleFile(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1169,7 +1181,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1198,7 +1210,7 @@ private:
             return err_response("文件存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void PutMultiFile(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1207,7 +1219,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1236,7 +1248,7 @@ private:
             return err_response("文件存储子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SpeechRecognition(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1245,7 +1257,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1274,7 +1286,7 @@ private:
             return err_response("语音识别子服务调用失败");
         }
         //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void NewMessage(const httplib::Request &request, httplib::Response &response) {
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -1284,7 +1296,7 @@ private:
         auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
             rsp.set_success(false);
             rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
         };
         bool ret = req.ParseFromString(request.body);
         if(ret == false) {
@@ -1315,7 +1327,9 @@ private:
         //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
         if(target_rsp.success()) {
             for(int i = 0; i < target_rsp.target_id_list_size(); ++i) {
-                auto conn = _connections->connection(target_rsp.target_id_list(i));
+                std::string notify_uid = target_rsp.target_id_list(i);
+                if(notify_uid == *uid) continue; //不通知自己
+                auto conn = _connections->connection(notify_uid);
                 if(!conn) { continue; }
                 NotifyMessage notify;
                 notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
@@ -1328,7 +1342,7 @@ private:
         rsp.set_request_id(req.request_id());
         rsp.set_success(target_rsp.success());
         rsp.set_errmsg(target_rsp.errmsg());
-        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
 private:
     Session::ptr _redis_session;
