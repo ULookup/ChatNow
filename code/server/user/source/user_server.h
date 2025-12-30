@@ -151,6 +151,8 @@ public:
         //4. 构造会话ID，生成会话键值对，向 redis 中添加会话信息以及登录标记信息
         std::string ssid = uuid();
         _redis_session->append(ssid, user->user_id());
+        // 添加用户登录信息
+        _redis_status->append(user->user_id());
         //5. 组织响应，返回生成的会话ID
         response->set_request_id(request->request_id());
         response->set_login_session_id(ssid);
@@ -297,6 +299,8 @@ public:
         //6. 构造会话 ID，生成会话键值对，向redis添加会话信息以及登录标记信息
         std::string ssid = uuid();
         _redis_session->append(ssid, user->user_id());
+        // 添加用户登录信息
+        _redis_status->append(user->user_id());
         //7. 组织响应，返回生成的会话ID
         response->set_request_id(request->request_id());
         response->set_login_session_id(ssid);
