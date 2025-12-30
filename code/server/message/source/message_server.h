@@ -55,6 +55,11 @@ public:
         boost::posix_time::ptime etime = boost::posix_time::from_time_t(request->over_time());
         //2. 从数据库中进行消息查询
         auto msg_list = _mysql_message_table->range(chat_ssid, stime, etime);
+        if(msg_list.empty()) {
+            response->set_request_id(rid);
+            response->set_success(true);
+            return;
+        }
         //3. 统计所有文件类型消息的文件ID，并从文件子服务进行批量文件下载
         std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
@@ -134,7 +139,14 @@ public:
         std::string chat_ssid = request->chat_session_id();
         int msg_count = request->msg_count();
         //2. 从数据库获取最近的消息元信息
+        LOG_DEBUG("需要获取的最近消息数量: {}", msg_count);
         auto msg_list = _mysql_message_table->recent(chat_ssid, msg_count);
+        if(msg_list.empty()) {
+            response->set_request_id(rid);
+            response->set_success(true);
+            return;
+        }
+        LOG_DEBUG("获取到的最近消息数量: {}", msg_list.size());
         //3. 组织消息中所有文件消息的文件ID，并从文件子服务进行文件下载
         std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
@@ -170,15 +182,18 @@ public:
             message_info->mutable_sender()->CopyFrom(user_list[msg.user_id()]);
             switch(msg.message_type()) {
                 case MessageType::STRING:
+                    LOG_DEBUG("消息是字符消息, 组织响应, 内容大小: {}", file_data_list[msg.file_id()].size());
                     message_info->mutable_message()->set_message_type(MessageType::STRING);
                     message_info->mutable_message()->mutable_string_message()->set_content(msg.content());
                     break;
                 case MessageType::IMAGE:
+                    LOG_DEBUG("消息是图像消息, 组织响应, 内容大小: {}", file_data_list[msg.file_id()].size());
                     message_info->mutable_message()->set_message_type(MessageType::IMAGE);
                     message_info->mutable_message()->mutable_image_message()->set_file_id(msg.file_id());
                     message_info->mutable_message()->mutable_image_message()->set_image_content(file_data_list[msg.file_id()]);
                     break;
                 case MessageType::FILE:
+                    LOG_DEBUG("消息是文件消息, 组织响应, 内容大小: {}", file_data_list[msg.file_id()].size());
                     message_info->mutable_message()->set_message_type(MessageType::FILE);
                     message_info->mutable_message()->mutable_file_message()->set_file_id(msg.file_id());
                     message_info->mutable_message()->mutable_file_message()->set_file_size(msg.file_size());
@@ -186,9 +201,10 @@ public:
                     message_info->mutable_message()->mutable_file_message()->set_file_contents(file_data_list[msg.file_id()]);
                     break;
                 case MessageType::SPEECH:
-                    message_info->mutable_message()->set_message_type(MessageType::FILE);
-                    message_info->mutable_message()->mutable_file_message()->set_file_id(msg.file_id());
-                    message_info->mutable_message()->mutable_file_message()->set_file_contents(file_data_list[msg.file_id()]);
+                    LOG_DEBUG("消息是语音消息, 组织响应, 内容大小: {}", file_data_list[msg.file_id()].size());
+                    message_info->mutable_message()->set_message_type(MessageType::SPEECH);
+                    message_info->mutable_message()->mutable_speech_message()->set_file_id(msg.file_id());
+                    message_info->mutable_message()->mutable_speech_message()->set_file_contents(file_data_list[msg.file_id()]);
                     break;
                 default:
                     LOG_ERROR("消息类型错误");
@@ -216,6 +232,11 @@ public:
         std::string skey = request->search_key();
         //2. 从ES搜索引擎进行关键字消息搜索，得到消息列表
         auto msg_list = _es_client->search(skey, chat_ssid);
+        if(msg_list.empty()) {
+            response->set_request_id(rid);
+            response->set_success(true);
+            return;
+        }
         //3. 组织所有消息的用户ID，从用户子服务获取用户信息
         std::unordered_set<std::string> user_id_list;
         for(const auto &msg : msg_list) {
