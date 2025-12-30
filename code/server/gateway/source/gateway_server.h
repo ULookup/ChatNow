@@ -26,7 +26,7 @@
 namespace chatnow
 {
 
-#define GET_MAIL_VERIFY_CODE        "/server/user/get_mail_verify_code"
+#define GET_MAIL_VERIFY_CODE        "/service/user/get_mail_verify_code"
 #define USERNAME_REGISTER           "/service/user/username_register"             //用户名密码注册 
 #define USERNAME_LOGIN              "/service/user/username_login"                //用户名密码登录 
 #define MAIL_REGISTER               "/service/user/mail_register"                 //邮箱号码注册 
