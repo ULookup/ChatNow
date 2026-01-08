@@ -9,6 +9,11 @@
 namespace chatnow
 {
 
+enum class MessageStatus : unsigned char {
+    NORMAL  = 0,
+    REVOKED = 1
+};
+
 #pragma db object table("message")
 class Message
 {
@@ -18,8 +23,14 @@ public:
             const std::string &ssid,
             const std::string &uid,
             const unsigned char mtype,
-            const boost::posix_time::ptime &create_time)
-            : _message_id(mid), _session_id(ssid), _user_id(uid), _message_type(mtype), _create_time(create_time) {}
+            const boost::posix_time::ptime &create_time,
+            const MessageStatus status)
+            : _message_id(mid), 
+            _session_id(ssid), 
+            _user_id(uid),
+            _message_type(mtype), 
+            _create_time(create_time),
+            _status(status) {}
     
     std::string message_id() const { return _message_id; }
     void message_id(const std::string &message_id) { _message_id = message_id; }
@@ -67,6 +78,19 @@ public:
         return *_file_size; 
     }
     void file_size(unsigned char file_size) { _file_size = file_size; }
+
+    // ================== 消息状态 ======================
+
+    MessageStatus status() const { return _status; }
+    void status(const MessageStatus status) { _status = status; }
+
+    boost::posix_time::ptime revoke_time() const {  
+        if(!_revoke_time) {
+            return boost::posix_time::ptime();
+        }
+        return *_revoke_time;
+    }
+    void revoke_time(const boost::posix_time::ptime &revoke_time) { _revoke_time = revoke_time; }
 private:
     friend class odb::access;
 
@@ -88,6 +112,12 @@ private:
     #pragma db type("varchar(128)") 
     odb::nullable<std::string> _file_name;         // 文件消息的文件名称--文本消息可忽略
     odb::nullable<unsigned int> _file_size;        // 文件消息的文件大学--文本消息可忽略 
+
+    //=======消息状态=======
+    #pragma db type("tinyint")
+    MessageStatus _status {MessageStatus::NORMAL};
+    #pragma db tyoe("TIMESTAMP")
+    odb::nullable<boost::posix_time::ptime> _revoke_time; 
 };
 
 }
