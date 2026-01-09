@@ -22,7 +22,7 @@ public:
                 const std::string &ssname, 
                 const ChatSessionType sstype,
                 const boost::posix_time::ptime &create_time,
-                const std::string &last_message_id,
+                const unsigned long last_message_id,
                 const boost::posix_time::ptime &last_message_time,
                 int member_count,
                 int status)
@@ -47,8 +47,8 @@ public:
     boost::posix_time::ptime create_time() const { return _create_time; }
     void create_time(const boost::posix_time::ptime &create_time) { _create_time = create_time; }
 
-    std::string last_message_id() const { return _last_message_id; }
-    void last_message_id(const std::string &last_message_id) { _last_message_id = last_message_id; }
+    unsigned long last_message_id() const { return _last_message_id; }
+    void last_message_id(const unsigned long last_message_id) { _last_message_id = last_message_id; }
 
     boost::posix_time::ptime last_message_time() const { return _last_message_time; }
     void last_message_time(const boost::posix_time::ptime &last_message_time) { _last_message_time = last_message_time; }
@@ -70,8 +70,8 @@ private:
     ChatSessionType _chat_session_type; // 1-SINGLE-单聊; 2-GROUP-群聊
     #pragma db type("TIMESTAMP")
     boost::posix_time::ptime _create_time; // 聊天会话创建时间
-    #pragma db type("varchar(64)")
-    std::string _last_message_id;                   //最近一次消息id
+    #pragma db type("bigint")
+    unsigned long _last_message_id;                   //最近一次消息id
     #pragma db type("TIMESTAMP")
     boost::posix_time::ptime _last_message_time;    //最近一次消息时间
     #pragma db type("int")
