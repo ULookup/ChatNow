@@ -1,3 +1,5 @@
+#pragma once
+
 #include <cstddef>
 #include <string>
 #include <odb/nullable.hxx>
@@ -8,15 +10,13 @@ namespace chatnow
 {
 
 #pragma db object table("user_timeline")
-#pragma db index("idx_user_msg") members(_user_id, _message_id)
-#pragma db index("idx_user_session_msg") members(_user_id, _session_id, _message_id)
 class UserTimeline
 {
 public:
     UserTimeline() = default;
     UserTimeline(const std::string &uid,
                 const std::string &sid,
-                const std::string &msgid,
+                const unsigned long msgid,
                 const boost::posix_time::ptime &msgtime)
         : _user_id(uid), _session_id(sid), _message_id(msgid), _message_time(msgtime) {}
 
@@ -26,8 +26,8 @@ public:
     std::string session_id() const { return _session_id; }
     void session_id(const std::string &session_id) { _session_id = session_id; }
 
-    std::string message_id() const { return _message_id; }
-    void message_id(const std::string &message_id) { _message_id = message_id; }
+    unsigned long message_id() const { return _message_id; }
+    void message_id(const unsigned long message_id) { _message_id = message_id; }
 
     boost::posix_time::ptime message_time() const { return _message_time; }
     void message_time(const boost::posix_time::ptime &message_time) { _message_time = message_time; }
@@ -43,11 +43,14 @@ private:
     std::string _user_id;
     #pragma db type("varchar(64)")
     std::string _session_id;
-    #pragma db type("varchar(64)")
-    std::string _message_id;
+    #pragma db type("bigint")
+    unsigned long _message_id;
 
     #pragma db type("TIMESTAMP")
     boost::posix_time::ptime _message_time;
+
+    #pragma db index("idx_user_msg") members(_user_id, _message_id)
+    #pragma db index("idx_user_session_msg") members(_user_id, _session_id, _message_id)
 }; // classs UserTimeline
 
 } // namespace chatnow
