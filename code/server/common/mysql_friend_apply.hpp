@@ -64,7 +64,7 @@ public:
         }
         return true;
     }
-    /* brief: 获取好友申请 */
+    /* brief: 获取好友申请(可以被 select 完全替代) */
     std::vector<std::string> apply_users(const std::string &uid) {
         std::vector<std::string> res;
         try {
@@ -81,6 +81,44 @@ public:
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("通过用户ID: {} 获取所有好友申请发起者失败: {}", uid, e.what());
+        }
+        return res;
+    }
+    //====================================================================================
+    //=======================================V2.0=========================================
+    //====================================================================================
+    /* brief: 更新申请状态 */
+    bool update(const std::shared_ptr<FriendApply> &friend_apply) {
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            _db->update(*friend_apply);
+
+            trans.commit(); // 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("更新好友申请状态失败: {}-{}:{}", friend_apply->user_id(), friend_apply->peer_id(), e.what());
+            return false;
+        }
+        return true;
+    }
+    /* brief: 获取申请信息 */
+    std::vector<FriendApply> select(const std::string &uid) {
+        std::vector<FriendApply> res;
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            using query  = odb::query<FriendApply>;
+            using result = odb::result<FriendApply>;
+
+            result r(_db->query<FriendApply>((query::peer_id == uid) && (query::status == chatnow::FriendApplyStatus::PENDING)));
+
+            for(result::iterator i(r.begin()); i != r.end(); ++i) {
+                res.push_back(*i);
+            }
+
+            trans.commit(); // 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("获取申请信息失败 {}:{}", uid, e.what());
         }
         return res;
     }
