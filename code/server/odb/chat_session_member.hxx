@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <odb/nullable.hxx>
 #include <odb/core.hxx>
+#include <boost/date_time/posix_time/posix_time.hpp>
 
 namespace chatnow
 {
@@ -15,15 +16,12 @@ enum class ChatSessionRole {
 };
     
 #pragma db object table("chat_session_member")
-#pragma db index("idx_session_user") unique members(_session_id, _user_id)
-#pragma db index("idx_user_session") members(_user_id, _session_id)
 class ChatSessionMember
 {
 public:
     ChatSessionMember() = default;
     ChatSessionMember(const std::string &ssid, 
                     const std::string &uid,
-                    const std::string &last_read_msg,
                     unsigned int unread_count,
                     bool muted,
                     bool visible,
@@ -31,7 +29,6 @@ public:
                     const boost::posix_time::ptime &join_time) 
         : _session_id(ssid), 
         _user_id(uid), 
-        _last_read_msg(last_read_msg),
         _unread_count(unread_count),
         _muted(muted),
         _visible(visible),
@@ -44,8 +41,13 @@ public:
     std::string user_id() { return _user_id; }
     void user_id(const std::string &uid) { _user_id = uid; }
 
-    std::string last_read_msg() const { return _last_read_msg; }
-    void last_read_msg(const std::string &last_read_msg) { _last_read_msg = last_read_msg; }
+    unsigned long last_read_msg() const { 
+        if(!_last_read_msg) {
+            return 0;
+        }
+        return *_last_read_msg; 
+    }
+    void last_read_msg(const unsigned long last_read_msg) { _last_read_msg = last_read_msg; }
 
     unsigned int unread_count() const { return _unread_count; }
     void unread_count(int unread_count) { _unread_count = unread_count; }
@@ -81,8 +83,8 @@ private:
     //=================================
     //===========状态字段===============
     //=================================
-    #pragma db type("varchat(64)")
-    std::string _last_read_msg {0};      // 最后一次读到的消息id，用作这个会话的游标
+    #pragma db type("bigint")
+    odb::nullable<unsigned long> _last_read_msg;      // 最后一次读到的消息id，用作这个会话的游标
 
     #pragma db type("int")
     unsigned int _unread_count {0};      // 未读消息数
@@ -101,6 +103,9 @@ private:
 
     #pragma db type("TIMESTAMP")
     boost::posix_time::ptime _join_time; // 该成员加入该会话时间
+
+    #pragma db index("idx_session_user") unique members(_session_id, _user_id)
+    #pragma db index("idx_user_session") members(_user_id, _session_id)
 };
 
 } // namespace chatnow
