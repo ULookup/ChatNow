@@ -98,6 +98,61 @@ public:
         }
         return res;
     }
+    //=======================================================================================
+    //======================================= V2.0 ==========================================
+    //=======================================================================================
+    /* brief: 查找某会话是否存在某用户 */
+    bool exists(const std::string &ssid, const std::string &uid) {
+        bool found = false;
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            using query  = odb::query<ChatSessionMember>;
+            using result = odb::result<ChatSessionMember>;
+
+            result r(_db->query<ChatSessionMember>((query::session_id == ssid && query::user_id == uid) +
+                                                    " LIMIT 1"));
+            
+            found = (r.begin() != r.end());
+
+            trans.commit(); // 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("判断会话成员是否存在失败 {}-{}:{}", ssid, uid, e.what());
+            return false;
+        }
+        return found;
+    }
+    /* brief: 查询会话成员 */
+    std::shared_ptr<ChatSessionMember> select(const std::string &ssid, const std::string &uid) {
+        std::shared_ptr<ChatSessionMember> res;
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            using query = odb::query<ChatSessionMember>;
+            using result = odb::result<ChatSessionMember>;
+
+            res.reset(_db->query_one<ChatSessionMember>(query::session_id == ssid && query::user_id == uid));
+
+            trans.commit(); // 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("查询会话用户失败: {}-{}:{}", ssid, uid, e.what());
+        }
+        return res;
+    }
+    /* brief: 更新会话成员 */
+    bool update(const std::shared_ptr<ChatSessionMember> &csm) {
+        try {
+            odb::transaction trans(_db->begin());// 获取事务对象，开启事务
+
+            _db->update(*csm);
+
+            trans.commit(); // 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("更新会话成员信息失败 {}-{}:{}", csm->session_id(), csm->user_id(), e.what());
+            return false;
+        }
+        return true;
+    }
 private:
     std::shared_ptr<odb::core::database> _db;
 };
