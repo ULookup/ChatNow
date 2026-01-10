@@ -71,6 +71,7 @@ public:
         }
         return true;
     }
+    /* brief: 通过会话ID获取会话信息 */
     std::shared_ptr<ChatSession> select(const std::string &ssid) {
         std::shared_ptr<ChatSession> res;
         try {
@@ -86,6 +87,7 @@ public:
         }
         return res;
     }
+    /* brief: 通过用户ID获取到他的单聊会话信息 */
     std::vector<SingleChatSession> singleChatSession(const std::string &uid) {
         std::vector<SingleChatSession> res;
         try {
@@ -105,6 +107,7 @@ public:
         }
         return res;
     }
+    /* brief: 通过用户ID获取到他的群聊会话信息*/
     std::vector<GroupChatSession> groupChatSession(const std::string &uid) {
         std::vector<GroupChatSession> res;
         try {
@@ -122,6 +125,68 @@ public:
             LOG_ERROR("获取用户 {} 群聊会话失败 {}:{}", uid, e.what());
         }
         return res;
+    }
+    //===============================================================
+    //========================== V2.0 ===============================
+    //===============================================================
+    /* brief: 判断是否已经存在单聊会话，防止重复创建（幂等性） */
+    bool singleExists(std::string &uid, std::string &pid) {
+        bool exists = false;
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            using query  = odb::query<SingleChatSession>;
+            using result = odb::result<SingleChatSession>;
+
+            result r(_db->query<SingleChatSession>((query::css::chat_session_type == ChatSessionType::SINGLE &&
+                                                    query::csm1::user_id == uid &&
+                                                    query::csm2::user_id == pid) +
+                                                    " LIMIT 1"));
+            exists = (r.begin() != r.end());
+
+            trans.commit(); // 结束事务，提交
+        } catch(std::exception &e) {
+            LOG_ERROR("判断是否存在单聊会话失败 {}-{}:{}", uid, pid, e.what());
+            return false;
+        }
+        return exists;
+    }
+    /* brief: 判断会话是否已经存在 */
+    bool exists(std::string &ssid) {
+        bool found = false;
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            using query  = odb::query<ChatSession>;
+            using result = odb::result<ChatSession>;
+
+            result r(_db->query<ChatSession>((query::chat_session_id == ssid) +
+                                            " LIMIT 1"));
+            
+            found = (r.begin() != r.end());
+
+            trans.commit(); // 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("判断会话是否存在失败 {}:{}", ssid, e.what());
+            return false;
+        }
+        return found;
+    }
+    /* brief: 更新会话（上层要做好鉴权） */
+    bool update(const std::shared_ptr<ChatSession> &chatsession) {
+        try {
+            using query = odb::query<ChatSession>;
+
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            _db->update(*chatsession); // 更新表
+
+            trans.commit(); //提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("更新会话信息失败: {}:{}", chatsession->chat_session_id(), e.what());
+            return false;
+        }
+        return true;
     }
 private:
     std::shared_ptr<odb::core::database> _db;
