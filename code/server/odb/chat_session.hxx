@@ -22,16 +22,12 @@ public:
                 const std::string &ssname, 
                 const ChatSessionType sstype,
                 const boost::posix_time::ptime &create_time,
-                const unsigned long last_message_id,
-                const boost::posix_time::ptime &last_message_time,
                 int member_count,
                 int status)
         : _chat_session_id(ssid), 
         _chat_session_name(ssname), 
         _chat_session_type(sstype),
         _create_time(create_time),
-        _last_message_id(last_message_id),
-        _last_message_time(last_message_time),
         _member_count(member_count),
         _status(status) {}
 
@@ -47,10 +43,20 @@ public:
     boost::posix_time::ptime create_time() const { return _create_time; }
     void create_time(const boost::posix_time::ptime &create_time) { _create_time = create_time; }
 
-    unsigned long last_message_id() const { return _last_message_id; }
+    unsigned long last_message_id() const { 
+        if(!_last_message_id) {
+            return 0;
+        }
+        return *_last_message_id; 
+    }
     void last_message_id(const unsigned long last_message_id) { _last_message_id = last_message_id; }
 
-    boost::posix_time::ptime last_message_time() const { return _last_message_time; }
+    boost::posix_time::ptime last_message_time() const { 
+        if(!_last_message_time) {
+            return boost::posix_time::ptime();
+        }
+        return *_last_message_time; 
+    }
     void last_message_time(const boost::posix_time::ptime &last_message_time) { _last_message_time = last_message_time; }
 
     int member_count() const { return _member_count; }
@@ -58,6 +64,14 @@ public:
 
     int status() const { return _status; }
     void status(int status) { _status = status; }
+
+    std::string avatar_id() const { 
+        if(!_avatar_id) {
+            return std::string();
+        }
+        return *_avatar_id;
+     }
+     void avatar_id(const std::string &avatar_id) { _avatar_id = avatar_id; }
 private:
     friend class odb::access;
     #pragma db id auto
@@ -71,13 +85,15 @@ private:
     #pragma db type("TIMESTAMP")
     boost::posix_time::ptime _create_time; // 聊天会话创建时间
     #pragma db type("bigint")
-    unsigned long _last_message_id;                   //最近一次消息id
+    odb::nullable<unsigned long> _last_message_id;                   //最近一次消息id
     #pragma db type("TIMESTAMP")
-    boost::posix_time::ptime _last_message_time;    //最近一次消息时间
+    odb::nullable<boost::posix_time::ptime> _last_message_time;    //最近一次消息时间
     #pragma db type("int")
     int _member_count;  //会话人员数量
     #pragma db type("tinyint")
-    int _status;    // NORMAL(正常会话) / ARCHIVED(只读会话) / DISMISSED(解散了的会话)
+    int _status;    // 0 NORMAL(正常会话) / 1 ARCHIVED(只读会话) / 2 DISMISSED(解散了的会话)
+    #pragma db type("varchar(64)") 
+    odb::nullable<std::string> _avatar_id; //用户头像文件ID，不一定存在   
 };
 
 // 这里的条件必须是指定条件: css::chat_session_type == 1 && csm1.user_id=uid && csm2.user_id != csm1.user_id
