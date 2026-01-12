@@ -121,4 +121,4 @@ struct GroupChatSession
     std::string chat_session_name;
 };
 
-}
+} // namespace chatnow
