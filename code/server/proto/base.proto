@@ -10,7 +10,21 @@ message UserInfo {
     string mail = 4; //绑定手机号 
     bytes avatar = 5;//头像照片，文件内容使用二进制 
 } 
- 
+
+/* brief: 聊天会话状态 */
+enum ChatSessionStatus {
+    NORMAL_SESSION    = 0;
+    ARCHIVED_SESSION  = 1;
+    DISMISSED_SESSION = 2;
+}
+
+//聊天会话成员权限（群聊用）
+enum ChatSessionMemberRole {
+    NORMAL_ROLE = 0;
+    ADMIN_ROLE  = 1;
+    OWNER_ROLE  = 2;
+}
+
 //聊天会话信息 
 message ChatSessionInfo { 
     //群聊会话不需要设置，单聊会话设置为对方用户 ID 
@@ -19,10 +33,37 @@ message ChatSessionInfo {
     string chat_session_name = 3;//会话名称 git 
     //会话上一条消息，新建的会话没有最新消息 
     optional MessageInfo prev_message = 4; 
-    //会话头像 --群聊会话不需要，直接由前端固定渲染，单聊就是对方的头像 
-    optional bytes avatar = 5; 
+    //会话头像
+    optional bytes avatar = 5;
+    //============ V2.0 ================= 
+    uint32 chat_session_type = 6;
+    int64 create_time = 7;   //会话创建时间
+    uint32 member_count = 8; //会话人员数量
+    ChatSessionStatus status = 9; //会话状态
+    optional ChatSessionMemberInfo member_info = 10; 
+}
+
+//聊天会话成员信息
+message ChatSessionMemberInfo { 
+    //所在会话ID
+    string chat_session_id = 1;
+    //自身ID
+    string user_id = 2;
+    optional uint64 last_message_id = 3;
+    int64 unread_count = 4;
+    bool is_muted = 5;
+    bool is_visible = 6;
+    optional int64 pin_time = 7;
+    ChatSessionMemberRole role = 8;
+    int64 join_time = 9;
 } 
- 
+
+// 成员-角色配对结构体
+message MemberRolePair {
+    string user_id = 1;
+    ChatSessionMemberRole role = 2;
+}
+
 //消息类型 
 enum MessageType { 
     STRING = 0; 
