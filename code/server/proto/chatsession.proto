@@ -1,0 +1,302 @@
+/* 
+ 聊天会话管理服务器的子服务注册信息： /service/chatsession/instance_id 
+ 服务名称：/service/chatsession 
+ 实例 ID: instance_id 每个能够提供用户操作服务的子服务器唯一 ID 
+ 当服务发现的时候，通过 /service/chatsession 进行服务发现，就可以发现所
+有的能够提供用户操作的实例信息了 
+*/ 
+syntax = "proto3"; 
+package chatnow; 
+import "base.proto"; 
+option cc_generic_services = true; 
+
+//==============================================================
+//======================== 会话相关操作 =========================
+//==============================================================
+//-------------------------------------- 
+//会话列表获取 
+message GetChatSessionListReq { 
+    string request_id = 1; 
+    optional string session_id = 2; 
+    optional string user_id = 3; 
+} 
+message GetChatSessionListRsp { 
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3; 
+    repeated ChatSessionInfo chat_session_info_list = 4; 
+} 
+//--------------------------------------
+// 获取单个会话的完整详情
+message GetChatSessionDetailReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+}
+message GetChatSessionDetailRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    optional ChatSessionInfo chat_session_info = 4;
+}
+//-------------------------------------- 
+//创建会话 
+message ChatSessionCreateReq { 
+    string request_id = 1; 
+    optional string session_id = 2; 
+    optional string user_id = 3; 
+    string chat_session_name = 4; 
+    //需要注意的是，这个列表中也必须包含创建者自己的用户 ID 
+    repeated string member_id_list = 5;
+} 
+message ChatSessionCreateRsp { 
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3; //这个字段属于后台之间的数据，给前端回复的时候不需要这个字段，会话信息通过通知进行发送 
+    optional ChatSessionInfo chat_session_info = 4; 
+} 
+//-------------------------------------- 
+//获取会话成员列表 
+message GetChatSessionMemberReq { 
+    string request_id = 1;  
+    optional string session_id = 2; 
+    optional string user_id = 3; 
+    string chat_session_id = 4; 
+} 
+message GetChatSessionMemberRsp { 
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3; 
+    repeated UserInfo member_info_list = 4; 
+} 
+//---------------------------------------
+//修改会话名称
+message SetChatSessionNameReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    string chat_session_name = 5;
+}
+message SetChatSessionNameRsp {
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3;
+    ChatSessionInfo chat_session_info = 4;     
+}
+//----------------------------------------
+//修改会话头像
+message SetChatSessionAvatarReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    bytes avatar = 5;
+}
+message SetChatSessionAvatarRsp {
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3;     
+    ChatSessionInfo chat_session_info = 4;     
+}
+//-----------------------------------------
+//添加会话成员(批量)
+message AddChatSessionMemberReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    repeated string member_id_list = 5;
+}
+message AddChatSessionMemberRsp {
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3;  
+    optional ChatSessionInfo chat_session_info = 4; //可以返回一个更新后的会话信息
+}
+//------------------------------------------
+// 移除会话成员（仅群主/管理员可操作）
+message RemoveChatSessionMemberReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    repeated string member_id_list = 5; // 要移除的成员ID列表
+}
+message RemoveChatSessionMemberRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    optional ChatSessionInfo chat_session_info = 4; // 返回更新后的会话（含最新成员数）
+}
+//------------------------------------------
+// 转让会话群主（仅当前群主可操作）
+message TransferChatSessionOwnerReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3; // 当前群主ID
+    string chat_session_id = 4;
+    string new_owner_id = 5; // 新群主ID
+}
+message TransferChatSessionOwnerRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    optional ChatSessionInfo chat_session_info = 4; // 返回更新后的会话（含新群主信息）
+}
+//------------------------------------------
+//修改会话成员权限
+message ModifyMemberPermissionReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    ChatSessionMemberRole role = 5;
+}
+message ModifyMemberPermissionRsp {
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3;  
+    optional ChatSessionInfo chat_session_info = 4; // 返回更新后的会话（含新群主信息）
+}
+//-------------------------------------------
+//修改会话状态
+message ModifyChatSessionStatusReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    ChatSessionStatus status = 5;
+}
+message ModifyChatSessionStatusRsp {
+    string request_id = 1; 
+    bool success = 2; 
+    string errmsg = 3;  
+    ChatSessionInfo chat_session_info = 4;     
+}
+//--------------------------------------------
+// 搜索会话（支持名称模糊匹配）
+message SearchChatSessionReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string search_key = 4; // 会话名称/ID关键词（模糊匹配）
+    optional uint32 session_type = 5; // 可选：筛选单聊/群聊
+}
+message SearchChatSessionRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    repeated ChatSessionInfo chat_session_list = 4; // 匹配的会话列表
+}
+//----------------------------------------------
+// 批量获取会话成员角色
+message GetMemberRoleListReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    repeated string member_id_list = 5;
+}
+message GetMemberRoleListRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    repeated MemberRolePair member_role_list = 4;
+}
+//=====================================================================
+//======================== 会话成员配置相关操作 =========================
+//=====================================================================
+//---------------------------------------------
+// 设置会话免打扰（对应表中`_muted`字段）
+message SetSessionMutedReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3; // 操作人ID
+    string chat_session_id = 4; // 目标会话ID
+    bool is_muted = 5; // true=开启免打扰，false=关闭
+}
+message SetSessionMutedRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    ChatSessionMemberInfo chat_session_member_info = 4;     
+}
+//---------------------------------------------
+// 设置会话置顶（对应表中`_pin_time`字段）
+message SetSessionPinnedReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    bool is_pinned = 5; // true=置顶，false=取消置顶
+}
+message SetSessionPinnedRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    ChatSessionMemberInfo chat_session_member_info = 4;     
+}
+//----------------------------------------------
+// 隐藏/显示会话（对应表中`_visible`字段）
+message SetSessionVisibleReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    bool is_visible = 5; // true=显示，false=隐藏
+}
+message SetSessionVisibleRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    ChatSessionMemberInfo chat_session_member_info = 4;     
+}
+//-----------------------------------------------
+// 获取用户在某会话的个人状态（如免打扰、未读、置顶）
+message GetUserSessionStatusReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+}
+message GetUserSessionStatusRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    ChatSessionMemberInfo chat_session_member_info = 4;
+}
+//------------------------------------------------
+// 退出会话（普通成员主动操作，群主不可退出，需先转让）
+message QuitChatSessionReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3; // 操作人ID
+    string chat_session_id = 4;  // 目标会话ID
+}
+message QuitChatSessionRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+}
+service ChatSessionService {
+    rpc GetChatSessionList(GetChatSessionListReq) returns (GetChatSessionListRsp); 
+    rpc GetChatSessionDetail(GetChatSessionDetailReq) returns (GetChatSessionDetailRsp);
+    rpc ChatSessionCreate(ChatSessionCreateReq) returns (ChatSessionCreateRsp); 
+    rpc GetChatSessionMember(GetChatSessionMemberReq) returns (GetChatSessionMemberRsp); 
+    rpc SetChatSessionName(SetChatSessionNameReq) returns (SetChatSessionNameRsp);
+    rpc SetChatSessionAvatar(SetChatSessionAvatarReq) returns (SetChatSessionAvatarRsp);
+    rpc AddChatSessionMember(AddChatSessionMemberReq) returns (AddChatSessionMemberRsp);
+    rpc RemoveChatSessionMember(RemoveChatSessionMemberReq) returns (RemoveChatSessionMemberRsp);
+    rpc TransferChatSessionOwner(TransferChatSessionOwnerReq) returns (TransferChatSessionOwnerRsp);
+    rpc ModifyMemberPermission(ModifyMemberPermissionReq) returns (ModifyMemberPermissionRsp);
+    rpc ModifyChatSessionStatus(ModifyChatSessionStatusReq) returns (ModifyChatSessionStatusRsp);
+    rpc SearchChatSession(SearchChatSessionReq) returns (SearchChatSessionRsp);
+    rpc GetMemberRoleList(GetMemberRoleListReq) returns (GetMemberRoleListRsp);
+    rpc SetSessionMuted(SetSessionMutedReq) returns (SetSessionMutedRsp);
+    rpc SetSessionPinned(SetSessionPinnedReq) returns (SetSessionPinnedRsp);
+    rpc SetSessionVisible(SetSessionVisibleReq) returns (SetSessionVisibleRsp);
+    rpc GetUserSessionStatus(GetUserSessionStatusReq) returns (GetUserSessionStatusRsp);
+    rpc QuitChatSession(QuitChatSessionReq) returns (QuitChatSessionRsp);
+}
