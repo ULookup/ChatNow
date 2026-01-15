@@ -8,7 +8,7 @@ set(test_client "chatsession_client")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files chatsession.proto base.proto)
+set(proto_files chatsession.proto user.proto message.proto file.proto base.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
