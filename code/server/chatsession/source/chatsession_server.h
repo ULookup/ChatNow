@@ -416,7 +416,7 @@ public:
         //2.2 鉴权
         if(csm->role() == ChatSessionRole::NORMAL) {
             LOG_ERROR("请求ID - {} 该用户 {} 没有权限移除会话成员", rid, uid);
-            err_response(rid, "该用户没有权限移除会话成员");
+            return err_response(rid, "该用户没有权限移除会话成员");
         }
         //3. 移除数据库中会话成员
         //3.1 查询出要删除的会话成员 
@@ -441,7 +441,48 @@ public:
                         ::chatnow::TransferChatSessionOwnerRsp* response,
                         ::google::protobuf::Closure* done)
     {
-
+        brpc::ClosureGuard rpc_guard(done);
+        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
+            response->set_request_id(rid);
+            response->set_success(false);
+            response->set_errmsg(err_msg);
+            return;
+        };
+        //1. 提取关键要素
+        std::string rid  = request->request_id();
+        std::string uid  = request->user_id();
+        std::string ssid = request->chat_session_id();
+        std::string new_owner_id = request->new_owner_id();
+        //2. 对操作鉴权
+        //2.1 取出用户在会话的信息
+        auto csm = _mysql_chat_session_member->select(ssid, uid);
+        if(!csm) {
+            LOG_ERROR("请求ID - {} 用户不在该会话中", rid);
+            return err_response(rid, "用户不在该会话中");
+        }
+        //2.2 鉴权
+        if(csm->role() != ChatSessionRole::OWNER) {
+            LOG_ERROR("请求ID - {} 该用户 {} 没有权限转让群主", rid, uid);
+            return err_response(rid, "该用户没有权限转让群主");
+        }
+        //3. 取出新群主在会话的信息
+        auto newcsm = _mysql_chat_session_member->select(ssid, new_owner_id);
+        if(!newcsm) {
+            LOG_ERROR("请求ID - {} 新群主不在该会话中", rid);
+            return err_response(rid, "新群主不在该会话中");
+        }
+        //4. 进行权限转换
+        csm->role(ChatSessionRole::ADMIN);
+        newcsm->role(ChatSessionRole::OWNER);
+        //5. 同步数据到数据库
+        bool ret = _mysql_chat_session_member->update({csm, newcsm});
+        if(ret == false) {
+            LOG_ERROR("请求ID - {} 同步转让数据到数据库失败");
+            return err_response(rid, "同步转让数据到数据库失败");
+        }
+        //6. 组织响应
+        response->set_request_id(rid);
+        response->set_success(true);
     }
     virtual void ModifyMemberPermission(::google::protobuf::RpcController* controller,
                         const ::chatnow::ModifyMemberPermissionReq* request,
