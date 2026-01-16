@@ -4,6 +4,8 @@
 #include "mysql.hpp"
 #include "chat_session_member.hxx"
 #include "chat_session_member-odb.hxx"
+#include "chat_session_view.hxx"
+#include "chat_session_view-odb.hxx"
 #include <odb/database.hxx>
 #include <odb/mysql/database.hxx>
 
@@ -62,6 +64,25 @@ public:
         }
         return true;
     }
+    /* brief: 移除指定会话多个成员 ------ ssid & uid */
+    bool remove(std::vector<ChatSessionMember> &csm_list) {
+        try {
+            //获取事务对象，开启事务
+            odb::transaction trans(_db->begin());
+            typedef odb::query<ChatSessionMember> query;
+            typedef odb::result<ChatSessionMember> result;
+
+            for(auto &csm : csm_list) {
+                _db->erase_query<ChatSessionMember>(query::session_id == csm.session_id() && query::user_id == csm.user_id());
+            }
+            //提交事务
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("批量删除指定会话成员失败: {}", e.what());
+            return false;
+        }
+        return true;
+    }
     /* brief: 移除指定会话所有信息 ------ ssid */
     bool remove(const std::string &ssid) {
         try {
@@ -101,6 +122,31 @@ public:
     //=======================================================================================
     //======================================= V2.0 ==========================================
     //=======================================================================================
+    /* brief: 批量查询会话成员 */
+    std::vector<ChatSessionMember> list(const std::vector<std::string> &uid_list) {
+        std::vector<ChatSessionMember> res;
+        if (uid_list.empty()) return res;
+        try {
+            odb::transaction trans(_db->begin()); //获取事务对象，开启事务
+
+            using query  = odb::query<ChatSessionMember>;
+            using result = odb::result<ChatSessionMember>;
+
+            // 构造 IN 查询条件
+            query q;
+            q = query::user_id.in_range(uid_list.begin(), uid_list.end());
+
+            result r(_db->query<ChatSessionMember>(q));
+            for (auto &row : r) {
+                res.push_back(row);
+            }
+
+            trans.commit();// 提交事务
+        } catch(std::exception &e) {
+            LOG_ERROR("批量查询会话成员失败: {}", e.what());
+        }
+        return res;
+    }
     /* brief: 查找某会话是否存在某用户 */
     bool exists(const std::string &ssid, const std::string &uid) {
         bool found = false;
@@ -152,6 +198,66 @@ public:
             return false;
         }
         return true;
+    }
+    /* brief: 根据用户ID按照置顶、最近消息时间的顺序取出会话列表 */
+    std::vector<OrderedChatSessionView> list_ordered_by_user(const std::string &uid)
+    {
+        std::vector<OrderedChatSessionView> res;
+        try {
+            odb::transaction trans(_db->begin());
+
+            using query  = odb::query<OrderedChatSessionView>;
+            using result = odb::result<OrderedChatSessionView>;
+
+            std::ostringstream oss;
+            oss << "cm.user_id = '" << uid << "'"
+                << " AND cm.visible = true "
+                << " ORDER BY "
+                << " cm.pin_time IS NOT NULL DESC, "
+                << " cm.pin_time DESC, "
+                << " COALESCE(cs.last_message_time, cs.create_time) DESC";
+            /* 排序规则: 置顶(按置顶时间排序) -> 非置顶(新创建且没消息的会话) -> 非置顶(按最近消息的时间排序) */
+
+            result r(_db->query<OrderedChatSessionView>(oss.str()));
+
+            for (auto &e : r) {
+                res.push_back(e);
+            }
+
+            trans.commit();
+        } catch (std::exception &e) {
+            LOG_ERROR("获取用户 {} 排序会话列表失败: {}", uid, e.what());
+        }
+        return res;
+    }
+    /* brief: 读取会话成员列表 */
+    std::vector<ChatSessionMemberRoleView> list_member_roles(const std::string& session_id)
+    {
+        std::vector<ChatSessionMemberRoleView> res;
+        try {
+            odb::transaction trans(_db->begin());
+
+            using query  = odb::query<ChatSessionMemberRoleView>;
+            using result = odb::result<ChatSessionMemberRoleView>;
+
+            result r(_db->query<ChatSessionMemberRoleView>(
+                query::session_id == session_id +
+                " ORDER BY "
+                " cm._role DESC, "         // 群主(2) > 管理员(1) > 普通(0)
+                " cm._join_time ASC "      // 同角色按入群时间排序
+            ));
+
+
+            for (auto& row : r) {
+                res.push_back(row);
+            }
+
+            trans.commit();
+        }
+        catch (const std::exception& e) {
+            LOG_ERROR("获取会话 {} 成员角色列表失败: {}", session_id, e.what());
+        }
+        return res;
     }
 private:
     std::shared_ptr<odb::core::database> _db;
