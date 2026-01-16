@@ -44,9 +44,9 @@ public:
             return false;
         }
         for(int i = 0; i < password.size(); ++i) {
-            if(!((password[i] > 'a' && password[i] < 'z') || 
-            (password[i] > 'A' && password[i] < 'Z') || 
-            (password[i] > '0' && password[i] < '9') ||
+            if(!((password[i] >= 'a' && password[i] <= 'z') || 
+            (password[i] >= 'A' && password[i] <= 'Z') || 
+            (password[i] >= '0' && password[i] <= '9') ||
             password[i] == '_' || password[i] == '-')) {
                 LOG_ERROR("密码字符不合法: {}", password);
                 return false;
