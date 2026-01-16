@@ -25,6 +25,14 @@ enum ChatSessionMemberRole {
     OWNER_ROLE  = 2;
 }
 
+// 会话列表中，'我'在该会话下的状态摘要
+message MySessionState {
+    int64 unread_count = 1;            // 未读消息数
+    bool is_muted = 2;                 // 是否免打扰
+    bool is_visible = 3;
+    bool pin_time = 4;                // 是否置顶（由 pin_time != null 推导）
+}
+
 //聊天会话信息 
 message ChatSessionInfo { 
     //群聊会话不需要设置，单聊会话设置为对方用户 ID 
@@ -34,13 +42,16 @@ message ChatSessionInfo {
     //会话上一条消息，新建的会话没有最新消息 
     optional MessageInfo prev_message = 4; 
     //会话头像
-    optional bytes avatar = 5;
+    optional string avatar = 5; //原来是bytes
     //============ V2.0 ================= 
     uint32 chat_session_type = 6;
     int64 create_time = 7;   //会话创建时间
     uint32 member_count = 8; //会话人员数量
     ChatSessionStatus status = 9; //会话状态
-    optional ChatSessionMemberInfo member_info = 10; 
+    oneof member_info {
+        MySessionState member_info_brief = 10; 
+        ChatSessionMemberInfo member_info_detail = 11;
+    }
 }
 
 //聊天会话成员信息
@@ -57,6 +68,12 @@ message ChatSessionMemberInfo {
     ChatSessionMemberRole role = 8;
     int64 join_time = 9;
 } 
+
+message ChatSessionMemberItem {
+    UserInfo user_info = 1;                 // 用户基础信息（来自用户服务）
+    ChatSessionMemberRole role = 2;         // 群内身份
+    int64 join_time = 3;                    // 加入时间
+}
 
 // 成员-角色配对结构体
 message MemberRolePair {
