@@ -68,7 +68,7 @@ message GetChatSessionMemberRsp {
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3; 
-    repeated UserInfo member_info_list = 4; 
+    repeated ChatSessionMemberItem member_list = 4;
 } 
 //---------------------------------------
 //修改会话名称
