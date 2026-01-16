@@ -4,6 +4,8 @@
 #include "mysql.hpp"
 #include "chat_session.hxx"
 #include "chat_session-odb.hxx"
+#include "chat_session_view.hxx"
+#include "chat_session_view-odb.hxx"
 #include <odb/database.hxx>
 #include <odb/mysql/database.hxx>
 
@@ -84,6 +86,26 @@ public:
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("通过会话ID获取会话信息失败 {}:{}", ssid, e.what());
+        }
+        return res;
+    }
+    /* brief: 通过会话ID批量获取会话信息 */
+    std::vector<ChatSession> select_all_session(const std::string &ssid) {
+        std::vector<ChatSession> res;
+        try {
+            odb::transaction trans(_db->begin());
+
+            typedef odb::query<ChatSession> query;
+            typedef odb::result<ChatSession> result;
+            result r(_db->query<ChatSession>(query::chat_session_id == ssid));
+
+            for(auto &e : r) {
+                res.push_back(e);
+            }
+
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("通过会话ID批量获取会话信息失败 {}:{}", ssid, e.what());
         }
         return res;
     }
