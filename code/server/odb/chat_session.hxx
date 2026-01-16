@@ -3,7 +3,6 @@
 #include <cstddef>
 #include <odb/nullable.hxx>
 #include <odb/core.hxx>
-#include "chat_session_member.hxx"
 
 namespace chatnow
 {
@@ -94,31 +93,6 @@ private:
     int _status;    // 0 NORMAL(正常会话) / 1 ARCHIVED(只读会话) / 2 DISMISSED(解散了的会话)
     #pragma db type("varchar(64)") 
     odb::nullable<std::string> _avatar_id; //用户头像文件ID，不一定存在   
-};
-
-// 这里的条件必须是指定条件: css::chat_session_type == 1 && csm1.user_id=uid && csm2.user_id != csm1.user_id
-#pragma db view object(ChatSession = css)\
-                object(ChatSessionMember = csm1 : css::_chat_session_id == csm1::_session_id)\
-                object(ChatSessionMember = csm2 : css::_chat_session_id == csm2::_session_id)\
-                query((?))
-struct SingleChatSession 
-{
-    #pragma db column(css::_chat_session_id)
-    std::string chat_session_id;
-    #pragma db column(csm2::_user_id)
-    std::string friend_id;
-};
-
-//这里的条件必须是指定条件: ChatSession::chat_session_type == 2 && csm1.user_id=uid
-#pragma db view object(ChatSession = css)\
-                object(ChatSessionMember = csm : css::_chat_session_id == csm::_session_id)\
-                query((?))
-struct GroupChatSession 
-{
-    #pragma db column(css::_chat_session_id)
-    std::string chat_session_id;
-    #pragma db column(css::_chat_session_name)
-    std::string chat_session_name;
 };
 
 } // namespace chatnow
