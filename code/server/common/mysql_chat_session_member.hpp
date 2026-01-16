@@ -199,6 +199,26 @@ public:
         }
         return true;
     }
+    /* brief: 批量更新会话成员 */
+    bool update(const std::vector<std::shared_ptr<ChatSessionMember>> &csm_list) {
+        if(csm_list.size() == 0) {
+            LOG_WARN("传入的数组为空");
+            return true;
+        }
+        try {
+            odb::transaction trans(_db->begin());
+
+            for(auto &csm : csm_list) {
+                _db->update(*csm);
+            }
+
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("批量更新会话成员信息失败: {}", e.what());
+            return false;
+        }
+        return true;
+    }
     /* brief: 根据用户ID按照置顶、最近消息时间的顺序取出会话列表 */
     std::vector<OrderedChatSessionView> list_ordered_by_user(const std::string &uid)
     {
