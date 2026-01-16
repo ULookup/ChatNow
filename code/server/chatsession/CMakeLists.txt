@@ -32,7 +32,7 @@ endforeach()
 # 3.3 生成ODB框架代码
 # 3.3.1 添加所需的odb映射代码文件名称
 set(odb_path ${CMAKE_CURRENT_SOURCE_DIR}/../odb)
-set(odb_files chat_session_member.hxx chat_session.hxx)
+set(odb_files chat_session_member.hxx chat_session.hxx chat_session_view.hxx)
 # 3.3.2 检查框架代码文件是否已经生成
 set(odb_hxx "")
 set(odb_cxx "")
