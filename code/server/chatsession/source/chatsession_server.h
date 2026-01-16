@@ -316,6 +316,11 @@ public:
             LOG_ERROR("请求ID - {} 要修改的会话 {} 不存在", rid, ssid);
             return err_response(rid, "要修改的会话不存在");
         }
+        //注：检查会话类型，如果是单聊就不能改
+        if(chatSession->chat_session_type() == ChatSessionType::SINGLE) {
+            LOG_ERROR("请求ID - {} 会话类型为单聊，不能修改会话头像");
+            return err_response(rid, "会话类型为单聊，不能修改会话头像");
+        }
         //3. 上传头像文件到文件存储子服务
         std::string new_avatar_id;
         bool ret = PutSingleFile(rid, request->avatar(), new_avatar_id);
@@ -434,7 +439,10 @@ public:
     virtual void TransferChatSessionOwner(::google::protobuf::RpcController* controller,
                         const ::chatnow::TransferChatSessionOwnerReq* request,
                         ::chatnow::TransferChatSessionOwnerRsp* response,
-                        ::google::protobuf::Closure* done);
+                        ::google::protobuf::Closure* done)
+    {
+
+    }
     virtual void ModifyMemberPermission(::google::protobuf::RpcController* controller,
                         const ::chatnow::ModifyMemberPermissionReq* request,
                         ::chatnow::ModifyMemberPermissionRsp* response,
