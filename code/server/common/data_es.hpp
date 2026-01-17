@@ -163,4 +163,81 @@ private:
     std::shared_ptr<elasticlient::Client> _client;
 };
 
-}
+class ESChatSession
+{
+public:
+    using ptr = std::shared_ptr<ESChatSession>;
+    ESChatSession(const std::shared_ptr<elasticlient::Client> &client)
+        : _client(client) {}
+
+    bool create_index() {
+        bool ret = ESIndex(_client, "chat_session")
+            .append("chat_session_id", "keyword", "standard", true)
+            .append("chat_session_name")                 // text + standard analyzer
+            .append("chat_session_type", "integer", "standard", false)
+            .append("avatar_id", "keyword", "standard", false)
+            .append("status", "integer", "standard", false)
+            .create();
+
+        if(!ret) {
+            LOG_ERROR("会话搜索索引创建失败");
+            return false;
+        }
+        LOG_INFO("会话搜索索引创建成功");
+        return true;
+    }
+
+    bool append_data(const chatnow::ChatSession &cs) {
+        bool ret = ESInsert(_client, "chat_session")
+            .append("chat_session_id", cs.chat_session_id())
+            .append("chat_session_name", cs.chat_session_name())
+            .append("chat_session_type", static_cast<int>(cs.chat_session_type()))
+            .append("avatar_id", cs.avatar_id())
+            .append("status", cs.status())
+            .insert(cs.chat_session_id());
+
+        if(!ret) {
+            LOG_ERROR("会话搜索数据插入/更新失败");
+            return false;
+        }
+        LOG_INFO("会话搜索数据新增/更新成功");
+        return true;
+    }
+
+    std::vector<std::string> search(const std::string &key, std::optional<chatnow::ChatSessionType> type = std::nullopt) {
+        std::vector<std::string> res;
+
+        auto search_builder = ESSearch(_client, "chat_session")
+            .append_must_match("chat_session_name", key)
+            .append_must_term("status", std::to_string(0));
+
+        if (type.has_value()) {
+            search_builder.append_must_term(
+                "chat_session_type",
+                std::to_string(static_cast<int>(type.value()))
+            );
+        }
+
+        Json::Value json_session = search_builder.search();
+
+        if (!json_session.isArray()) {
+            LOG_ERROR("会话搜索结果不是数组");
+            return res;
+        }
+
+        for (int i = 0; i < json_session.size(); ++i) {
+            res.push_back(
+                json_session[i]["_source"]["chat_session_id"].asString()
+            );
+        }
+
+        return res;
+    }
+
+
+private:
+    std::shared_ptr<elasticlient::Client> _client;
+};
+
+
+} // namespace chatnow
