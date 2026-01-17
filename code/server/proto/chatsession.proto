@@ -152,7 +152,8 @@ message ModifyMemberPermissionReq {
     optional string session_id = 2;
     optional string user_id = 3;
     string chat_session_id = 4;
-    ChatSessionMemberRole role = 5;
+    string changed_user_id = 5;
+    ChatSessionMemberRole role = 6;
 }
 message ModifyMemberPermissionRsp {
     string request_id = 1; 
@@ -188,22 +189,7 @@ message SearchChatSessionRsp {
     string request_id = 1;
     bool success = 2;
     string errmsg = 3;
-    repeated ChatSessionInfo chat_session_list = 4; // 匹配的会话列表
-}
-//----------------------------------------------
-// 批量获取会话成员角色
-message GetMemberRoleListReq {
-    string request_id = 1;
-    optional string session_id = 2;
-    optional string user_id = 3;
-    string chat_session_id = 4;
-    repeated string member_id_list = 5;
-}
-message GetMemberRoleListRsp {
-    string request_id = 1;
-    bool success = 2;
-    string errmsg = 3;
-    repeated MemberRolePair member_role_list = 4;
+    repeated ChatSessionBrief chat_session_list = 4; // 匹配的会话列表
 }
 //=====================================================================
 //======================== 会话成员配置相关操作 =========================
@@ -293,7 +279,6 @@ service ChatSessionService {
     rpc ModifyMemberPermission(ModifyMemberPermissionReq) returns (ModifyMemberPermissionRsp);
     rpc ModifyChatSessionStatus(ModifyChatSessionStatusReq) returns (ModifyChatSessionStatusRsp);
     rpc SearchChatSession(SearchChatSessionReq) returns (SearchChatSessionRsp);
-    rpc GetMemberRoleList(GetMemberRoleListReq) returns (GetMemberRoleListRsp);
     rpc SetSessionMuted(SetSessionMutedReq) returns (SetSessionMutedRsp);
     rpc SetSessionPinned(SetSessionPinnedReq) returns (SetSessionPinnedRsp);
     rpc SetSessionVisible(SetSessionVisibleReq) returns (SetSessionVisibleRsp);
