@@ -125,26 +125,36 @@ public:
     /* brief: 批量查询会话成员 */
     std::vector<ChatSessionMember> list(const std::vector<std::string> &uid_list) {
         std::vector<ChatSessionMember> res;
-        if (uid_list.empty()) return res;
-        try {
-            odb::transaction trans(_db->begin()); //获取事务对象，开启事务
+        if(uid_list.empty()) {
+            return res;
+        }
 
+        try {
+            odb::transaction trans(_db->begin());
             using query  = odb::query<ChatSessionMember>;
             using result = odb::result<ChatSessionMember>;
 
-            // 构造 IN 查询条件
-            query q;
-            q = query::user_id.in_range(uid_list.begin(), uid_list.end());
+            std::stringstream ss;
+            ss << "user_id in (";
+            for(const auto &uid : uid_list) {
+                ss << "'" << uid << "',";
+            }
 
-            result r(_db->query<ChatSessionMember>(q));
-            for (auto &row : r) {
+            std::string condition = ss.str();
+            condition.pop_back();  // 去掉最后一个逗号
+            condition += ")";
+
+            result r(_db->query<ChatSessionMember>(condition));
+            for(auto &row : r) {
                 res.push_back(row);
             }
 
-            trans.commit();// 提交事务
-        } catch(std::exception &e) {
+            trans.commit();
+        }
+        catch (const std::exception &e) {
             LOG_ERROR("批量查询会话成员失败: {}", e.what());
         }
+
         return res;
     }
     /* brief: 查找某会话是否存在某用户 */
@@ -235,7 +245,8 @@ public:
                 << " ORDER BY "
                 << " cm.pin_time IS NOT NULL DESC, "
                 << " cm.pin_time DESC, "
-                << " COALESCE(cs.last_message_time, cs.create_time) DESC";
+                << " COALESCE(cs.last_message_time, cs.create_time) DESC"
+                << " LIMIT 50";
             /* 排序规则: 置顶(按置顶时间排序) -> 非置顶(新创建且没消息的会话) -> 非置顶(按最近消息的时间排序) */
 
             result r(_db->query<OrderedChatSessionView>(oss.str()));

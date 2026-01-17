@@ -210,6 +210,42 @@ public:
         }
         return true;
     }
+    /* brief: 通过批量会话ID获取批量会话信息 */
+    std::vector<ChatSession> select(const std::vector<std::string> &ssid_list) {
+        std::vector<ChatSession> res;
+        if (ssid_list.empty()) {
+            return res;
+        }
+
+        try {
+            odb::transaction trans(_db->begin());
+
+            typedef odb::query<ChatSession> query;
+            typedef odb::result<ChatSession> result;
+
+            std::stringstream ss;
+            ss << "chat_session_id in (";
+            for (const auto &ssid : ssid_list) {
+                ss << "'" << ssid << "',";
+            }
+
+            std::string condition = ss.str();
+            condition.pop_back();   // 去掉最后一个逗号
+            condition += ")";
+
+            result r(_db->query<ChatSession>(condition));
+            for (auto &e : r) {
+                res.push_back(e);
+            }
+
+            trans.commit();
+        } catch (std::exception &e) {
+            LOG_ERROR("通过会话ID批量获取会话信息失败: {}", e.what());
+        }
+
+        return res;
+    }
+
 private:
     std::shared_ptr<odb::core::database> _db;
 };
