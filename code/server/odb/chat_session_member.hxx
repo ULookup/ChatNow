@@ -65,6 +65,8 @@ public:
         return *_pin_time;
     }
     void pin_time(const boost::posix_time::ptime &pin_time) { _pin_time = pin_time; }
+    // 取消置顶（核心就是把 nullable 置空）
+    void unpin() { _pin_time = odb::nullable<boost::posix_time::ptime>(); }
 
     ChatSessionRole role() const { return _role; }
     void role(const ChatSessionRole role) { _role = role; }
