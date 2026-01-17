@@ -33,7 +33,17 @@ message MySessionState {
     bool pin_time = 4;                // 是否置顶（由 pin_time != null 推导）
 }
 
-//聊天会话信息 
+//聊天会话信息（加入前)
+message ChatSessionBrief {
+    string chat_session_id = 1; //会话 ID 
+    string chat_session_name = 2;//会话名称 git
+    optional string avatar = 3; //原来是bytes
+    uint32 chat_session_type = 4;
+    int64 create_time = 5;   //会话创建时间
+    uint32 member_count = 6; //会话人员数量
+}
+
+//聊天会话信息（加入后）
 message ChatSessionInfo { 
     //群聊会话不需要设置，单聊会话设置为对方用户 ID 
     optional string single_chat_friend_id = 1; 
