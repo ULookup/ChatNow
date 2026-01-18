@@ -37,7 +37,10 @@ public:
                         _mm_channels(channel_manager),
                         _user_service_name(user_service_name),
                         _file_service_name(file_service_name),
-                        _message_service_name(message_service_name) {}
+                        _message_service_name(message_service_name) 
+    {
+        _es_chat_session->create_index();
+    }
     ~ChatSessionServiceImpl() = default;
     /* brief: 获取聊天会话列表 */
     virtual void GetChatSessionList(::google::protobuf::RpcController* controller,
@@ -196,6 +199,11 @@ public:
             LOG_ERROR("请求ID - {} 向数据库添加会话信息失败: cssName = {}", rid, cssName);
             return err_response(rid, "向数据库添加会话信息失败");
         }
+        ret = _es_chat_session->append_data(chatSession);
+        if(ret == false) {
+            LOG_ERROR("请求ID - {} 向ES添加会话信息失败: cssName = {}", rid, cssName);
+            return err_response(rid, "向ES添加会话信息失败");
+        }
         //4.  向会话成员表插入数据
         std::vector<ChatSessionMember> member_list;
         for(int i = 0; i < request->member_id_list_size(); ++i) {
@@ -233,6 +241,7 @@ public:
         std::string rid   = request->request_id();
         std::string uid   = request->user_id();
         std::string cssID = request->chat_session_id();
+        LOG_DEBUG("要查询的会话ID {}", cssID);
         //2.  从数据库查询出该会话所有成员信息
         std::vector<ChatSessionMemberRoleView> chatSessionMember_list = _mysql_chat_session_member->list_member_roles(cssID);
         std::unordered_set<std::string> user_id_list;
@@ -247,8 +256,10 @@ public:
             LOG_ERROR("请求ID - {} 批量获取用户详细信息失败", rid);
             return err_response(rid, "批量获取用户详细信息失败");
         }
+        LOG_DEBUG("请求ID - {} 获取到的会话成员数量: {}", rid, chatSessionMember_list.size());
         //3. 填充响应
         for(const auto &member : chatSessionMember_list) {
+            LOG_DEBUG("开始填充响应");
             auto chat_session_member_item = response->add_member_list();
             chat_session_member_item->set_role(static_cast<ChatSessionMemberRole>(member.role));
             chat_session_member_item->set_join_time(boost::posix_time::to_time_t(member.join_time));
@@ -276,23 +287,42 @@ public:
             return;
         };
         //1. 提取关键要素
-        std::string rid   = request->request_id();
+        std::string rid  = request->request_id();
+        std::string uid  = request->user_id();
         std::string ssid = request->chat_session_id();
         std::string cssName = request->chat_session_name();
-        //2. 取出要修改的会话
+        //2. 对用户鉴权
+        //2.1 取出用户在会话的信息
+        auto csm = _mysql_chat_session_member->select(ssid, uid);
+        if(!csm) {
+            LOG_ERROR("请求ID - {} 用户不在该会话中", rid);
+            return err_response(rid, "用户不在该会话中");
+        }
+        //2.2 鉴权
+        if(csm->role() == ChatSessionRole::NORMAL) {
+            LOG_ERROR("请求ID - {} 该用户 {} 没有权限修改会话名称", rid, uid);
+            return err_response(rid, "该用户没有权限修改会话名称");
+        }
+        //3. 取出要修改的会话
         auto chatSession = _mysql_chat_session->select(ssid);
         if(!chatSession) {
             LOG_ERROR("请求ID - {} 要修改的会话 {} 不存在", rid, ssid);
             return err_response(rid, "要修改的会话不存在");
         }
-        //3. 修改会话名称并更新数据库数据
+        //4. 修改会话名称并更新数据库数据
         chatSession->chat_session_name(cssName);
         bool ret = _mysql_chat_session->update(chatSession);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 更新数据库数据失败");
             return err_response(rid, "更新数据库数据失败");
         }
-        //4. 填充响应
+        //4.1 更新ES数据
+        ret = _es_chat_session->append_data(*chatSession);
+        if(ret == false) {
+            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 会话名称失败: {}", rid, cssName);
+            return err_response(request->request_id(), "更新 ES搜索引擎 会话名称失败");                      
+        }
+        //5. 填充响应
         response->set_request_id(rid);
         response->set_success(true);
     }
@@ -338,6 +368,12 @@ public:
             LOG_ERROR("请求ID - {} 更新数据库中的头像ID失败");
             return err_response(rid, "更新数据库中的头像ID失败");
         }
+        //4.1 更新ES数据
+        ret = _es_chat_session->append_data(*chatSession);
+        if(ret == false) {
+            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 会话头像ID失败: {}", rid, new_avatar_id);
+            return err_response(request->request_id(), "更新 ES搜索引擎 会话头像ID失败");                      
+        }
         //5. 填充响应
         response->set_request_id(rid);
         response->set_success(true);
@@ -369,7 +405,7 @@ public:
         //2.2 鉴权
         if(csm->role() == ChatSessionRole::NORMAL) {
             LOG_ERROR("请求ID - {} 该用户 {} 没有权限新增会话成员", rid, uid);
-            err_response(rid, "该用户没有权限新增会话成员");
+            return err_response(rid, "该用户没有权限新增会话成员");
         }
         //3. 新增会话成员到数据库
         std::vector<ChatSessionMember> new_member_list;
@@ -596,6 +632,12 @@ public:
         if(ret == false) {
             LOG_ERROR("请求ID - {} 同步更改会话 {} 状态信息到数据失败", rid, ssid);
             return err_response(rid, "同步更改会话状态信息到数据失败");
+        }
+        //4.1 更新ES数据
+        ret = _es_chat_session->append_data(*chatSession);
+        if(ret == false) {
+            LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 会话状态失败", rid);
+            return err_response(request->request_id(), "更新 ES搜索引擎 会话状态失败");                      
         }
         //5. 填充响应
         response->set_request_id(rid);
@@ -993,8 +1035,10 @@ public:
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(user_service_name);
         _mm_channels->declared(file_service_name);
+        _mm_channels->declared(message_service_name);
         LOG_DEBUG("设置用户子服务为需添加管理的子服务: {}", _user_service_name);
-        LOG_DEBUG("设置消息存储子服务为需添加管理的子服务: {}", _file_service_name);
+        LOG_DEBUG("设置文件存储子服务为需添加管理的子服务: {}", _file_service_name);
+        LOG_DEBUG("设置消息存储子服务为需添加管理的子服务: {}", _message_service_name);
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
         auto del_cb = std::bind(&ServiceManager::onServiceOffline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
 
