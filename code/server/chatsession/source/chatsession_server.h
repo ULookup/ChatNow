@@ -340,10 +340,22 @@ public:
             return;
         };
         //1. 提取关键要素
-        std::string rid     = request->request_id();
-        std::string user_id = request->user_id();
-        std::string ssid   = request->chat_session_id();
-        //2. 取出要修改的对话 
+        std::string rid  = request->request_id();
+        std::string uid  = request->user_id();
+        std::string ssid = request->chat_session_id();
+        //2. 对用户鉴权
+        //2.1 取出用户在会话的信息
+        auto csm = _mysql_chat_session_member->select(ssid, uid);
+        if(!csm) {
+            LOG_ERROR("请求ID - {} 用户 {} 不在会话 {} 中", rid, uid, ssid);
+            return err_response(rid, "用户不在该会话中");
+        }
+        //2.2 鉴权
+        if(csm->role() == ChatSessionRole::NORMAL) {
+            LOG_ERROR("请求ID - {} 该用户 {} 没有权限修改会话头像", rid, uid);
+            return err_response(rid, "该用户没有权限修改会话头像");
+        }
+        //3. 取出要修改的对话 
         auto chatSession = _mysql_chat_session->select(ssid);
         if(!chatSession) {
             LOG_ERROR("请求ID - {} 要修改的会话 {} 不存在", rid, ssid);
@@ -354,27 +366,27 @@ public:
             LOG_ERROR("请求ID - {} 会话类型为单聊，不能修改会话头像");
             return err_response(rid, "会话类型为单聊，不能修改会话头像");
         }
-        //3. 上传头像文件到文件存储子服务
+        //4. 上传头像文件到文件存储子服务
         std::string new_avatar_id;
         bool ret = PutSingleFile(rid, request->avatar(), new_avatar_id);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 上传群聊头像失败");
             return err_response(rid, "上传群聊头像失败");
         }
-        //4. 更新数据库中的头像ID
+        //5. 更新数据库中的头像ID
         chatSession->avatar_id(new_avatar_id);
         ret = _mysql_chat_session->update(chatSession);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 更新数据库中的头像ID失败");
             return err_response(rid, "更新数据库中的头像ID失败");
         }
-        //4.1 更新ES数据
+        //5.1 更新ES数据
         ret = _es_chat_session->append_data(*chatSession);
         if(ret == false) {
             LOG_ERROR("请求ID: {} - 更新 ES搜索引擎 会话头像ID失败: {}", rid, new_avatar_id);
             return err_response(request->request_id(), "更新 ES搜索引擎 会话头像ID失败");                      
         }
-        //5. 填充响应
+        //6. 填充响应
         response->set_request_id(rid);
         response->set_success(true);
     }
@@ -463,7 +475,7 @@ public:
         for(const auto &e : request->member_id_list()) {
             members.push_back(e);
         }
-        std::vector<ChatSessionMember> member_list = _mysql_chat_session_member->list(members);
+        std::vector<ChatSessionMember> member_list = _mysql_chat_session_member->select(ssid, members);
         //3.2 移除数据库中的数据
         bool ret = _mysql_chat_session_member->remove(member_list);
         if(ret == false) {
