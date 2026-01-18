@@ -23,7 +23,10 @@ public:
         try {
             //获取事务对象，开启事务
             odb::transaction trans(_db->begin());
+            //1. 插入成员记录
             _db->persist(csm);
+            //2. 更新会话人数
+            _update_session_member_count(csm.session_id(), 1);
             //提交事务
             trans.commit();
         } catch(std::exception &e) {
@@ -34,12 +37,24 @@ public:
     }
     /* brief: 向指定会话添加多个成员 ------ ssid & uids */
     bool append(std::vector<ChatSessionMember> &csm_list) {
+        if(csm_list.empty()) return true;
         try {
             //获取事务对象，开启事务
             odb::transaction trans(_db->begin());
+
+            std::map<std::string, int> session_delta;
+
+            //1. 批量插入
             for(auto &csm : csm_list) {
                 _db->persist(csm);
+                session_delta[csm.session_id()]++;
             }
+
+            //2. 批量更新计数
+            for(const auto &[ssid, count] : session_delta) {
+                _update_session_member_count(ssid, count);
+            }
+
             //提交事务
             trans.commit();
         } catch(std::exception &e) {
@@ -53,9 +68,19 @@ public:
         try {
             //获取事务对象，开启事务
             odb::transaction trans(_db->begin());
+
             typedef odb::query<ChatSessionMember> query;
             typedef odb::result<ChatSessionMember> result;
-            _db->erase_query<ChatSessionMember>(query::session_id == csm.session_id() && query::user_id == csm.user_id());
+
+            unsigned long long deleted = _db->erase_query<ChatSessionMember>(query::session_id == csm.session_id() && query::user_id == csm.user_id());
+
+            // 2. 如果真的删除了成员，才更新计数 (-1)
+            if (deleted > 0) {
+                _update_session_member_count(csm.session_id(), -1);
+            } else {
+                LOG_WARN("尝试移除不存在的成员，跳过计数更新: {}:{}", csm.session_id(), csm.user_id());
+            }
+
             //提交事务
             trans.commit();
         } catch(std::exception &e) {
@@ -72,8 +97,18 @@ public:
             typedef odb::query<ChatSessionMember> query;
             typedef odb::result<ChatSessionMember> result;
 
+            std::map<std::string, int> session_delta;
+
+            //1. 循环删除
             for(auto &csm : csm_list) {
-                _db->erase_query<ChatSessionMember>(query::session_id == csm.session_id() && query::user_id == csm.user_id());
+                unsigned long long deleted = _db->erase_query<ChatSessionMember>(query::session_id == csm.session_id() && query::user_id == csm.user_id());
+                if(deleted > 0) {
+                    session_delta[csm.session_id()]++;
+                }
+            }
+            //2. 批量更新计数
+            for(const auto &[ssid, count] : session_delta) {
+                _update_session_member_count(ssid, -count);
             }
             //提交事务
             trans.commit();
@@ -177,6 +212,40 @@ public:
             return false;
         }
         return found;
+    }
+    /* brief: 批量查询会话里的成员 */
+    std::vector<ChatSessionMember> select(const std::string& ssid, const std::vector<std::string>& uids) {
+        std::vector<ChatSessionMember> res;
+        // 如果传入列表为空，直接返回，防止生成错误的 SQL
+        if (uids.empty()) {
+            return res;
+        }
+        try {
+            odb::transaction trans(_db->begin());
+
+            using query = odb::query<ChatSessionMember>;
+
+            // 利用 in_range 生成 WHERE IN 语句
+            // SQL: SELECT * FROM chat_session_member WHERE session_id = ? AND user_id IN (?, ?, ...)
+            auto result = _db->query<ChatSessionMember>(
+                query::session_id == ssid && 
+                query::user_id.in_range(uids.begin(), uids.end())
+            );
+
+            for (auto& row : result) {
+                res.push_back(row);
+            }
+
+            trans.commit();
+        }
+        catch (const std::exception& e) {
+            LOG_ERROR("批量获取会话成员失败 ssid:{} count:{} - {}", ssid, uids.size(), e.what());
+        }
+        
+        // 调试日志
+        LOG_DEBUG("批量查询期望获取 {} 人，实际获取 {} 人", uids.size(), res.size());
+        
+        return res;
     }
     /* brief: 查询会话成员 */
     std::shared_ptr<ChatSessionMember> select(const std::string &ssid, const std::string &uid) {
@@ -290,6 +359,38 @@ public:
         }
         LOG_DEBUG("获取到 {} 名会话成员", res.size());
         return res;
+    }
+private:
+    void _update_session_member_count(const std::string& ssid, int delta) {
+        using SessionQuery = odb::query<ChatSession>;
+        
+        // 1. 查询并锁定会话行 (FOR UPDATE)
+        // 关键点：使用 FOR UPDATE 锁住这行记录，直到事务提交，防止其他人同时修改计数
+        // 注意：这里必须加括号 (query == ssid)，否则会因为优先级问题导致查询失败
+        std::shared_ptr<ChatSession> session(
+            _db->query_one<ChatSession>(
+                (SessionQuery::chat_session_id == ssid) + " FOR UPDATE"
+            )
+        );
+
+        if (session) {
+            // 2. 计算新数量
+            int new_count = session->member_count() + delta;
+            if (new_count < 0) new_count = 0; // 防御性保护，防止负数
+            
+            // 3. 更新内存对象
+            session->member_count(new_count);
+
+            // 4. 更新数据库
+            _db->update(*session);
+            
+            LOG_DEBUG("会话[{}] 人数变更: {} -> {}", ssid, new_count - delta, new_count);
+        } else {
+            // 如果找不到会话，通常意味着逻辑错误（给不存在的群加人），可以选择抛错让事务回滚
+            std::string err = "更新计数失败，未找到会话: " + ssid;
+            LOG_ERROR(err);
+            throw std::runtime_error(err);
+        }
     }
 private:
     std::shared_ptr<odb::core::database> _db;
