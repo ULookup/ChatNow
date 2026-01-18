@@ -873,13 +873,18 @@ public:
             LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid);
             return err_response(rid, "查询用户在会话中的信息失败");
         }
-        //3. 移除用户在数据库的信息
+        //3. 鉴权，如果是群主则必须先转移群主
+        if(csm->role() == ChatSessionRole::OWNER) {
+            LOG_ERROR("请求ID - {} 该用户 {} 必须先转让群主", rid, uid);
+            return err_response(rid, "该用户必须先转让群主");
+        }
+        //4. 移除用户在数据库的信息
         bool ret = _mysql_chat_session_member->remove(*csm);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 用户 {} 退出会话 {} 失败", rid, uid, ssid);
             return err_response(rid, "用户退出会话失败");
         }
-        //4. 组织响应
+        //5. 组织响应
         response->set_request_id(rid);
         response->set_success(true);
     }
