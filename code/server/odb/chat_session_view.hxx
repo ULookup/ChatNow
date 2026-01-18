@@ -86,6 +86,9 @@ struct OrderedChatSessionView
     query((?))
 struct ChatSessionMemberRoleView
 {
+    #pragma db column(cm::_session_id)
+    std::string session_id;
+    
     #pragma db column(cm::_user_id)
     std::string user_id;
 
