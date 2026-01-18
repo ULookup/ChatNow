@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <odb/nullable.hxx>
 #include <odb/core.hxx>
+#include <boost/date_time/posix_time/posix_time.hpp>
 
 namespace chatnow
 {
