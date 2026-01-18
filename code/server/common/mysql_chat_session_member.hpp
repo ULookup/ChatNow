@@ -272,22 +272,23 @@ public:
             using result = odb::result<ChatSessionMemberRoleView>;
 
             result r(_db->query<ChatSessionMemberRoleView>(
-                query::session_id == session_id +
+                (query::session_id == session_id) +
                 " ORDER BY "
-                " cm._role DESC, "         // 群主(2) > 管理员(1) > 普通(0)
-                " cm._join_time ASC "      // 同角色按入群时间排序
+                " cm.role DESC, "         // 群主(2) > 管理员(1) > 普通(0)
+                " cm.join_time ASC "      // 同角色按入群时间排序
             ));
-
 
             for (auto& row : r) {
                 res.push_back(row);
             }
+            LOG_DEBUG("查询到 {} 名成员", res.size());
 
             trans.commit();
         }
         catch (const std::exception& e) {
             LOG_ERROR("获取会话 {} 成员角色列表失败: {}", session_id, e.what());
         }
+        LOG_DEBUG("获取到 {} 名会话成员", res.size());
         return res;
     }
 private:
