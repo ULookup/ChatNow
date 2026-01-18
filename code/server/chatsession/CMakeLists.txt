@@ -4,7 +4,6 @@ cmake_minimum_required(VERSION 3.1.3)
 project(chatsession_server)
 
 set(target "chatsession_server")
-set(test_client "chatsession_client")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
@@ -63,17 +62,18 @@ add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
 target_link_libraries(${target} -lgflags -lspdlog 
     -lfmt -lbrpc -lssl -lcrypto 
-    -lprotobuf -lleveldb -letcd-cpp-api -lcpprest 
-    -lcurl -lodb-mysql -lodb -lodb-boost 
-    -lamqpcpp -lev /usr/local/lib/libjsoncpp.so.19)
+    -lprotobuf -lleveldb -letcd-cpp-api 
+    -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
+    -lcpr -lelasticlient -ljsoncpp)
 
-## 4. 获取源码目录下的所有源码文件
-#set(test_files "")
-#aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
-## 5. 声明目标及依赖
-#add_executable(${test_client} ${test_files} ${proto_srcs})
-#
-#target_link_libraries(${test_client} -lgflags -lgtest -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
+set(test_client "chatsession_client")
+# 4. 获取源码目录下的所有源码文件
+set(test_files "")
+aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
+# 5. 声明目标及依赖
+add_executable(${test_client} ${test_files} ${proto_srcs})
+
+target_link_libraries(${test_client} -lgflags -lgtest -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
 
 # 6. 设置头文件默认搜索路径
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -82,4 +82,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../odb)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 # 7. 设置需要连接的库
 # 8. 设置安装路径
-#INSTALL(TARGETS ${target} ${test_client} RUNTIME DESTINATION bin)
+INSTALL(TARGETS ${target} ${test_client} RUNTIME DESTINATION bin)
