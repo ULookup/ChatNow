@@ -83,7 +83,7 @@ message SetChatSessionNameRsp {
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3;
-    ChatSessionInfo chat_session_info = 4;     
+    optional ChatSessionInfo chat_session_info = 4;     
 }
 //----------------------------------------
 //修改会话头像
