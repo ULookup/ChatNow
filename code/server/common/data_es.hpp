@@ -1,6 +1,9 @@
+#pragma once
+
 #include "icsearch.hpp"
 #include "user.hxx"
 #include "message.hxx"
+#include "chat_session.hxx"
 
 namespace chatnow
 {
