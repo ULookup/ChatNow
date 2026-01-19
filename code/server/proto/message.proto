@@ -15,7 +15,8 @@ option cc_generic_services = true;
  
 message GetHistoryMsgReq { 
     string request_id = 1; 
-    string chat_session_id = 2;  int64 start_time = 3; 
+    string chat_session_id = 2;  
+    int64 start_time = 3; 
     int64 over_time = 4; 
     optional string user_id = 5; 
     optional string session_id = 6; 
@@ -55,9 +56,93 @@ message MsgSearchRsp {
     string errmsg = 3; 
     repeated MessageInfo msg_list = 4; 
 } 
+
+// ==========================================
+// 1. 增量同步接口 (核心：替代轮询)
+// ==========================================
+message GetOfflineMsgReq {
+    string request_id = 1;
+    optional string user_id = 2;          // 查谁的 Timeline
+    optional string session_id = 3;
+    int64 last_message_id = 4;   // 客户端当前最新的消息ID (游标)
+    int32 msg_count = 5;         // 限制条数
+}
+
+message GetOfflineMsgRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    bool has_more = 4;           // 是否还有更多未拉取的消息
+    repeated MessageInfo msg_list = 5; 
+}
+
+// ==========================================
+// 2. 批量获取消息详情 (支撑接口)
+// ==========================================
+// 场景：会话服务需要展示“最后一条消息预览”，或者搜索服务搜到了ID需要拿内容
+message GetMsgByIdsReq {
+    string request_id = 1;
+    optional string user_id = 2; 
+    optional string session_id = 3; 
+    repeated int64 message_id_list = 4;
+}
+
+message GetMsgByIdsRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    repeated MessageInfo msg_list = 4;
+}
+
+// ==========================================
+// 3. 逻辑删除接口 (Timeline 特性)
+// ==========================================
+// 场景：用户删除聊天记录，只删除 UserTimeline，Message原件保留
+message DeleteTimelineMsgReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string chat_session_id = 4;
+    repeated int64 message_id_list = 5; // 要删除的ID列表
+    bool clean_all = 6;                 // 是否清空该会话所有历史 (DELETE WHERE user_id AND session_id)
+}
+
+message DeleteTimelineMsgRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+}
+
+// ==========================================
+// 4. 未读数计算辅助接口
+// ==========================================
+// 场景：会话服务只存了用户读到了哪里(last_read_id)，它需要问消息服务：“这个ID后面还有几条？”
+message GetUnreadCountReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string chat_session_id = 4;
+    int64 last_read_msg_id = 5; // 会话服务传来的，用户上次读到的位置
+}
+
+message GetUnreadCountRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    int32 unread_count = 4;     // Timeline中 > last_read_msg_id 的数量
+    int64 latest_msg_id = 5;    // 同时返回最新的消息ID，方便会话服务更新快照
+}
  
 service MsgStorageService { 
     rpc GetHistoryMsg(GetHistoryMsgReq) returns (GetHistoryMsgRsp);  
     rpc GetRecentMsg(GetRecentMsgReq) returns (GetRecentMsgRsp); 
     rpc MsgSearch(MsgSearchReq) returns (MsgSearchRsp); 
+    // 1. 增量拉取：客户端上线同步专用
+    rpc GetOfflineMsg(GetOfflineMsgReq) returns (GetOfflineMsgRsp);
+    // 2. 内部查询：给会话服务/搜索服务补充内容用
+    rpc GetMsgByIds(GetMsgByIdsReq) returns (GetMsgByIdsRsp);
+    // 3. 自身管理：用户删除聊天记录
+    rpc DeleteTimelineMsg(DeleteTimelineMsgReq) returns (DeleteTimelineMsgRsp);
+    // 4. 状态辅助：帮会话服务算未读数
+    rpc GetUnreadCount(GetUnreadCountReq) returns (GetUnreadCountRsp);
 }
