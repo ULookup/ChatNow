@@ -14,7 +14,8 @@ DEFINE_int32(rpc_timeout, -1, "RPC调用超时时间");
 DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
 
 DEFINE_string(file_service, "/service/file_service", "文件管理子服务名称");
-DEFINE_string(user_service, "/service/user_service", "文件管理子服务名称");
+DEFINE_string(user_service, "/service/user_service", "用户管理子服务名称");
+DEFINE_string(chatsession_service, "/service/chatsession_service", "会话管理子服务名称");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
 DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
@@ -43,7 +44,7 @@ int main(int argc, char *argv[])
     msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue, FLAGS_mq_msg_binding_key);
     msb.make_es_object({FLAGS_es_host});
     msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
-    msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service);
+    msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service, FLAGS_chatsession_service);
     msb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
     msb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
 
