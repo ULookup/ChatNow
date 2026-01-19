@@ -50,7 +50,7 @@ message FriendAddRsp {
     string request_id = 1; 
     bool success = 2; 
     string errmsg = 3; 
-    string notify_event_id = 4;//通知事件 id 
+    optional string notify_event_id = 4;//通知事件 id 
 } 
 //-------------------------------------- //好友申请的处理 
 message FriendAddProcessReq { 
@@ -103,48 +103,6 @@ message FriendSearchRsp {
     repeated UserInfo user_info = 4; 
 } 
  
-//-------------------------------------- 
-//会话列表获取 
-message GetChatSessionListReq { 
-    string request_id = 1; 
-    optional string session_id = 2; 
-    optional string user_id = 3; 
-} 
-message GetChatSessionListRsp { 
-    string request_id = 1; 
-    bool success = 2; 
-    string errmsg = 3; 
-    repeated ChatSessionInfo chat_session_info_list = 4; 
-} 
-//-------------------------------------- 
-//创建会话 
-message ChatSessionCreateReq { 
-    string request_id = 1; 
-    optional string session_id = 2; 
-    optional string user_id = 3; 
-    string chat_session_name = 4; //需要注意的是，这个列表中也必须包含创建者自己的用户 ID 
-    repeated string member_id_list = 5; 
-} 
-message ChatSessionCreateRsp { 
-    string request_id = 1; 
-    bool success = 2; 
-    string errmsg = 3; //这个字段属于后台之间的数据，给前端回复的时候不需要这个字段，会话信息通过通知进行发送 
-    optional ChatSessionInfo chat_session_info = 4; 
-} 
-//-------------------------------------- 
-//获取会话成员列表 
-message GetChatSessionMemberReq { 
-    string request_id = 1;  
-    optional string session_id = 2; 
-    optional string user_id = 3; 
-    string chat_session_id = 4; 
-} 
-message GetChatSessionMemberRsp { 
-    string request_id = 1; 
-    bool success = 2; 
-    string errmsg = 3; 
-    repeated UserInfo member_info_list = 4; 
-} 
  
 service FriendService { 
  rpc GetFriendList(GetFriendListReq) returns (GetFriendListRsp); 
@@ -152,8 +110,5 @@ service FriendService {
  rpc FriendAdd(FriendAddReq) returns (FriendAddRsp); 
  rpc FriendAddProcess(FriendAddProcessReq) returns (FriendAddProcessRsp); 
  rpc FriendSearch(FriendSearchReq) returns (FriendSearchRsp); 
- rpc GetChatSessionList(GetChatSessionListReq) returns (GetChatSessionListRsp); 
- rpc ChatSessionCreate(ChatSessionCreateReq) returns (ChatSessionCreateRsp); 
- rpc GetChatSessionMember(GetChatSessionMemberReq) returns (GetChatSessionMemberRsp); 
  rpc GetPendingFriendEventList(GetPendingFriendEventListReq) returns (GetPendingFriendEventListRsp); 
 }
