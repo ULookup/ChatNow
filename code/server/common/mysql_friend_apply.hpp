@@ -122,6 +122,23 @@ public:
         }
         return res;
     }
+    /* brief: 获取指定申请信息 */
+    std::shared_ptr<FriendApply> select(const std::string &uid, const std::string &pid) {
+        std::shared_ptr<FriendApply> res;
+        try {
+            odb::transaction trans(_db->begin()); // 获取事务对象，开启事务
+
+            using query  = odb::query<FriendApply>;
+            using result = odb::result<FriendApply>;
+
+            res.reset(_db->query_one<FriendApply>((query::user_id == uid) && (query::peer_id == pid)));
+
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("通过申请者被申请者查询申请信息失败 {}-{}:{}", uid, pid, e.what());
+        }
+        return res;
+    }
 private:
     std::shared_ptr<odb::core::database> _db;
 };
