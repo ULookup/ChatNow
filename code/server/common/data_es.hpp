@@ -94,7 +94,7 @@ public:
     bool createIndex() {
         bool ret = ESIndex(_client, "message")
             .append("user_id", "keyword", "standard", false)
-            .append("message_id", "keyword", "standard", false)
+            .append("message_id", "long", "standard", false)
             .append("create_time", "long", "standard", false)
             .append("chat_session_id", "keyword", "standard", true)
             .append("content")
@@ -108,7 +108,7 @@ public:
     }
 
     bool appendData(const std::string &user_id,
-                    const std::string &message_id,
+                    unsigned long message_id,
                     const long create_time,
                     const std::string &chat_session_id,
                     const std::string &content)
@@ -119,7 +119,7 @@ public:
             .append("create_time", create_time)
             .append("chat_session_id", chat_session_id)
             .append("content", content)
-            .insert(message_id);
+            .insert(std::to_string(message_id));
         if(ret == false) {
             LOG_ERROR("消息数据插入/更新失败");
             return false;
@@ -128,8 +128,8 @@ public:
         return true;
     }
 
-    bool remove(const std::string &mid) {
-        bool ret = ESRemove(_client, "message").remove(mid);
+    bool remove(unsigned long mid) {
+        bool ret = ESRemove(_client, "message").remove(std::to_string(mid));
         if(ret == false) {
             LOG_ERROR("消息删除失败");
             return false;
@@ -153,7 +153,7 @@ public:
         for(int i = 0; i < sz; ++i) {
             Message message;
             message.user_id(json_message[i]["_source"]["user_id"].asString());
-            message.message_id(json_message[i]["_source"]["message_id"].asString());
+            message.message_id(json_message[i]["_source"]["message_id"].asUInt64());
             boost::posix_time::ptime ctime(boost::posix_time::from_time_t(json_message[i]["_source"]["create_time"].asInt64()));
             message.create_time(ctime);
             message.session_id(json_message[i]["_source"]["chat_session_id"].asString());
