@@ -3,6 +3,7 @@
 #include <brpc/server.h>
 #include "data_es.hpp"
 #include "mysql_message.hpp"
+#include "mysql_user_timeline.hpp"
 #include "etcd.hpp"
 #include "logger.hpp"
 #include "utils.hpp"
@@ -10,11 +11,13 @@
 #include "rabbitmq.hpp"
 
 #include "message.hxx"
+#include "user_timeline.hxx"
 
 #include "base.pb.h"
 #include "message.pb.h"
 #include "file.pb.h"
 #include "user.pb.h"
+#include "chatsession.pb.h"
 
 namespace chatnow
 {
@@ -24,13 +27,17 @@ class MessageServiceImpl : public chatnow::MsgStorageService
 public:
     MessageServiceImpl(const std::string &file_service_name,
                         const std::string &user_service_name, 
+                        const std::string &chatsession_service_name,
                         const ServiceManager::ptr &channels, 
                         const std::shared_ptr<elasticlient::Client> &es_client,
                         const std::shared_ptr<odb::core::database> &mysql_client) 
                         : _file_service_name(file_service_name),
                         _user_service_name(user_service_name),
+                        _chatsession_service_name(chatsession_service_name),
                         _mm_channels(channels),
                         _es_client(std::make_shared<ESMessage>(es_client)),
+                        _db(mysql_client),
+                        _mysql_usertimeline_table(std::make_shared<UserTimeLineTable>(mysql_client)),
                         _mysql_message_table(std::make_shared<MessageTable>(mysql_client)) 
     {
         _es_client->createIndex();
@@ -50,17 +57,31 @@ public:
         };
         //1. 提取关键要素： 会话ID，起始时间，结束时间
         std::string rid = request->request_id();
+        std::string uid = request->user_id();
         std::string chat_ssid = request->chat_session_id();
         boost::posix_time::ptime stime = boost::posix_time::from_time_t(request->start_time());
         boost::posix_time::ptime etime = boost::posix_time::from_time_t(request->over_time());
-        //2. 从数据库中进行消息查询
-        auto msg_list = _mysql_message_table->range(chat_ssid, stime, etime);
+        //2. 从Timeline数据库中获取该时间段内属于用户的消息ID
+        auto timeline_list = _mysql_usertimeline_table->range(uid, chat_ssid, stime, etime);
+
+        if(timeline_list.empty()) {
+            response->set_request_id(rid);
+            response->set_success(true);
+            return;
+        }
+        //3. 提取message_id列表
+        std::vector<unsigned long> msg_id_list;
+        for(const auto &timeline : timeline_list) {
+            msg_id_list.push_back(timeline.message_id());
+        }
+        //4. 通过ID列表去Message表查消息
+        auto msg_list = _mysql_message_table->select_by_ids(msg_id_list);
         if(msg_list.empty()) {
             response->set_request_id(rid);
             response->set_success(true);
             return;
         }
-        //3. 统计所有文件类型消息的文件ID，并从文件子服务进行批量文件下载
+        //5. 统计所有文件类型消息的文件ID，并从文件子服务进行批量文件下载
         std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
             if(msg.file_id().empty()) continue;
@@ -136,18 +157,25 @@ public:
         };
         //1. 提取请求中的关键要素：请求ID，会话ID，要获取的消息数量
         std::string rid = request->request_id();
+        std::string uid = request->user_id();
         std::string chat_ssid = request->chat_session_id();
         int msg_count = request->msg_count();
-        //2. 从数据库获取最近的消息元信息
-        LOG_DEBUG("需要获取的最近消息数量: {}", msg_count);
-        auto msg_list = _mysql_message_table->recent(chat_ssid, msg_count);
-        if(msg_list.empty()) {
+        //2. 从Timeline获取最近的消息ID列表
+        LOG_DEBUG("从用户 {} 的 Timeline 获取会话 {} 的最近消息ID", uid, chat_ssid);
+        std::vector<UserTimeline> timeline_list = _mysql_usertimeline_table->list_latest(uid, chat_ssid, msg_count);
+        if(timeline_list.empty()) {
             response->set_request_id(rid);
             response->set_success(true);
             return;
         }
-        LOG_DEBUG("获取到的最近消息数量: {}", msg_list.size());
-        //3. 组织消息中所有文件消息的文件ID，并从文件子服务进行文件下载
+        //2.1 提取所有的message_id
+        std::vector<unsigned long> msg_id_list;
+        for(const auto &timeline : timeline_list) {
+            msg_id_list.push_back(timeline.message_id());
+        }
+        //3. 用message_id去Message表拉取真正的元信息
+        auto msg_list = _mysql_message_table->select_by_ids(msg_id_list);
+
         std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
             if(msg.file_id().empty()) continue;
@@ -161,12 +189,12 @@ public:
             return err_response(rid, "批量文件数据下载失败");
         }
         //4. 组织消息中所有消息的用户ID，并从用户子服务进行用户信息查询
-        std::unordered_set<std::string> user_id_list;
+        std::unordered_set<std::string> user_id_set;
         for(const auto &msg : msg_list) {
-            user_id_list.insert(msg.user_id());
+            user_id_set.insert(msg.user_id());
         }
-        std::unordered_map<std::string, UserInfo> user_list;
-        ret = _GetUser(rid, user_id_list, user_list);
+        std::unordered_map<std::string, UserInfo> user_map;
+        ret = _GetUser(rid, user_id_set, user_map);
         if(ret == false) {
             LOG_ERROR("请求ID {} - 批量用户信息获取失败", rid);
             return err_response(rid, "批量用户信息获取失败");
@@ -179,7 +207,7 @@ public:
             message_info->set_message_id(msg.message_id());
             message_info->set_chat_session_id(msg.session_id());
             message_info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
-            message_info->mutable_sender()->CopyFrom(user_list[msg.user_id()]);
+            message_info->mutable_sender()->CopyFrom(user_map[msg.user_id()]);
             switch(msg.message_type()) {
                 case MessageType::STRING:
                     LOG_DEBUG("消息是字符消息, 组织响应, 内容大小: {}", file_data_list[msg.file_id()].size());
@@ -262,7 +290,169 @@ public:
         }
         return;
     }
+    virtual void GetOfflineMsg(google::protobuf::RpcController* controller,
+                            const ::chatnow::GetOfflineMsgReq* request,
+                            ::chatnow::GetOfflineMsgRsp* response,
+                            ::google::protobuf::Closure* done)
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto err_response = [this, response](const std::string &rid, const std::string &errmsg) {
+            response->set_request_id(rid);
+            response->set_success(false);
+            response->set_errmsg(errmsg);
+        };
 
+        // 1. 提取参数
+        std::string rid = request->request_id();
+        std::string user_id = request->user_id();
+        unsigned long last_msg_id = request->last_message_id();
+        int msg_count = request->msg_count();
+        
+        // 容错处理
+        if(msg_count <= 0) msg_count = 50;
+        if(msg_count > 1000) msg_count = 1000;
+
+        // 2. 从 Timeline 全局获取消息 ID (多取一条用于判断 has_more)
+        // 注意：这里调用的是上面新增的 list_global_after
+        std::vector<UserTimeline> timeline_list = _mysql_usertimeline_table->list_global_after(
+            user_id, last_msg_id, msg_count + 1);
+
+        // 3. 判断是否还有更多数据
+        bool has_more = false;
+        if (timeline_list.size() > msg_count) {
+            has_more = true;
+            timeline_list.pop_back(); // 移除多取的那一条，只返回客户端请求的数量
+        }
+        
+        if(timeline_list.empty()) {
+            response->set_request_id(rid);
+            response->set_success(true);
+            response->set_has_more(false);
+            return;
+        }
+
+        // 4. 提取 Message ID 列表
+        std::vector<unsigned long> msg_id_list;
+        msg_id_list.reserve(timeline_list.size());
+        for(const auto &tl : timeline_list) {
+            msg_id_list.push_back(tl.message_id());
+        }
+
+        // 5. 批量查询消息正文 (使用之前实现的 select_by_ids)
+        auto msg_list = _mysql_message_table->select_by_ids(msg_id_list);
+        if(msg_list.empty()) {
+            // Timeline 有 ID 但 Message 表没数据（极少见的数据不一致）
+            LOG_WARN("增量同步时 Timeline 存在数据但 Message 表缺失, User: {}, StartID: {}", user_id, last_msg_id);
+            response->set_request_id(rid);
+            response->set_success(true);
+            response->set_has_more(has_more); // 依然返回 has_more 状态，客户端可能需要跳过这些 ID
+            return;
+        }
+
+        // 6. 批量下载文件数据 (标准流程)
+        std::unordered_set<std::string> file_id_list;
+        for(const auto &msg : msg_list) {
+            if(!msg.file_id().empty()) file_id_list.insert(msg.file_id());
+        }
+        std::unordered_map<std::string, std::string> file_data_list;
+        if(!file_id_list.empty()) {
+            if(!_GetFile(rid, file_id_list, file_data_list)) {
+                return err_response(rid, "增量同步: 文件数据获取失败");
+            }
+        }
+
+        // 7. 批量获取用户信息 (标准流程)
+        std::unordered_set<std::string> sender_id_list;
+        for(const auto &msg : msg_list) {
+            sender_id_list.insert(msg.user_id());
+        }
+        std::unordered_map<std::string, UserInfo> user_map;
+        if(!_GetUser(rid, sender_id_list, user_map)) {
+            return err_response(rid, "增量同步: 用户信息获取失败");
+        }
+
+        // 8. 组装响应
+        response->set_request_id(rid);
+        response->set_success(true);
+        response->set_has_more(has_more);
+
+        for(const auto &msg : msg_list) {
+            auto *info = response->add_msg_list();
+            
+            // 填充基础信息
+            info->set_message_id(msg.message_id());
+            info->set_chat_session_id(msg.session_id());
+            info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
+            
+            // 填充发送者信息
+            if (user_map.find(msg.user_id()) != user_map.end()) {
+                info->mutable_sender()->CopyFrom(user_map[msg.user_id()]);
+            }
+
+            // 填充消息内容 (复用之前的 switch-case 逻辑，建议封装成函数 fill_content)
+            switch(msg.message_type()) {
+                case MessageType::STRING:
+                    info->mutable_message()->set_message_type(MessageType::STRING);
+                    info->mutable_message()->mutable_string_message()->set_content(msg.content());
+                    break;
+                case MessageType::IMAGE:
+                    info->mutable_message()->set_message_type(MessageType::IMAGE);
+                    info->mutable_message()->mutable_image_message()->set_file_id(msg.file_id());
+                    if(file_data_list.count(msg.file_id()))
+                         info->mutable_message()->mutable_image_message()->set_image_content(file_data_list[msg.file_id()]);
+                    break;
+                case MessageType::FILE:
+                    info->mutable_message()->set_message_type(MessageType::FILE);
+                    info->mutable_message()->mutable_file_message()->set_file_id(msg.file_id());
+                    info->mutable_message()->mutable_file_message()->set_file_size(msg.file_size());
+                    info->mutable_message()->mutable_file_message()->set_file_name(msg.file_name());
+                    if(file_data_list.count(msg.file_id()))
+                        info->mutable_message()->mutable_file_message()->set_file_contents(file_data_list[msg.file_id()]);
+                    break;
+                case MessageType::SPEECH:
+                    info->mutable_message()->set_message_type(MessageType::SPEECH);
+                    info->mutable_message()->mutable_speech_message()->set_file_id(msg.file_id());
+                    if(file_data_list.count(msg.file_id()))
+                        info->mutable_message()->mutable_speech_message()->set_file_contents(file_data_list[msg.file_id()]);
+                    break;
+            }
+        }
+    }
+    virtual void GetUnreadCount(google::protobuf::RpcController* controller,
+                                const ::chatnow::GetUnreadCountReq* request,
+                                ::chatnow::GetUnreadCountRsp* response,
+                                ::google::protobuf::Closure* done)
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        
+        // 1. 提取参数
+        std::string rid = request->request_id();
+        std::string user_id = request->user_id();
+        std::string chat_ssid = request->chat_session_id();
+        unsigned long last_read_id = request->last_read_msg_id();
+
+        // 2. 获取该会话最新的消息 ID
+        unsigned long latest_msg_id = _mysql_usertimeline_table->get_latest_msg_id(user_id, chat_ssid);
+
+        int unread_count = 0;
+
+        // 3. 优化逻辑：如果库里的最新消息ID <= 用户已读ID，说明没有未读消息，无需 count
+        if (latest_msg_id > 0 && latest_msg_id > last_read_id) {
+            unread_count = _mysql_usertimeline_table->get_unread_count(user_id, chat_ssid, last_read_id);
+        }
+
+        // 4. 组织响应
+        response->set_request_id(rid);
+        response->set_success(true);
+        response->set_unread_count(unread_count);
+        response->set_latest_msg_id(latest_msg_id);
+
+        LOG_DEBUG("请求ID {} - 未读数计算完成: uid={}, session={}, last_read={}, unread={}, latest={}", 
+            rid, user_id, chat_ssid, last_read_id, unread_count, latest_msg_id);
+    }
+    //================================================================================================//
+    //=========================================== 消费回调 ============================================//
+    //================================================================================================//
     void onMessage(const char *body, size_t sz) {
         LOG_DEBUG("收到新消息，进行存储处理！");
         //1. 取出序列化的消息内容进行反序列化
@@ -273,75 +463,87 @@ public:
             return;
         }
         std::string file_id, file_name, content;
-        int64_t file_size;
+        int64_t file_size = 0;
         //2. 根据不同的消息类型进行不同的处理
-        switch(message.message().message_type()) {
-            //2.1 如果是文本消息，取元信息存储到ES中
-            case MessageType::STRING:
-                {
-                    content = message.message().string_message().content();
-                    ret = _es_client->appendData(message.sender().user_id(), 
-                                        message.message_id(), 
-                                        message.timestamp(),
-                                        message.chat_session_id(),
-                                        content);
-                    if(ret == false) {
-                        LOG_ERROR("文本消息向存储引擎进行存储失败");
-                        return;
-                    }
-                    break;
-                }
-            //2.2 如果是一个图片/语言/文件消息，则取出数据存储到文件子服务中，并获取文件ID
-            case MessageType::IMAGE:
-                {
-                    const auto &msg = message.message().image_message();
-                    ret = _PutFile("", msg.image_content(), msg.image_content().size(), file_id);
-                    if(ret == false) {
-                        LOG_ERROR("上传图片到文件子服务失败");
-                        return;
-                    }
-                    break;
-                }
-            case MessageType::FILE:
-                {
-                    const auto &msg = message.message().file_message();
-                    file_name = msg.file_name();
-                    file_size = msg.file_size();
-                    ret = _PutFile(file_name, msg.file_contents(), file_size, file_id);
-                    if(ret == false) {
-                        LOG_ERROR("上传文件到文件子服务失败");
-                        return;
-                    }
-                    break;
-                }
-            case MessageType::SPEECH:
-                {
-                    const auto &msg = message.message().speech_message();
-                    ret = _PutFile("", msg.file_contents(), msg.file_contents().size(), file_id);
-                    if(ret == false) {
-                        LOG_ERROR("上传语言到文件子服务失败");
-                        return;
-                    }
-                    break;
-                }
-            default:
-                LOG_ERROR("消息类型错误");
-                return;
+        auto msg_type = message.message().message_type();
+        if (msg_type == MessageType::STRING) {
+            content = message.message().string_message().content();
+        } else {
+            // 如果是文件/图片/语音，先上传到文件子服务拿到 file_id
+            bool file_ret = false;
+            if (msg_type == MessageType::IMAGE) {
+                const auto &m = message.message().image_message();
+                file_ret = _PutFile("", m.image_content(), m.image_content().size(), file_id);
+            } else if (msg_type == MessageType::FILE) {
+                const auto &m = message.message().file_message();
+                file_name = m.file_name();
+                file_size = m.file_size();
+                file_ret = _PutFile(file_name, m.file_contents(), file_size, file_id);
+            } else if (msg_type == MessageType::SPEECH) {
+                const auto &m = message.message().speech_message();
+                file_ret = _PutFile("", m.file_contents(), m.file_contents().size(), file_id);
+            }
+
+            if (!file_ret) {
+                LOG_ERROR("文件上传失败，放弃后续存储");
+                return; 
+            }
         }
-        //3. 提取消息的元消息，存储到MySQL数据库中
+        //3. 提取消息的元消息
         chatnow::Message msg(message.message_id(), 
                             message.chat_session_id(), 
                             message.sender().user_id(), 
                             message.message().message_type(),
-                            boost::posix_time::from_time_t(message.timestamp()));
+                            boost::posix_time::from_time_t(message.timestamp()),
+                            MessageStatus::NORMAL);
         msg.content(content);
         msg.file_id(file_id);
         msg.file_name(file_name);
         msg.file_size(file_size);
-        ret = _mysql_message_table->insert(msg);
+        //4. 取出会话所有成员
+        std::vector<UserTimeline> timeline_list;
+        std::vector<std::string> member_id_list;
+        ret = _GetMembers(message.chat_session_id(), member_id_list);
         if(ret == false) {
-            LOG_ERROR("向数据库插入新消息失败");
+            LOG_ERROR("调用会话管理子服务获取会话成员失败");
             return;
+        }
+        timeline_list.reserve(member_id_list.size());
+        for(const auto &member : member_id_list) {
+            UserTimeline timeline;
+            timeline.message_id(message.message_id());
+            timeline.message_time(boost::posix_time::from_time_t(message.timestamp()));
+            timeline.session_id(message.chat_session_id());
+            timeline.user_id(member);
+            timeline_list.push_back(timeline);
+        }
+        //5. 开启事务，向消息表和Timeline表持久化数据
+        try {
+            odb::transaction trans(_db->begin());
+
+            if(!_mysql_message_table->insert(msg)) {
+                throw std::runtime_error("插入消息到Message表失败");
+            }
+
+            if(!_mysql_usertimeline_table->insert(timeline_list)) {
+                throw std::runtime_error("将消息扩散到会话成员失败");
+            }
+
+            trans.commit();
+            LOG_INFO("消息及扩散写成功: {}", message.message_id());
+            if(msg_type == MessageType::STRING) {
+                bool es_ret = _es_client->appendData(message.sender().user_id(), 
+                                                    message.message_id(), 
+                                                    message.timestamp(),
+                                                    message.chat_session_id(),
+                                                    content);
+                if(!es_ret) {
+                    // ES 失败不回滚 MySQL，只需记录日志，后续靠补偿机制或重新索引
+                    LOG_ERROR("ES 索引失败，需后续补偿，MsgID: {}", message.message_id());
+                }
+            }
+        } catch(std::exception &e) {
+            LOG_ERROR("数据库事务失败: {}", e.what());
         }
     }
 private:
@@ -425,10 +627,34 @@ private:
         file_id = rsp.file_info().file_id();
         return true;
     }
+    bool _GetMembers(const std::string &ssid, std::vector<std::string> &member_id_list) {
+        auto channel = _mm_channels->choose(_chatsession_service_name);
+        if(!channel) {
+            LOG_ERROR("{} 没有可供访问的会话管理子服务节点", _chatsession_service_name);
+            return false;
+        }
+        ChatSessionService_Stub stub(channel.get());
+        GetMemberIdListReq req;
+        GetMemberIdListRsp rsp;
+        req.set_chat_session_id(ssid);
+        brpc::Controller cntl;
+        stub.GetMemberIdList(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed() == true || rsp.success() == false) {
+            LOG_ERROR("会话子服务调用失败: {}", cntl.ErrorText());
+            return false;
+        }
+        for(int i = 0; i < rsp.member_id_list_size(); ++i) {
+            member_id_list.push_back(rsp.member_id_list(i));
+        }
+        return true;
+    }
 private:
     std::string _file_service_name;
     std::string _user_service_name;
+    std::string _chatsession_service_name;
+    std::shared_ptr<odb::core::database> _db;
     MessageTable::ptr _mysql_message_table;
+    UserTimeLineTable::ptr _mysql_usertimeline_table;
     ESMessage::ptr _es_client;
     ServiceManager::ptr _mm_channels;
 };
@@ -485,10 +711,12 @@ public:
     void make_discovery_object(const std::string &reg_host, 
                             const std::string &base_service_name,
                             const std::string &file_service_name,
-                            const std::string &user_service_name)
+                            const std::string &user_service_name,
+                            const std::string &chatsession_service_name)
     {
         _file_service_name = file_service_name;
         _user_service_name = user_service_name;
+        _chatsession_service_name = chatsession_service_name;
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(_file_service_name);
         _mm_channels->declared(_user_service_name);
@@ -532,7 +760,7 @@ public:
             abort();
         }
         _rpc_server = std::make_shared<brpc::Server>();
-        MessageServiceImpl *message_service = new MessageServiceImpl(_file_service_name, _user_service_name, _mm_channels, _es_client, _mysql_client);
+        MessageServiceImpl *message_service = new MessageServiceImpl(_file_service_name, _user_service_name, _chatsession_service_name, _mm_channels, _es_client, _mysql_client);
         int ret = _rpc_server->AddService(message_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -571,6 +799,7 @@ public:
 private:
     std::string _file_service_name;
     std::string _user_service_name;
+    std::string _chatsession_service_name;
     ServiceManager::ptr _mm_channels;
 
     std::string _exchange_name;
