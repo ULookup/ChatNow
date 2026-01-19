@@ -53,4 +53,17 @@ private:
     #pragma db index("idx_user_session_msg") members(_user_id, _session_id, _message_id)
 }; // classs UserTimeline
 
+#pragma db view object(UserTimeline)
+struct LatestIdView {
+    #pragma db column("max(" + UserTimeline::_message_id + ")")
+    odb::nullable<unsigned long> max_id;
+};
+
+// 2. 用于统计数量 (COUNT)
+#pragma db view object(UserTimeline)
+struct CountView {
+    #pragma db column("count(" + UserTimeline::_id + ")")
+    unsigned long count;
+};
+
 } // namespace chatnow
