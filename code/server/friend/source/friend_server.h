@@ -21,6 +21,10 @@
 namespace chatnow
 {
 
+#define NORMAL_SESSION    0
+#define ARCHIVED_SESSION  1
+#define DISMISSED_SESSION 2
+
 class FriendServiceImpl : public FriendService
 {
 public:
@@ -134,14 +138,37 @@ public:
             return err_response(rid, "两者已经是好友关系");
         }
         //3. 判断当前是否已经申请过好友
-        ret = _mysql_friend_apply->exists(uid, pid);
-        if(ret == true) {
-            LOG_ERROR("请求ID - {} 申请好友失败，已经申请过对方好友", rid);
-            return err_response(rid, "已经申请过对方好友");
+        auto friend_apply = _mysql_friend_apply->select(uid, pid);
+        if(!friend_apply) {
+            LOG_ERROR("请求ID - {} 没有找到好友申请 {} - {}", rid, uid, pid);
+            return err_response(rid, "没有找到好友申请");
         }
+        //3.1 如果已经申请过了，但原有事件被拒绝，则对原有事件更新
+        if(friend_apply->status() == FriendApplyStatus::REJECTED) {
+            //判断是否已经过了3天
+            auto now = boost::posix_time::second_clock::local_time();
+            auto diff = now - friend_apply->create_time();
+            if(diff < boost::posix_time::hours(72)) {
+                LOG_ERROR("请求ID - {} 好友申请 {} - {} 距离上次拒绝不足3天", rid, uid, pid);
+                return err_response(rid, "距离上次被拒绝不足3天, 暂不能再次申请");
+            }
+            //更改创建时间和状态
+            friend_apply->create_time(now);
+            friend_apply->status(FriendApplyStatus::PENDING);
+            ret = _mysql_friend_apply->update(friend_apply);
+            if(ret == false) {
+                LOG_ERROR("请求ID - {} 更新好友请求失败 {} - {}",rid, uid, pid);
+                return err_response(rid, "更新好友请求失败");
+            }
+            response->set_request_id(rid);
+            response->set_success(true);
+            response->set_notify_event_id(friend_apply->event_id()); 
+            return;
+        }
+        //3.2 如果没有申请过，则新增申请信息
         //4. 向好友申请表新增申请信息
         std::string eid = uuid();
-        FriendApply ev(eid, uid, pid);
+        FriendApply ev(eid, uid, pid, FriendApplyStatus::PENDING, boost::posix_time::second_clock::local_time());
         ret = _mysql_friend_apply->insert(ev);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 向数据库新增好友申请事件失败", rid);
@@ -172,45 +199,58 @@ public:
         std::string pid = request->apply_user_id(); //申请人
         bool agree =  request->agree();
         //2. 判断有没有该申请事件
-        bool ret = _mysql_friend_apply->exists(pid, uid);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 没有对应 {} - {} 的好友申请事件", rid, pid, uid);
-            return err_response(rid, "没有找到对应的好友申请事件");
+        auto apply_event = _mysql_friend_apply->select(pid, uid);
+        if(!apply_event) {
+            LOG_ERROR("请求ID - {} 没有申请事件 {} - {}", rid, pid, uid);
+            return err_response(rid, "没有查询到申请事件");
         }
-        //3. 如果有：可以处理 --- 删除申请事件 --- 事件已经处理完毕
-        ret = _mysql_friend_apply->remove(pid, uid);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 从数据库删除申请事件 {} - {} 失败", rid, pid, uid);
-            return err_response(rid, "从数据库删除申请失败");
-        }
-        //4. 如果结果是同意：向数据库新增好友关系信息；新增单聊会话信息及会话成员
+        //4. 如果结果是同意：更新好友申请事件状态，向数据库新增好友关系信息；新增单聊会话信息及会话成员
         std::string cssid;
         if(agree == true) {
+            //4.1 更新申请状态
+            apply_event->status(FriendApplyStatus::ACCEPTED);
+            apply_event->handle_time(boost::posix_time::second_clock::local_time());
+            bool ret = _mysql_friend_apply->update(apply_event);
+            if(ret == false) {
+                LOG_ERROR("请求ID - {} 更新申请信息失败", rid);
+                return err_response(rid, "更新申请信息失败");
+            }
+            //4.2 插入好友关系信息
             ret = _mysql_relation->insert(uid, pid);
             if(ret == false) {
                 LOG_ERROR("请求ID - {} 新增好友关系信息 {} - {} 失败", rid, uid, pid);
                 return err_response(rid, "新增好友关系信息失败");
             }
+            //4.3 创建单聊会话
             cssid = uuid();
-            ChatSession cs(cssid, "", ChatSessionType::SINGLE);
+            ChatSession cs(cssid, "", ChatSessionType::SINGLE, boost::posix_time::second_clock::local_time(), 2, NORMAL_SESSION);
             ret = _mysql_chat_session->insert(cs);
             if(ret == false) {
                 LOG_ERROR("请求ID - {} 新增会话信息 {} 失败", rid, cssid);
                 return err_response(rid, "新增会话信息失败");
             }
-            ChatSessionMember csm1(cssid, uid);
-            ChatSessionMember csm2(cssid, pid);
+            ChatSessionMember csm1(cssid, uid, 0, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
+            ChatSessionMember csm2(cssid, pid, 0, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
             std::vector<ChatSessionMember> member_lsit = {csm1, csm2};
             ret = _mysql_chat_session_member->append(member_lsit);
             if(ret == false) {
                 LOG_ERROR("请求ID - {} 从数据库删除申请事件 {} - {} 失败", rid, pid, uid);
                 return err_response(rid, "从数据库删除申请失败");
             }
+            response->set_new_session_id(cssid);
+        } else {
+            //4.1 更新申请状态
+            apply_event->status(FriendApplyStatus::REJECTED);
+            apply_event->handle_time(boost::posix_time::second_clock::local_time());
+            bool ret = _mysql_friend_apply->update(apply_event);
+            if(ret == false) {
+                LOG_ERROR("请求ID - {} 更新申请信息失败", rid);
+                return err_response(rid, "更新申请信息失败");
+            }
         }
         //5. 组织响应
         response->set_request_id(rid);
         response->set_success(true);
-        response->set_new_session_id(cssid);
     }
     /* brief: 用户搜索 */
     virtual void FriendSearch(::google::protobuf::RpcController* controller,
@@ -290,146 +330,146 @@ public:
             ev->mutable_sender()->CopyFrom(user_it.second);
         }
     }
-    /* brief: 获取会话列表 */
-    virtual void GetChatSessionList(::google::protobuf::RpcController* controller,
-                        const ::chatnow::GetChatSessionListReq* request,
-                        ::chatnow::GetChatSessionListRsp* response,
-                        ::google::protobuf::Closure* done)
-    {
-        brpc::ClosureGuard rpc_guard(done);
-        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
-            response->set_request_id(rid);
-            response->set_success(false);
-            response->set_errmsg(err_msg);
-            return;
-        };
-        //1. 提取关键要素：当前请求用户ID
-        std::string rid = request->request_id();
-        std::string uid = request->user_id();
-        //2. 从数据库查询出用户单聊会话列表
-        auto single_friend_list = _mysql_chat_session->singleChatSession(uid);
-        //2.1 从单聊会话列表中，取出所有好友的ID，从用户子服务获取用户信息
-        std::unordered_set<std::string> user_id_lsit;
-        for(const auto &single_friend : single_friend_list) {
-            user_id_lsit.insert(single_friend.friend_id);
-        }
-        std::unordered_map<std::string, UserInfo> user_list;
-        bool ret = GetUserInfo(rid, user_id_lsit, user_list);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 批量获取用户信息失败", rid);
-            return err_response(rid, "批量获取用户信息失败");
-        }
-        //2.2 设置响应会话信息，会话名称就是好友名称；会话头像就是好友头像
-        
-        //3. 从数据库查询用户群里列表
-        auto group_chat_list = _mysql_chat_session->groupChatSession(uid);
-        //4. 根据所有的会话ID，从消息存储子服务获取会话最后一条消息
-        //5. 组织响应
-        for(const auto &f : single_friend_list) {
-            auto chat_session_info = response->add_chat_session_info_list();
-            chat_session_info->set_single_chat_friend_id(f.friend_id);
-            chat_session_info->set_chat_session_id(f.chat_session_id);
-            chat_session_info->set_chat_session_name(user_list[f.friend_id].nickname());
-            chat_session_info->set_avatar(user_list[f.friend_id].avatar());
-            MessageInfo msg;
-            ret = GetRecentMsg(rid, f.chat_session_id, msg);
-            if(ret == false) { continue; }
-            chat_session_info->mutable_prev_message()->CopyFrom(msg);
-        }
-        for(const auto &f : group_chat_list) {
-            auto chat_session_info = response->add_chat_session_info_list();
-            chat_session_info->set_chat_session_id(f.chat_session_id);
-            chat_session_info->set_chat_session_name(f.chat_session_name);
-            MessageInfo msg;
-            ret = GetRecentMsg(rid, f.chat_session_id, msg);
-            if(ret == false) { continue; }
-            chat_session_info->mutable_prev_message()->CopyFrom(msg);
-        }
-        response->set_request_id(rid);
-        response->set_success(true);
-    }
-    /* brief: 创建群聊会话 */
-    virtual void ChatSessionCreate(::google::protobuf::RpcController* controller,
-                        const ::chatnow::ChatSessionCreateReq* request,
-                        ::chatnow::ChatSessionCreateRsp* response,
-                        ::google::protobuf::Closure* done)
-    {
-        brpc::ClosureGuard rpc_guard(done);
-        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
-            response->set_request_id(rid);
-            response->set_success(false);
-            response->set_errmsg(err_msg);
-            return;
-        };
-        //创建会话，其实针对的是用户要创建一个群聊会话
-        //1. 提取关键要素 --- 会话名称 会话成员
-        std::string rid = request->request_id();
-        std::string uid = request->user_id();
-        std::string cssname = request->chat_session_name();
-        //2. 生成会话ID，向数据库添加会话信息，添加会话成员信息
-        std::string cssid = uuid();
-        ChatSession cs(cssid, cssname, ChatSessionType::GROUP);
-        bool ret = _mysql_chat_session->insert(cs);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 向数据库添加会话信息失败: cssname = {}", rid, cssname);
-            return err_response(rid, "向数据库添加会话信息失败");
-        }
-
-        std::vector<ChatSessionMember> member_list;
-        for(int i = 0; i < request->member_id_list_size(); ++i) {
-            ChatSessionMember csm(cssid, request->member_id_list(i));
-            member_list.push_back(csm);
-        }
-
-        ret = _mysql_chat_session_member->append(member_list);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 向数据库添加会话成员信息失败: cssname = {}", rid, cssname);
-            return err_response(rid, "向数据库添加会话成员信息失败");
-        }
-        //3. 组织响应 --- 组织会话信息
-        response->set_request_id(rid);
-        response->set_success(true);
-        response->mutable_chat_session_info()->set_chat_session_id(cssid);
-        response->mutable_chat_session_info()->set_chat_session_name(cssname);
-    }
-    /* brief: 查看群聊信息，进行群聊信息展示 */
-    virtual void GetChatSessionMember(::google::protobuf::RpcController* controller,
-                        const ::chatnow::GetChatSessionMemberReq* request,
-                        ::chatnow::GetChatSessionMemberRsp* response,
-                        ::google::protobuf::Closure* done)
-    {
-        brpc::ClosureGuard rpc_guard(done);
-        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
-            response->set_request_id(rid);
-            response->set_success(false);
-            response->set_errmsg(err_msg);
-            return;
-        };
-        //1. 提取关键要素： 聊天会话ID
-        std::string rid = request->request_id();
-        std::string uid = request->user_id();
-        std::string cssid = request->chat_session_id();
-        //2. 从数据库获取会话成员ID列表
-        auto member_id_lists = _mysql_chat_session_member->members(cssid);
-        std::unordered_set<std::string> uid_list;
-        for(const auto &id : member_id_lists) {
-            uid_list.insert(id);
-        }
-        //3. 从用户子服务批量获取用户信息
-        std::unordered_map<std::string, UserInfo> user_list;
-        bool ret = GetUserInfo(rid, uid_list, user_list);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 从用户子服务获取用户信息失败", rid);
-            return err_response(rid, "从用户子服务获取用户信息失败");
-        }
-        //4. 组织响应
-        response->set_request_id(rid);
-        response->set_success(true);
-        for(const auto &user_it : user_list) {
-            auto user_info = response->add_member_info_list();
-            user_info->CopyFrom(user_it.second);
-        }
-    }
+    ///* brief: 获取会话列表 */
+    //virtual void GetChatSessionList(::google::protobuf::RpcController* controller,
+    //                    const ::chatnow::GetChatSessionListReq* request,
+    //                    ::chatnow::GetChatSessionListRsp* response,
+    //                    ::google::protobuf::Closure* done)
+    //{
+    //    brpc::ClosureGuard rpc_guard(done);
+    //    auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
+    //        response->set_request_id(rid);
+    //        response->set_success(false);
+    //        response->set_errmsg(err_msg);
+    //        return;
+    //    };
+    //    //1. 提取关键要素：当前请求用户ID
+    //    std::string rid = request->request_id();
+    //    std::string uid = request->user_id();
+    //    //2. 从数据库查询出用户单聊会话列表
+    //    auto single_friend_list = _mysql_chat_session->singleChatSession(uid);
+    //    //2.1 从单聊会话列表中，取出所有好友的ID，从用户子服务获取用户信息
+    //    std::unordered_set<std::string> user_id_lsit;
+    //    for(const auto &single_friend : single_friend_list) {
+    //        user_id_lsit.insert(single_friend.friend_id);
+    //    }
+    //    std::unordered_map<std::string, UserInfo> user_list;
+    //    bool ret = GetUserInfo(rid, user_id_lsit, user_list);
+    //    if(ret == false) {
+    //        LOG_ERROR("请求ID - {} 批量获取用户信息失败", rid);
+    //        return err_response(rid, "批量获取用户信息失败");
+    //    }
+    //    //2.2 设置响应会话信息，会话名称就是好友名称；会话头像就是好友头像
+    //    
+    //    //3. 从数据库查询用户群里列表
+    //    auto group_chat_list = _mysql_chat_session->groupChatSession(uid);
+    //    //4. 根据所有的会话ID，从消息存储子服务获取会话最后一条消息
+    //    //5. 组织响应
+    //    for(const auto &f : single_friend_list) {
+    //        auto chat_session_info = response->add_chat_session_info_list();
+    //        chat_session_info->set_single_chat_friend_id(f.friend_id);
+    //        chat_session_info->set_chat_session_id(f.chat_session_id);
+    //        chat_session_info->set_chat_session_name(user_list[f.friend_id].nickname());
+    //        chat_session_info->set_avatar(user_list[f.friend_id].avatar());
+    //        MessageInfo msg;
+    //        ret = GetRecentMsg(rid, f.chat_session_id, msg);
+    //        if(ret == false) { continue; }
+    //        chat_session_info->mutable_prev_message()->CopyFrom(msg);
+    //    }
+    //    for(const auto &f : group_chat_list) {
+    //        auto chat_session_info = response->add_chat_session_info_list();
+    //        chat_session_info->set_chat_session_id(f.chat_session_id);
+    //        chat_session_info->set_chat_session_name(f.chat_session_name);
+    //        MessageInfo msg;
+    //        ret = GetRecentMsg(rid, f.chat_session_id, msg);
+    //        if(ret == false) { continue; }
+    //        chat_session_info->mutable_prev_message()->CopyFrom(msg);
+    //    }
+    //    response->set_request_id(rid);
+    //    response->set_success(true);
+    //}
+    ///* brief: 创建群聊会话 */
+    //virtual void ChatSessionCreate(::google::protobuf::RpcController* controller,
+    //                    const ::chatnow::ChatSessionCreateReq* request,
+    //                    ::chatnow::ChatSessionCreateRsp* response,
+    //                    ::google::protobuf::Closure* done)
+    //{
+    //    brpc::ClosureGuard rpc_guard(done);
+    //    auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
+    //        response->set_request_id(rid);
+    //        response->set_success(false);
+    //        response->set_errmsg(err_msg);
+    //        return;
+    //    };
+    //    //创建会话，其实针对的是用户要创建一个群聊会话
+    //    //1. 提取关键要素 --- 会话名称 会话成员
+    //    std::string rid = request->request_id();
+    //    std::string uid = request->user_id();
+    //    std::string cssname = request->chat_session_name();
+    //    //2. 生成会话ID，向数据库添加会话信息，添加会话成员信息
+    //    std::string cssid = uuid();
+    //    ChatSession cs(cssid, cssname, ChatSessionType::GROUP);
+    //    bool ret = _mysql_chat_session->insert(cs);
+    //    if(ret == false) {
+    //        LOG_ERROR("请求ID - {} 向数据库添加会话信息失败: cssname = {}", rid, cssname);
+    //        return err_response(rid, "向数据库添加会话信息失败");
+    //    }
+    //
+    //    std::vector<ChatSessionMember> member_list;
+    //    for(int i = 0; i < request->member_id_list_size(); ++i) {
+    //        ChatSessionMember csm(cssid, request->member_id_list(i));
+    //        member_list.push_back(csm);
+    //    }
+    //
+    //    ret = _mysql_chat_session_member->append(member_list);
+    //    if(ret == false) {
+    //        LOG_ERROR("请求ID - {} 向数据库添加会话成员信息失败: cssname = {}", rid, cssname);
+    //        return err_response(rid, "向数据库添加会话成员信息失败");
+    //    }
+    //    //3. 组织响应 --- 组织会话信息
+    //    response->set_request_id(rid);
+    //    response->set_success(true);
+    //    response->mutable_chat_session_info()->set_chat_session_id(cssid);
+    //    response->mutable_chat_session_info()->set_chat_session_name(cssname);
+    //}
+    ///* brief: 查看群聊信息，进行群聊信息展示 */
+    //virtual void GetChatSessionMember(::google::protobuf::RpcController* controller,
+    //                    const ::chatnow::GetChatSessionMemberReq* request,
+    //                    ::chatnow::GetChatSessionMemberRsp* response,
+    //                    ::google::protobuf::Closure* done)
+    //{
+    //    brpc::ClosureGuard rpc_guard(done);
+    //    auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
+    //        response->set_request_id(rid);
+    //        response->set_success(false);
+    //        response->set_errmsg(err_msg);
+    //        return;
+    //    };
+    //    //1. 提取关键要素： 聊天会话ID
+    //    std::string rid = request->request_id();
+    //    std::string uid = request->user_id();
+    //    std::string cssid = request->chat_session_id();
+    //    //2. 从数据库获取会话成员ID列表
+    //    auto member_id_lists = _mysql_chat_session_member->members(cssid);
+    //    std::unordered_set<std::string> uid_list;
+    //    for(const auto &id : member_id_lists) {
+    //        uid_list.insert(id);
+    //    }
+    //    //3. 从用户子服务批量获取用户信息
+    //    std::unordered_map<std::string, UserInfo> user_list;
+    //    bool ret = GetUserInfo(rid, uid_list, user_list);
+    //    if(ret == false) {
+    //        LOG_ERROR("请求ID - {} 从用户子服务获取用户信息失败", rid);
+    //        return err_response(rid, "从用户子服务获取用户信息失败");
+    //    }
+    //    //4. 组织响应
+    //    response->set_request_id(rid);
+    //    response->set_success(true);
+    //    for(const auto &user_it : user_list) {
+    //        auto user_info = response->add_member_info_list();
+    //        user_info->CopyFrom(user_it.second);
+    //    }
+    //}
 private:
         bool GetUserInfo(const std::string &rid, 
                         const std::unordered_set<std::string> &uid_list,
@@ -463,34 +503,34 @@ private:
             return true;
         }
 
-        bool GetRecentMsg(const std::string &rid, const std::string &cssid, MessageInfo &msg) {
-            auto channel = _mm_channels->choose(_message_service_name);
-            if(!channel) {
-                LOG_ERROR("请求ID - {} 没有可供访问的用户子服务节点: {}", rid, _message_service_name);
-                return false;
-            }
-            MsgStorageService_Stub stub(channel.get());
-            GetRecentMsgReq req;
-            GetRecentMsgRsp rsp;
-            req.set_request_id(rid);
-            req.set_chat_session_id(cssid);
-            req.set_msg_count(1);
-            brpc::Controller cntl;
-            stub.GetRecentMsg(&cntl, &req, &rsp, nullptr);
-            if(cntl.Failed() == true) {
-                LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", rid, cntl.ErrorText());
-                return false;
-            }
-            if(rsp.success() == false) {
-                LOG_ERROR("请求ID - {} 获取会话 {} 最近消息失败: {}", rid, cssid, rsp.errmsg());
-                return false;
-            }
-            if(rsp.msg_list_size() > 0) {
-                msg.CopyFrom(rsp.msg_list(0));
-                return true;
-            }
-            return false;
-        }
+        //bool GetRecentMsg(const std::string &rid, const std::string &cssid, MessageInfo &msg) {
+        //    auto channel = _mm_channels->choose(_message_service_name);
+        //    if(!channel) {
+        //        LOG_ERROR("请求ID - {} 没有可供访问的用户子服务节点: {}", rid, _message_service_name);
+        //        return false;
+        //    }
+        //    MsgStorageService_Stub stub(channel.get());
+        //    GetRecentMsgReq req;
+        //    GetRecentMsgRsp rsp;
+        //    req.set_request_id(rid);
+        //    req.set_chat_session_id(cssid);
+        //    req.set_msg_count(1);
+        //    brpc::Controller cntl;
+        //    stub.GetRecentMsg(&cntl, &req, &rsp, nullptr);
+        //    if(cntl.Failed() == true) {
+        //        LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", rid, cntl.ErrorText());
+        //        return false;
+        //    }
+        //    if(rsp.success() == false) {
+        //        LOG_ERROR("请求ID - {} 获取会话 {} 最近消息失败: {}", rid, cssid, rsp.errmsg());
+        //        return false;
+        //    }
+        //    if(rsp.msg_list_size() > 0) {
+        //        msg.CopyFrom(rsp.msg_list(0));
+        //        return true;
+        //    }
+        //    return false;
+        //}
 private:
     ESUser::ptr _es_user;
 
