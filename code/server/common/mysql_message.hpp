@@ -77,6 +77,29 @@ public:
         }
         return res;
     }
+    // 在 MessageTable 类中增加
+    std::vector<Message> select_by_ids(const std::vector<unsigned long>& ids) {
+        std::vector<Message> res;
+        if (ids.empty()) return res;
+        
+        try {
+            odb::transaction trans(_db->begin());
+            typedef odb::query<Message> query;
+            typedef odb::result<Message> result;
+            
+            // 使用 IN 语法：WHERE message_id IN (1, 2, 3...)
+            result r(_db->query<Message>(query::message_id.in_range(ids.begin(), ids.end()) + 
+                                        " ORDER BY create_time ASC")); 
+            
+            for(auto& m : r) {
+                res.push_back(m);
+            }
+            trans.commit();
+        } catch(std::exception& e) {
+            LOG_ERROR("批量主键查询消息失败: {}", e.what());
+        }
+        return res;
+    }
 private:
     std::shared_ptr<odb::core::database> _db;
 };
