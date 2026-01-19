@@ -7,7 +7,7 @@ set(target "message_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files base.proto user.proto file.proto message.proto)
+set(proto_files base.proto user.proto file.proto message.proto chatsession.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
@@ -31,7 +31,7 @@ endforeach()
 # 3.3 生成ODB框架代码
 # 3.3.1 添加所需的odb映射代码文件名称
 set(odb_path ${CMAKE_CURRENT_SOURCE_DIR}/../odb)
-set(odb_files message.hxx)
+set(odb_files message.hxx user_timeline.hxx)
 # 3.3.2 检查框架代码文件是否已经生成
 set(odb_hxx "")
 set(odb_cxx "")
