@@ -266,6 +266,23 @@ message QuitChatSessionRsp {
     bool success = 2;
     string errmsg = 3;
 }
+//====================================================================
+//==========================  内部接口  ===============================
+//====================================================================
+message GetMemberIdListReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3; // 操作人ID
+    string chat_session_id = 4;  // 目标会话ID
+}
+
+message GetMemberIdListRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    repeated string member_id_list = 4;
+}
+
 service ChatSessionService {
     rpc GetChatSessionList(GetChatSessionListReq) returns (GetChatSessionListRsp); 
     rpc GetChatSessionDetail(GetChatSessionDetailReq) returns (GetChatSessionDetailRsp);
@@ -284,4 +301,5 @@ service ChatSessionService {
     rpc SetSessionVisible(SetSessionVisibleReq) returns (SetSessionVisibleRsp);
     rpc GetUserSessionStatus(GetUserSessionStatusReq) returns (GetUserSessionStatusRsp);
     rpc QuitChatSession(QuitChatSessionReq) returns (QuitChatSessionRsp);
+    rpc GetMemberIdList(GetMemberIdListReq) returns (GetMemberIdListRsp);
 }
