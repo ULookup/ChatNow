@@ -19,7 +19,7 @@ class Message
 {
 public:
     Message() = default;
-    Message(const std::string &mid,
+    Message(unsigned long mid,
             const std::string &ssid,
             const std::string &uid,
             const unsigned char mtype,
@@ -32,8 +32,8 @@ public:
             _create_time(create_time),
             _status(status) {}
     
-    std::string message_id() const { return _message_id; }
-    void message_id(const std::string &message_id) { _message_id = message_id; }
+    unsigned long message_id() const { return _message_id; }
+    void message_id(unsigned long message_id) { _message_id = message_id; }
 
     std::string session_id() const { return _session_id; }
     void session_id(const std::string &session_id) { _session_id = session_id; }
@@ -96,8 +96,8 @@ private:
 
     #pragma db id auto
     unsigned long _id;
-    #pragma db type("varchar(64)") index unique
-    std::string _message_id;
+    #pragma db type("bigint") index unique
+    unsigned long _message_id;
     #pragma db type("varchar(64)") index
     std::string _session_id;        // 所属会话ID
     #pragma db type("varchar(64)") 
@@ -116,7 +116,7 @@ private:
     //=======消息状态=======
     #pragma db type("tinyint")
     MessageStatus _status {MessageStatus::NORMAL};
-    #pragma db tyoe("TIMESTAMP")
+    #pragma db type("TIMESTAMP")
     odb::nullable<boost::posix_time::ptime> _revoke_time; 
 };
 
