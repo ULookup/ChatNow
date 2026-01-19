@@ -159,6 +159,7 @@ public:
             LOG_ERROR("删除 ES 数据 {} 失败: {}", id, e.what());
             return false;
         }
+        return true;
     }
 private:
     std::string _name;
