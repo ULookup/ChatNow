@@ -88,14 +88,15 @@ public:
          * 如果系统时间小于上一次生成 ID 的时间，
          * 说明发生了 NTP 校时或人为改时间。
          */
+        // 1. 时钟回拨处理
         if (now < last_ts_) {
-            if (wait_on_clock_backwards_) {
-                // 等待直到时间追平 last_ts_
-                now = WaitUntil(last_ts_);
-            } else {
-                // 直接失败，避免生成重复 ID
-                throw std::runtime_error("clock moved backwards");
+            long diff = last_ts_ - now;
+            if (!wait_on_clock_backwards_ || diff > 1000) { 
+                // 如果回拨超过 1秒，等待代价太大，直接抛错
+                throw std::runtime_error("Clock moved backwards logically");
             }
+            // 短时间回拨，自旋等待追平
+            now = WaitUntil(last_ts_);
         }
 
         /**
