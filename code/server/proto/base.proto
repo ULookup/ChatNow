@@ -131,7 +131,7 @@ message MessageContent {
 } 
 //消息结构 
 message MessageInfo { 
-    string message_id = 1;//消息 ID 
+    int64 message_id = 1;//消息 ID 
     string chat_session_id = 2;//消息所属聊天会话 ID 
     int64 timestamp = 3;//消息产生时间 
     UserInfo sender = 4;//消息发送者信息 
