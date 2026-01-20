@@ -16,12 +16,30 @@ public:
     ~MessageTable() {}
     bool insert(Message &msg) {
         try {
-            odb::transaction trans(_db->begin());
+            // 1. 检查外部是否已经开启了事务
+            bool has_external_trans = odb::transaction::has_current();
+
+            // 2. 如果外部没有事务，我们才开启一个本地事务；否则只创建一个空的 holder
+            // std::unique_ptr 用于管理事务对象的生命周期
+            std::unique_ptr<odb::transaction> local_trans;
+            
+            if (!has_external_trans) {
+                // 只有在没事务的时候，才由 DAO 开启
+                local_trans.reset(new odb::transaction(_db->begin()));
+            }
+
+            // 3. 执行持久化操作 (ODB 会自动挂载到当前线程的活跃事务上)
             _db->persist(msg);
-            trans.commit();
+
+            // 4. 只有当我们自己开启了事务，我们才负责提交
+            if (!has_external_trans) {
+                local_trans->commit();
+            }
+            
+            // 如果是外部事务，这里什么都不做，等外部 Service 去 commit
         } catch(std::exception &e) {
-            LOG_ERROR("新增消息失败 {} : {}", msg.message_id(), e.what());
-            return false;
+            LOG_ERROR("插入失败: {}", e.what());
+            throw; // 异常会向上传递，导致外部事务回滚
         }
         return true;
     }
