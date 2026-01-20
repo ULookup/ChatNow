@@ -18,6 +18,7 @@
 #include "file.pb.h"
 #include "user.pb.h"
 #include "chatsession.pb.h"
+#include <chrono>
 
 namespace chatnow
 {
@@ -290,6 +291,7 @@ public:
         }
         return;
     }
+    /* brief: 获取离线消息 */
     virtual void GetOfflineMsg(google::protobuf::RpcController* controller,
                             const ::chatnow::GetOfflineMsgReq* request,
                             ::chatnow::GetOfflineMsgRsp* response,
@@ -377,7 +379,7 @@ public:
         response->set_has_more(has_more);
 
         for(const auto &msg : msg_list) {
-            auto *info = response->add_msg_list();
+            auto info = response->add_msg_list();
             
             // 填充基础信息
             info->set_message_id(msg.message_id());
@@ -418,6 +420,7 @@ public:
             }
         }
     }
+    /* brief: 获取未读消息数量 */
     virtual void GetUnreadCount(google::protobuf::RpcController* controller,
                                 const ::chatnow::GetUnreadCountReq* request,
                                 ::chatnow::GetUnreadCountRsp* response,
@@ -503,11 +506,19 @@ public:
         //4. 取出会话所有成员
         std::vector<UserTimeline> timeline_list;
         std::vector<std::string> member_id_list;
-        ret = _GetMembers(message.chat_session_id(), member_id_list);
-        if(ret == false) {
-            LOG_ERROR("调用会话管理子服务获取会话成员失败");
-            return;
+        bool get_member_success = false;
+        for(int i = 0; i < 3; ++i) {
+            if(_GetMembers(message.chat_session_id(), member_id_list)) {
+                get_member_success = true;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
+        if(get_member_success == false) {
+            LOG_ERROR("获取会话成员失败");
+            //告诉客户端
+            return;
+        } 
         timeline_list.reserve(member_id_list.size());
         for(const auto &member : member_id_list) {
             UserTimeline timeline;
@@ -518,19 +529,34 @@ public:
             timeline_list.push_back(timeline);
         }
         //5. 开启事务，向消息表和Timeline表持久化数据
-        try {
-            odb::transaction trans(_db->begin());
+        bool save_success = false;
+        const int MAX_RETRIES = 3;
+        for(int i = 0; i < MAX_RETRIES; ++i) {
+            try {
+                odb::transaction trans(_db->begin()); //开启事务
 
-            if(!_mysql_message_table->insert(msg)) {
-                throw std::runtime_error("插入消息到Message表失败");
+                if(!_mysql_message_table->insert(msg)) {
+                    throw std::runtime_error("插入消息到Message表失败");
+                }
+
+                if(!_mysql_usertimeline_table->insert(timeline_list)) {
+                    throw std::runtime_error("将消息扩散到会话成员失败");
+                }
+
+                trans.commit();
+
+                save_success = true;
+                LOG_INFO("消息及扩散写成功: {}", message.message_id());
+                break; //持久化成功则跳出循环
+            } catch(std::exception &e) {
+                LOG_ERROR("数据库事务失败: {}", e.what());
+                if(i < MAX_RETRIES - 1) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50 * (i + 1)));
+                }
             }
-
-            if(!_mysql_usertimeline_table->insert(timeline_list)) {
-                throw std::runtime_error("将消息扩散到会话成员失败");
-            }
-
-            trans.commit();
-            LOG_INFO("消息及扩散写成功: {}", message.message_id());
+        }
+        //6. 根据结果通知
+        if(save_success) {
             if(msg_type == MessageType::STRING) {
                 bool es_ret = _es_client->appendData(message.sender().user_id(), 
                                                     message.message_id(), 
@@ -539,11 +565,13 @@ public:
                                                     content);
                 if(!es_ret) {
                     // ES 失败不回滚 MySQL，只需记录日志，后续靠补偿机制或重新索引
-                    LOG_ERROR("ES 索引失败，需后续补偿，MsgID: {}", message.message_id());
+                    LOG_ERROR("ES 索引失败,需后续补偿,MsgID: {}", message.message_id());
                 }
             }
-        } catch(std::exception &e) {
-            LOG_ERROR("数据库事务失败: {}", e.what());
+            //告诉客户端成功了 
+        } else {
+            LOG_ERROR("消息存储失败: {}", message.message_id());
+            //告诉客户端失败了
         }
     }
 private:
