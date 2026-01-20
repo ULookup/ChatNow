@@ -316,5 +316,6 @@ service ChatSessionService {
     rpc SetSessionVisible(SetSessionVisibleReq) returns (SetSessionVisibleRsp);
     rpc GetUserSessionStatus(GetUserSessionStatusReq) returns (GetUserSessionStatusRsp);
     rpc QuitChatSession(QuitChatSessionReq) returns (QuitChatSessionRsp);
+    rpc MsgReadAck(MsgReadAckReq) returns (MsgReadAckRsp);
     rpc GetMemberIdList(GetMemberIdListReq) returns (GetMemberIdListRsp);
 }
