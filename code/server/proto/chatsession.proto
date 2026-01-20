@@ -266,6 +266,21 @@ message QuitChatSessionRsp {
     bool success = 2;
     string errmsg = 3;
 }
+//-------------------------------------------------
+// 已读消息确认
+message MsgReadAckReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string chat_session_id = 4;
+    int64 message_id = 5; // 客户端当前读到的最新消息ID
+}
+
+message MsgReadAckRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+}
 //====================================================================
 //==========================  内部接口  ===============================
 //====================================================================
