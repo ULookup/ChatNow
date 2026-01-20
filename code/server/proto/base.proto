@@ -27,10 +27,9 @@ enum ChatSessionMemberRole {
 
 // 会话列表中，'我'在该会话下的状态摘要
 message MySessionState {
-    int64 unread_count = 1;            // 未读消息数
-    bool is_muted = 2;                 // 是否免打扰
-    bool is_visible = 3;
-    bool pin_time = 4;                // 是否置顶（由 pin_time != null 推导）
+    bool is_muted = 1;                 // 是否免打扰
+    bool is_visible = 2;
+    bool pin_time = 3;                // 是否置顶（由 pin_time != null 推导）
 }
 
 //聊天会话信息（加入前)
@@ -71,12 +70,11 @@ message ChatSessionMemberInfo {
     //自身ID
     string user_id = 2;
     optional uint64 last_message_id = 3;
-    int64 unread_count = 4;
-    bool is_muted = 5;
-    bool is_visible = 6;
-    optional int64 pin_time = 7;
-    ChatSessionMemberRole role = 8;
-    int64 join_time = 9;
+    bool is_muted = 4;
+    bool is_visible = 5;
+    optional int64 pin_time = 6;
+    ChatSessionMemberRole role = 7;
+    int64 join_time = 8;
 } 
 
 message ChatSessionMemberItem {
