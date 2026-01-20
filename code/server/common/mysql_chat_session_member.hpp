@@ -360,6 +360,37 @@ public:
         LOG_DEBUG("获取到 {} 名会话成员", res.size());
         return res;
     }
+    bool update_last_read_msg(const std::string &user_id, 
+                              const std::string &session_id, 
+                              unsigned long new_msg_id) 
+    {
+        try {
+            odb::transaction trans(_db->begin());
+            
+            // 1. 先查询当前值，防止“回滚”（比如用户在另一台设备看了旧消息）
+            using query = odb::query<ChatSessionMember>;
+            auto result = _db->query_one<ChatSessionMember>(
+                query::user_id == user_id && query::session_id == session_id
+            );
+
+            if (result) {
+                // 只有当新 ID 比旧 ID 大时才更新
+                if (result->last_read_msg() < new_msg_id) {
+                    result->last_read_msg(new_msg_id);
+                    _db->update(*result);
+                }
+            } else {
+                // 极端情况：成员关系不存在
+                return false; 
+            }
+            
+            trans.commit();
+            return true;
+        } catch (std::exception &e) {
+            LOG_ERROR("更新已读游标失败: uid={}, session={}, err={}", user_id, session_id, e.what());
+            return false;
+        }
+    }
 private:
     void _update_session_member_count(const std::string& ssid, int delta) {
         using SessionQuery = odb::query<ChatSession>;
