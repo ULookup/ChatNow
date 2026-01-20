@@ -89,7 +89,6 @@ public:
             chat_session_info->set_member_count(chat_session.member_count);
             chat_session_info->set_status(static_cast<ChatSessionStatus>(chat_session.status));
             auto member_info = chat_session_info->mutable_member_info_brief();
-            member_info->set_unread_count(chat_session.unread_count);
             member_info->set_is_muted(chat_session.muted);
             member_info->set_is_visible(chat_session.visible);
             // 置顶时间（有值才设置）
@@ -152,7 +151,6 @@ public:
         if(member->last_read_msg() != 0) {
             member_info_detail->set_last_message_id(member->last_read_msg());
         }
-        member_info_detail->set_unread_count(member->unread_count());
         member_info_detail->set_is_muted(member->muted());
         member_info_detail->set_is_visible(member->visible());
         if(member->pin_time().is_not_a_date_time()) {
@@ -208,10 +206,10 @@ public:
         std::vector<ChatSessionMember> member_list;
         for(int i = 0; i < request->member_id_list_size(); ++i) {
             if(request->member_id_list(i) == uid) {
-                ChatSessionMember chatSessionMember(cssID, request->member_id_list(i), 0, false, true, ChatSessionRole::OWNER, boost::posix_time::second_clock::local_time());
+                ChatSessionMember chatSessionMember(cssID, request->member_id_list(i), false, true, ChatSessionRole::OWNER, boost::posix_time::second_clock::local_time());
                 member_list.push_back(chatSessionMember);
             } else {
-                ChatSessionMember chatSessionMember(cssID, request->member_id_list(i), 0, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
+                ChatSessionMember chatSessionMember(cssID, request->member_id_list(i), false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
                 member_list.push_back(chatSessionMember);
             }
         }
@@ -424,7 +422,6 @@ public:
         for(int i = 0; i < request->member_id_list_size(); ++i) {
             ChatSessionMember member(ssid, 
                                     request->member_id_list(i),
-                                    0,
                                     false,
                                     true,
                                     ChatSessionRole::NORMAL,
@@ -839,7 +836,6 @@ public:
         if(csm->last_read_msg() != 0) {
             member->set_last_message_id(csm->last_read_msg());
         }
-        member->set_unread_count(csm->unread_count());
         member->set_is_muted(csm->muted());
         member->set_is_visible(csm->visible());
         if(csm->pin_time().is_not_a_date_time()) {
@@ -888,6 +884,67 @@ public:
         response->set_request_id(rid);
         response->set_success(true);
     }
+    /* brief: 消息已读确认 */
+    virtual void MsgReadAck(google::protobuf::RpcController* controller,
+                            const ::chatnow::MsgReadAckReq* request,
+                            ::chatnow::MsgReadAckRsp* response,
+                            ::google::protobuf::Closure* done)
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
+            response->set_request_id(rid);
+            response->set_success(false);
+            response->set_errmsg(err_msg);
+            return;
+        };
+        std::string rid = request->request_id();
+        std::string uid = request->user_id();
+        std::string ssid = request->chat_session_id();
+        unsigned long msg_id = request->message_id();
+
+        // 执行数据库更新
+        bool ret = _mysql_chat_session_member->update_last_read_msg(uid, ssid, msg_id);
+        if (ret == false) {
+            LOG_ERROR("请求ID - {} 更新会话成员 {} 已读消息ID失败", rid, uid);
+            err_response(rid, "更新会话成员已读消息ID失败");
+        }
+        LOG_INFO("REQ: {} - 用户 {} 在会话 {} 已读至 {}", rid, uid, ssid, msg_id);
+        response->set_request_id(rid);
+        response->set_success(true);
+    }
+    //============================================================================
+    //============================== 内部接口 =====================================
+    //============================================================================
+    /* brief: 获取成员ID列表 */
+    virtual void GetMemberIdList(::google::protobuf::RpcController* controller,
+                       const ::chatnow::GetMemberIdListReq* request,
+                       ::chatnow::GetMemberIdListRsp* response,
+                       ::google::protobuf::Closure* done)
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto err_response = [this, response](const std::string &rid, const std::string &err_msg) -> void {
+            response->set_request_id(rid);
+            response->set_success(false);
+            response->set_errmsg(err_msg);
+            return;
+        };
+        //1. 提取关键要素
+        std::string rid  = request->request_id();
+        std::string ssid = request->chat_session_id();
+        //2. 查询会话成员
+        auto member_id_list = _mysql_chat_session_member->members(ssid);
+        if(member_id_list.size() == 0) {
+            LOG_ERROR("请求ID - {} 没有查询到会话 {} 成员", rid, ssid);
+            return err_response(rid, "没有查询到会话成员");
+        }
+        //3. 组织响应
+        for(const auto &member_id : member_id_list) {
+            response->add_member_id_list(member_id);
+        }
+        response->set_request_id(rid);
+        response->set_success(true);
+    }
+
 private:
     /* brief: 对用户管理子服务调用的封装 */
     bool GetUserInfo(const std::string &rid,
