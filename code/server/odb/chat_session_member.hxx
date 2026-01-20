@@ -22,14 +22,12 @@ public:
     ChatSessionMember() = default;
     ChatSessionMember(const std::string &ssid, 
                     const std::string &uid,
-                    unsigned int unread_count,
                     bool muted,
                     bool visible,
                     const ChatSessionRole role,
                     const boost::posix_time::ptime &join_time) 
         : _session_id(ssid), 
         _user_id(uid), 
-        _unread_count(unread_count),
         _muted(muted),
         _visible(visible),
         _role(role),
@@ -48,9 +46,6 @@ public:
         return *_last_read_msg; 
     }
     void last_read_msg(const unsigned long last_read_msg) { _last_read_msg = last_read_msg; }
-
-    unsigned int unread_count() const { return _unread_count; }
-    void unread_count(int unread_count) { _unread_count = unread_count; }
 
     bool muted() const { return _muted; }
     void muted(bool muted) { _muted = muted;}
@@ -87,9 +82,6 @@ private:
     //=================================
     #pragma db type("bigint")
     odb::nullable<unsigned long> _last_read_msg;      // 最后一次读到的消息id，用作这个会话的游标
-
-    #pragma db type("int")
-    unsigned int _unread_count {0};      // 未读消息数
 
     #pragma db type("tinyint")
     bool _muted {false};                 // 免打扰开关
