@@ -67,9 +67,6 @@ struct OrderedChatSessionView
     #pragma db column(cs::_avatar_id)
     odb::nullable<std::string> avatar_id;
 
-    #pragma db column(cm::_unread_count)
-    unsigned int unread_count;
-
     #pragma db column(cm::_pin_time)
     odb::nullable<boost::posix_time::ptime> pin_time;
 
