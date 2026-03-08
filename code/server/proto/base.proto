@@ -135,7 +135,15 @@ message MessageInfo {
     UserInfo sender = 4;//消息发送者信息 
     MessageContent message = 5; 
  } 
- 
+
+// 【新增】内部投递消息 (Fat Message)
+// 这个结构体不仅包含消息内容，还包含了查好的发送者信息和群成员列表
+// 直接发给 MQ，下游的存储服务拿到它直接写库，不用再查 RPC
+message InternalMessage {
+    MessageInfo message_info = 1;       // 完整消息信息（含发送者详情）
+    repeated string member_id_list = 2; // 接收者/群成员 ID 列表 (用于写扩散 Timeline)
+}
+
 message FileDownloadData { 
     string file_id = 1; 
     bytes file_content = 2; 
