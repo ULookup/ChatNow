@@ -213,7 +213,7 @@ public:
                 member_list.push_back(chatSessionMember);
             }
         }
-        ret = _mysql_chat_session_member->append(member_list);
+        ret = _mysql_chat_session_member->append_after_create(member_list);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 向数据库添加会话成员信息失败", rid);
             return err_response(rid, "向数据库添加会话成员信息失败");
