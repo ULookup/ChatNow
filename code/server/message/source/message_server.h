@@ -31,7 +31,11 @@ public:
                         const std::string &chatsession_service_name,
                         const ServiceManager::ptr &channels, 
                         const std::shared_ptr<elasticlient::Client> &es_client,
-                        const std::shared_ptr<odb::core::database> &mysql_client) 
+                        const std::shared_ptr<odb::core::database> &mysql_client,
+                        const std::shared_ptr<Subscriber> &mq_subscriber,
+                        const std::shared_ptr<Subscriber> &es_subscriber,
+                        const declare_settings &db_settings,
+                        const declare_settings &es_settings) 
                         : _file_service_name(file_service_name),
                         _user_service_name(user_service_name),
                         _chatsession_service_name(chatsession_service_name),
@@ -39,7 +43,11 @@ public:
                         _es_client(std::make_shared<ESMessage>(es_client)),
                         _db(mysql_client),
                         _mysql_usertimeline_table(std::make_shared<UserTimeLineTable>(mysql_client)),
-                        _mysql_message_table(std::make_shared<MessageTable>(mysql_client)) 
+                        _mysql_message_table(std::make_shared<MessageTable>(mysql_client)),
+                        _mq_subscriber(mq_subscriber),
+                        _es_subscriber(es_subscriber),
+                        _db_settings(db_settings),
+                        _es_settings(es_settings)
     {
         _es_client->createIndex();
     }
@@ -456,48 +464,50 @@ public:
     //================================================================================================//
     //=========================================== 消费回调 ============================================//
     //================================================================================================//
-    void onMessage(const char *body, size_t sz) {
+        ConsumeAction onDBMessage(const char *body, size_t sz, bool redelivered) {
         LOG_DEBUG("收到新消息，进行存储处理！");
         //1. 取出序列化的消息内容进行反序列化
-        chatnow::MessageInfo  message;
-        bool ret = message.ParseFromArray(body, sz);
+        chatnow::InternalMessage  internal_msg;
+        bool ret = internal_msg.ParseFromArray(body, sz);
         if(ret == false) {
             LOG_ERROR("对消费到的消息进行反序列化失败");
-            return;
+            return ConsumeAction::NackDiscard;
         }
+
+        const auto &msg_info = internal_msg.message_info();
         std::string file_id, file_name, content;
         int64_t file_size = 0;
         //2. 根据不同的消息类型进行不同的处理
-        auto msg_type = message.message().message_type();
+        auto msg_type = msg_info.message().message_type();
         if (msg_type == MessageType::STRING) {
-            content = message.message().string_message().content();
+            content = msg_info.message().string_message().content();
         } else {
             // 如果是文件/图片/语音，先上传到文件子服务拿到 file_id
             bool file_ret = false;
             if (msg_type == MessageType::IMAGE) {
-                const auto &m = message.message().image_message();
+                const auto &m = msg_info.message().image_message();
                 file_ret = _PutFile("", m.image_content(), m.image_content().size(), file_id);
             } else if (msg_type == MessageType::FILE) {
-                const auto &m = message.message().file_message();
+                const auto &m = msg_info.message().file_message();
                 file_name = m.file_name();
                 file_size = m.file_size();
                 file_ret = _PutFile(file_name, m.file_contents(), file_size, file_id);
             } else if (msg_type == MessageType::SPEECH) {
-                const auto &m = message.message().speech_message();
+                const auto &m = msg_info.message().speech_message();
                 file_ret = _PutFile("", m.file_contents(), m.file_contents().size(), file_id);
             }
 
             if (!file_ret) {
                 LOG_ERROR("文件上传失败，放弃后续存储");
-                return; 
+                return ConsumeAction::NackRequeue; 
             }
         }
         //3. 提取消息的元消息
-        chatnow::Message msg(message.message_id(), 
-                            message.chat_session_id(), 
-                            message.sender().user_id(), 
-                            message.message().message_type(),
-                            boost::posix_time::from_time_t(message.timestamp()),
+        chatnow::Message msg(msg_info.message_id(), 
+                            msg_info.chat_session_id(), 
+                            msg_info.sender().user_id(), 
+                            msg_info.message().message_type(),
+                            boost::posix_time::from_time_t(msg_info.timestamp()),
                             MessageStatus::NORMAL);
         msg.content(content);
         msg.file_id(file_id);
@@ -505,73 +515,74 @@ public:
         msg.file_size(file_size);
         //4. 取出会话所有成员
         std::vector<UserTimeline> timeline_list;
-        std::vector<std::string> member_id_list;
-        bool get_member_success = false;
-        for(int i = 0; i < 3; ++i) {
-            if(_GetMembers(message.chat_session_id(), member_id_list)) {
-                get_member_success = true;
-                break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        }
-        if(get_member_success == false) {
-            LOG_ERROR("获取会话成员失败");
-            //告诉客户端
-            return;
-        } 
-        timeline_list.reserve(member_id_list.size());
-        for(const auto &member : member_id_list) {
+        const auto &member_ids = internal_msg.member_id_list();
+
+        timeline_list.reserve(member_ids.size());
+        for(const auto &member : member_ids) {
             UserTimeline timeline;
-            timeline.message_id(message.message_id());
-            timeline.message_time(boost::posix_time::from_time_t(message.timestamp()));
-            timeline.session_id(message.chat_session_id());
+            timeline.message_id(msg_info.message_id());
+            timeline.message_time(boost::posix_time::from_time_t(msg_info.timestamp()));
+            timeline.session_id(msg_info.chat_session_id());
             timeline.user_id(member);
             timeline_list.push_back(timeline);
         }
         //5. 开启事务，向消息表和Timeline表持久化数据
-        bool save_success = false;
-        const int MAX_RETRIES = 3;
-        for(int i = 0; i < MAX_RETRIES; ++i) {
-            try {
-                odb::transaction trans(_db->begin()); //开启事务
+        try {
+            odb::transaction trans(_db->begin()); //开启事务
 
-                if(!_mysql_message_table->insert(msg)) {
-                    throw std::runtime_error("插入消息到Message表失败");
-                }
+            _mysql_message_table->insert(msg);
+            _mysql_usertimeline_table->insert(timeline_list);
 
-                if(!_mysql_usertimeline_table->insert(timeline_list)) {
-                    throw std::runtime_error("将消息扩散到会话成员失败");
-                }
+            trans.commit();
 
-                trans.commit();
-
-                save_success = true;
-                LOG_INFO("消息及扩散写成功: {}", message.message_id());
-                break; //持久化成功则跳出循环
-            } catch(std::exception &e) {
-                LOG_ERROR("数据库事务失败: {}", e.what());
-                if(i < MAX_RETRIES - 1) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50 * (i + 1)));
-                }
-            }
+            LOG_INFO("DB Consumer: 消息落库 MsgID: {}", msg_info.message_id());
+           
+            return ConsumeAction::Ack;
+        } catch(std::exception &e) {
+            LOG_ERROR("DB Consumer: 数据库事务失败 MsgID: {}, Error: {}", msg_info.message_id(), e.what());
+            // 数据库写入异常, 重新入队让 MQ 重试，避免消息丢失
+            return ConsumeAction::NackRequeue;
         }
-        //6. 根据结果通知
-        if(save_success) {
-            if(msg_type == MessageType::STRING) {
-                bool es_ret = _es_client->appendData(message.sender().user_id(), 
-                                                    message.message_id(), 
-                                                    message.timestamp(),
-                                                    message.chat_session_id(),
-                                                    content);
-                if(!es_ret) {
-                    // ES 失败不回滚 MySQL，只需记录日志，后续靠补偿机制或重新索引
-                    LOG_ERROR("ES 索引失败,需后续补偿,MsgID: {}", message.message_id());
-                }
-            }
-            //告诉客户端成功了 
+    }
+
+    ConsumeAction onESMessage(const char *body, size_t sz, bool redelivered) {
+        // 1. 反序列化 Protobuf
+        chatnow::InternalMessage internal_msg;
+        if (!internal_msg.ParseFromArray(body, sz)) {
+            LOG_ERROR("ES-Consumer: 反序列化失败，无法写入索引");
+            return ConsumeAction::NackDiscard; // 反序列化失败，丢弃消息（可能是格式问题，不适合重试）
+        }
+
+        const auto &msg_info = internal_msg.message_info();
+        
+        // 2. 过滤：非文本消息不进 ES
+        if (msg_info.message().message_type() != chatnow::MessageType::STRING) {
+            return ConsumeAction::Ack; // 非文本消息，直接确认消费，不写入 ES
+        }
+
+        // 3. 提取字段
+        // 注意：确保 Proto 定义中字段类型与 appendData 参数类型兼容
+        std::string user_id = msg_info.sender().user_id();
+        unsigned long message_id = msg_info.message_id();
+        long create_time = msg_info.timestamp();
+        std::string session_id = msg_info.chat_session_id();
+        std::string content = msg_info.message().string_message().content();
+
+        // 4. 调用你的封装接口写入数据
+        bool ret = _es_client->appendData(
+            user_id, 
+            message_id, 
+            create_time, 
+            session_id, 
+            content
+        );
+
+        if (!ret) {
+            LOG_ERROR("[ES-Consumer] 写入 ES 失败: MsgID={}", message_id);
+            return ConsumeAction::NackRequeue; // 写入 ES 失败，重新入队让 MQ 重试，避免消息丢失
         } else {
-            LOG_ERROR("消息存储失败: {}", message.message_id());
-            //告诉客户端失败了
+            LOG_DEBUG("[ES-Consumer] 索引成功: MsgID={}", message_id);
+            return ConsumeAction::Ack; // 索引成功，确认消费
         }
     }
 private:
@@ -655,27 +666,6 @@ private:
         file_id = rsp.file_info().file_id();
         return true;
     }
-    bool _GetMembers(const std::string &ssid, std::vector<std::string> &member_id_list) {
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("{} 没有可供访问的会话管理子服务节点", _chatsession_service_name);
-            return false;
-        }
-        ChatSessionService_Stub stub(channel.get());
-        GetMemberIdListReq req;
-        GetMemberIdListRsp rsp;
-        req.set_chat_session_id(ssid);
-        brpc::Controller cntl;
-        stub.GetMemberIdList(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed() == true || rsp.success() == false) {
-            LOG_ERROR("会话子服务调用失败: {}", cntl.ErrorText());
-            return false;
-        }
-        for(int i = 0; i < rsp.member_id_list_size(); ++i) {
-            member_id_list.push_back(rsp.member_id_list(i));
-        }
-        return true;
-    }
 private:
     std::string _file_service_name;
     std::string _user_service_name;
@@ -684,6 +674,10 @@ private:
     MessageTable::ptr _mysql_message_table;
     UserTimeLineTable::ptr _mysql_usertimeline_table;
     ESMessage::ptr _es_client;
+    Subscriber::ptr _mq_subscriber;
+    Subscriber::ptr _es_subscriber;
+    declare_settings _db_settings;
+    declare_settings _es_settings;
     ServiceManager::ptr _mm_channels;
 };
 
@@ -765,13 +759,33 @@ public:
                     const std::string &password, 
                     const std::string &host,
                     const std::string &exchange_name,
-                    const std::string &queue_name,
-                    const std::string &binding_key)
+                    const std::string &queue_name_db,
+                    const std::string &queue_name_es,
+                    const std::string &binding_key_db,
+                    const std::string &binding_key_es)
     {
-        _exchange_name = exchange_name;
-        _queue_name = queue_name;
-        _mq_client = std::make_shared<MQClient>(user, password, host); 
-        _mq_client->declareComponents(exchange_name, queue_name, binding_key);
+        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        _mq_client = std::make_shared<MQClient>(amqp_url); 
+        //声明 DB 队列
+        _db_queue_settings = {
+            .exchange = exchange_name,
+            .exchange_type = chatnow::FANOUT,
+            .queue = queue_name_db,
+            .binding_key = binding_key_db
+        };
+        _es_queue_settings = {
+            .exchange = exchange_name,
+            .exchange_type = chatnow::FANOUT,
+            .queue = queue_name_es,
+            .binding_key = binding_key_es
+        };
+
+        auto dummy_cb = [](const char*, size_t, bool) -> chatnow::ConsumeAction { 
+            return chatnow::ConsumeAction::Ack; 
+        };
+
+        _subscriber_db = chatnow::MQFactory::create<chatnow::Subscriber>(_mq_client, _db_queue_settings, dummy_cb);
+        _subscriber_es = chatnow::MQFactory::create<chatnow::Subscriber>(_mq_client, _es_queue_settings, dummy_cb);
     }
     /* brief: 构造RPC服务器对象，并添加服务 */
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
@@ -787,8 +801,12 @@ public:
             LOG_ERROR("还未初始化MySQL数据库模块");
             abort();
         }
+        if(!_subscriber_db || !_subscriber_es || !_mq_client) {
+            LOG_ERROR("还未初始化消息队列客户端模块");
+            abort();
+        }
         _rpc_server = std::make_shared<brpc::Server>();
-        MessageServiceImpl *message_service = new MessageServiceImpl(_file_service_name, _user_service_name, _chatsession_service_name, _mm_channels, _es_client, _mysql_client);
+        MessageServiceImpl *message_service = new MessageServiceImpl(_file_service_name, _user_service_name, _chatsession_service_name, _mm_channels, _es_client, _mysql_client, _subscriber_db, _subscriber_es, _db_queue_settings, _es_queue_settings);
         int ret = _rpc_server->AddService(message_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -803,8 +821,13 @@ public:
             LOG_ERROR("服务启动失败!");
             abort();
         }
-        auto callback = std::bind(&MessageServiceImpl::onMessage, message_service, std::placeholders::_1, std::placeholders::_2);
-        _mq_client->consume(_queue_name, callback);
+        auto callback_db = std::bind(&MessageServiceImpl::onDBMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+        auto callback_es = std::bind(&MessageServiceImpl::onESMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+
+        LOG_INFO("开始向 Broker 订阅消费者队列...");
+        _subscriber_db->consume(std::move(callback_db));
+        _subscriber_es->consume(std::move(callback_es));
+        LOG_INFO("队列订阅完成，服务全面启动！");
     }
     MessageServer::ptr build() {
         if(!_service_discover) {
@@ -830,9 +853,11 @@ private:
     std::string _chatsession_service_name;
     ServiceManager::ptr _mm_channels;
 
-    std::string _exchange_name;
-    std::string _queue_name;
+    declare_settings _db_queue_settings;
+    declare_settings _es_queue_settings;
     MQClient::ptr _mq_client;
+    Subscriber::ptr _subscriber_db;
+    Subscriber::ptr _subscriber_es;
     
 
     Discovery::ptr _service_discover;   // 服务发现客户端
