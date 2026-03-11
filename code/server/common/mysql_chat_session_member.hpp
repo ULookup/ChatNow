@@ -63,6 +63,29 @@ public:
         }
         return true;
     }
+    /* brief: 向指定会话添加多个成员 ------ ssid & uids -- 适用于创建会话后批量添加成员的场景 */
+    bool append_after_create(std::vector<ChatSessionMember> &csm_list) {
+        if(csm_list.empty()) return true;
+        try {
+            //获取事务对象，开启事务
+            odb::transaction trans(_db->begin());
+
+            std::map<std::string, int> session_delta;
+
+            //1. 批量插入
+            for(auto &csm : csm_list) {
+                _db->persist(csm);
+                session_delta[csm.session_id()]++;
+            }
+
+            //提交事务
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("新增多会话成员失败: {}:{} - {}", csm_list[0].session_id(), csm_list.size(), e.what());
+            return false;
+        }
+        return true;
+    }
     /* brief: 移除指定会话单个成员 ------ ssid & uid */
     bool remove(ChatSessionMember &csm) {
         try {
