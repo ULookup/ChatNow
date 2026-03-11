@@ -24,14 +24,14 @@ public:
                         const ServiceManager::ptr &channels, 
                         const std::string &exchange_name,
                         const std::string &routing_key,
-                        const MQClient::ptr &mq_client,
+                        const Publisher::ptr &publisher,
                         const std::shared_ptr<SnowflakeId> &id_generator) 
                         : _user_service_name(user_service_name),
                         _chatsession_service_name(chatsession_service_name),
                         _mm_channels(channels),
                         _exchange_name(exchange_name),
                         _routing_key(routing_key),
-                        _mq_client(mq_client),
+                        _publisher(publisher),
                         _id_generator(id_generator) {}
     ~TransmiteServiceImpl() = default;
     void GetTransmitTarget(google::protobuf::RpcController *controller,
@@ -50,74 +50,102 @@ public:
         std::string rid = request->request_id();
         std::string uid = request->user_id();
         std::string chat_ssid = request->chat_session_id();
-        const MessageContent &content = request->message();
-        // 进行消息组织: 发送者-用户子服务获取，所属会话，消息内容，产生时间，消息ID
-        // 1.获取会话用户信息
-        auto channel = _mm_channels->choose(_user_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID: {} - {} 没有可供访问的用户子服务节点", rid, _user_service_name);
-            return err_response(rid, "没有可供访问的用户子服务节点");
+        // 1. 获取 Channel
+        //LOG_DEBUG("请求ID: {} - 获取服务通信信道", rid);
+        auto user_channel = _mm_channels->choose(_user_service_name);
+        auto session_channel = _mm_channels->choose(_chatsession_service_name);
+        if (!user_channel || !session_channel) {
+            LOG_ERROR("请求ID: {} - 服务节点缺失 (User or Session)", rid);
+            return err_response(rid, "依赖服务节点缺失");
         }
-        UserService_Stub stub(channel.get());
-        GetUserInfoReq req;
-        GetUserInfoRsp rsp;
-        req.set_request_id(rid);
-        req.set_user_id(uid);
-        brpc::Controller cntl;
-        stub.GetUserInfo(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed() == true || rsp.success() == false) {
-            LOG_ERROR("请求ID: {} - 用户子服务调用失败: {}", rid, cntl.ErrorText());
-            return err_response(rid, "用户子服务调用失败");
+        // 2. 准备并行 RPC 请求
+        // --- 准备用户服务请求 ---
+        //LOG_DEBUG("请求ID: {} - 准备用户服务 RPC 请求", rid);
+        UserService_Stub user_stub(user_channel.get());
+        GetUserInfoReq user_req;
+        GetUserInfoRsp user_rsp;
+        brpc::Controller user_cntl;
+        
+        user_req.set_request_id(rid);
+        user_req.set_user_id(uid);
+
+        // --- 准备会话服务请求 ---
+        //LOG_DEBUG("请求ID: {} - 准备会话服务 RPC 请求", rid);
+        ChatSessionService_Stub session_stub(session_channel.get());
+        GetMemberIdListReq session_req;
+        GetMemberIdListRsp session_rsp;
+        brpc::Controller session_cntl;
+
+        session_req.set_request_id(rid);
+        session_req.set_chat_session_id(chat_ssid);
+
+        // 3. 发起异步调用 (RPC 前置 & 并行化)
+        //LOG_DEBUG("请求ID: {} - 发起并行 RPC 调用", rid);
+        // 关键点：使用 brpc::DoNothing() 让调用立即返回，不阻塞当前线程
+        user_stub.GetUserInfo(&user_cntl, &user_req, &user_rsp, brpc::DoNothing());
+        session_stub.GetMemberIdList(&session_cntl, &session_req, &session_rsp, brpc::DoNothing());
+
+        // 4. 等待所有 RPC 完成 (Join)
+        //LOG_DEBUG("请求ID: {} - 等待 RPC 调用完成", rid);
+        // bthread 会挂起当前协程，让出 CPU，直到两个 RPC 都回来
+        brpc::Join(user_cntl.call_id());
+        brpc::Join(session_cntl.call_id());
+
+        // 5. 检查结果
+        //LOG_DEBUG("请求ID: {} - 检查 RPC 调用结果", rid);
+        if (user_cntl.Failed() || !user_rsp.success()) {
+            LOG_ERROR("请求ID: {} - 获取用户信息失败: {}", rid, user_cntl.ErrorText());
+            return err_response(rid, "获取用户信息失败");
         }
-        // 2.组织消息
-        MessageInfo message;
-        message.set_message_id(_id_generator->Next());
-        message.set_chat_session_id(chat_ssid);
-        message.set_timestamp(time(nullptr));
-        message.mutable_sender()->CopyFrom(rsp.user_info());
-        message.mutable_message()->CopyFrom(content);
-        // 2.1 获取消息转发客户端用户列表
-        std::vector<std::string> member_id_list;
-        bool ret = _GetMembers(chat_ssid, member_id_list);
-        if(ret == false) {
-            LOG_ERROR("请求ID - {} 获取会话成员ID列表失败");
-            return err_response(rid, "获取成员ID列表失败");
+        if (session_cntl.Failed() || !session_rsp.success()) {
+            LOG_ERROR("请求ID: {} - 获取群成员失败: {}", rid, session_cntl.ErrorText());
+            return err_response(rid, "获取群成员失败");
         }
-        // 将封装完毕的消息，发布到消息队列，待消息存储子服务进行消息持久化
-        ret = _mq_client->publish(_exchange_name, message.SerializeAsString(), _routing_key);
-        if(ret == false) {
-            LOG_ERROR("请求ID: {} - 持久化消息发布失败", rid);
-            return err_response(rid, "持久化消息发布失败");
+        // 6. 组装胖消息 (InternalMessage) 并发 MQ
+        //LOG_DEBUG("请求ID: {} - 组装内部消息并发 MQ", rid);
+        InternalMessage internal_msg; // 使用我们在 proto 里新定义的结构
+        MessageInfo* msg_info = internal_msg.mutable_message_info();
+
+        // 填充基础信息
+        msg_info->set_message_id(_id_generator->Next());
+        msg_info->set_chat_session_id(chat_ssid);
+        msg_info->set_timestamp(time(nullptr));
+        msg_info->mutable_message()->CopyFrom(request->message());
+        
+        // 填充发送者信息 (来自并行 RPC 的结果)
+        msg_info->mutable_sender()->CopyFrom(user_rsp.user_info());
+
+        // 填充群成员列表 (来自并行 RPC 的结果) -> 实现写扩散的关键
+        for (const auto& member_id : session_rsp.member_id_list()) {
+            internal_msg.add_member_id_list(member_id);
         }
-        // 组织响应
+        // 7. 组装响应给客户端的结果
+        //LOG_DEBUG("请求ID: {} - 组装 RPC 响应", rid);
         response->set_request_id(rid);
-        response->set_success(true);
-        response->mutable_message()->CopyFrom(message);
-        for(const auto &id : member_id_list) {
-            response->add_target_id_list(id);
+        response->mutable_message()->CopyFrom(*msg_info);
+        for(const auto& member_id : session_rsp.member_id_list()) {
+            response->add_target_id_list(member_id);
         }
-    }
-private:
-    bool _GetMembers(const std::string &ssid, std::vector<std::string> &member_id_list) {
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("{} 没有可供访问的会话管理子服务节点", _chatsession_service_name);
-            return false;
-        }
-        ChatSessionService_Stub stub(channel.get());
-        GetMemberIdListReq req;
-        GetMemberIdListRsp rsp;
-        req.set_chat_session_id(ssid);
-        brpc::Controller cntl;
-        stub.GetMemberIdList(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed() == true || rsp.success() == false) {
-            LOG_ERROR("会话子服务调用失败: {}", cntl.ErrorText());
-            return false;
-        }
-        for(int i = 0; i < rsp.member_id_list_size(); ++i) {
-            member_id_list.push_back(rsp.member_id_list(i));
-        }
-        return true;
+
+        // 解除rpc_guard对done管理权，这样在当前函数结束时，不会自动调用done->Run()，返回给客户端的响应由我们自己控制，可以在异步MQ发送完成后再调用done->Run()
+        google::protobuf::Closure* async_done = rpc_guard.release();
+
+        // 8. 发 MQ
+        //LOG_DEBUG("请求ID: {} - 发 MQ", rid);
+        _publisher->publish_confirm(internal_msg.SerializeAsString(), [async_done, response, rid](PublishStatus status, const std::string& msg) {
+            if(status == PublishStatus::Acked) {
+                LOG_DEBUG("请求ID: {} - 消息成功已成功投递到 Broker", rid);
+                response->set_success(true);
+            } else {
+                LOG_DEBUG("请求ID: {} - 消息投递到 Broker 失败: {}", rid, msg);
+                response->set_success(false);
+                response->clear_message();        // 如果MQ投递失败，响应里就不返回消息内容了，避免客户端误以为消息已经投递成功了
+                response->clear_target_id_list(); // 同理，目标列表也清空，客户端就不会去投递了
+                response->set_errmsg("消息投递失败,请重试");
+            }
+
+            async_done->Run(); // 无论成功与否，MQ发送完成后都要调用done->Run()，让RPC响应返回给客户端
+        });
     }
 private:
     std::string _user_service_name;
@@ -127,7 +155,7 @@ private:
     // 消息队列客户端句柄
     std::string _exchange_name;
     std::string _routing_key;
-    MQClient::ptr _mq_client;
+    Publisher::ptr _publisher;
     std::shared_ptr<SnowflakeId> _id_generator;
 };
 
@@ -197,8 +225,15 @@ public:
     {
         _exchange_name = exchange_name;
         _routing_key = binding_key;
-        _mq_client = std::make_shared<MQClient>(user, password, host); 
-        _mq_client->declareComponents(exchange_name, queue_name, binding_key);
+        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        _mq_client = std::make_shared<MQClient>(amqp_url);
+        declare_settings settings {
+            .exchange = exchange_name,
+            .exchange_type = chatnow::FANOUT,
+            .queue = queue_name,
+            .binding_key = binding_key
+        };
+        _publisher = std::make_shared<Publisher>(_mq_client, settings);
     }
     /* brief: 构造RPC服务器对象，并添加服务 */
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
@@ -206,7 +241,7 @@ public:
             LOG_ERROR("还未初始化分布式ID生成器");
             abort();
         }
-        if(!_mq_client) {
+        if(!_publisher || !_mq_client) {
             LOG_ERROR("还未初始化消息队列客户端模块");
             abort();
         }
@@ -220,7 +255,7 @@ public:
                                                                         _mm_channels, 
                                                                         _exchange_name, 
                                                                         _routing_key, 
-                                                                        _mq_client,
+                                                                        _publisher,
                                                                         _id_generator);
         int ret = _rpc_server->AddService(transmite_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
@@ -262,6 +297,7 @@ private:
     std::string _exchange_name;
     std::string _routing_key;
     MQClient::ptr _mq_client;
+    Publisher::ptr _publisher;
     std::shared_ptr<SnowflakeId> _id_generator;
     
     Discovery::ptr _service_discover;   // 服务发现客户端
