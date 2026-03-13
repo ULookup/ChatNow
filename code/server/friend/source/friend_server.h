@@ -229,8 +229,8 @@ public:
                 LOG_ERROR("请求ID - {} 新增会话信息 {} 失败", rid, cssid);
                 return err_response(rid, "新增会话信息失败");
             }
-            ChatSessionMember csm1(cssid, uid, 0, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
-            ChatSessionMember csm2(cssid, pid, 0, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
+            ChatSessionMember csm1(cssid, uid, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
+            ChatSessionMember csm2(cssid, pid, false, true, ChatSessionRole::NORMAL, boost::posix_time::second_clock::local_time());
             std::vector<ChatSessionMember> member_lsit = {csm1, csm2};
             ret = _mysql_chat_session_member->append(member_lsit);
             if(ret == false) {
