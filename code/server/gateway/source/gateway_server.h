@@ -109,15 +109,15 @@ public:
         _connections(std::make_shared<Connection>())
     {
         //1. 搭建websocket服务器
-        _ws_server.set_access_channels(websocketpp::log::alevel::none);
-        _ws_server.init_asio();
-        _ws_server.set_open_handler(std::bind(&GatewayServer::onOpen, this, std::placeholders::_1));
-        _ws_server.set_close_handler(std::bind(&GatewayServer::onClose, this, std::placeholders::_1));
-        auto ws_callback = std::bind(&GatewayServer::onMessage, this, std::placeholders::_1, std::placeholders::_2);
-        _ws_server.set_message_handler(ws_callback);
-        _ws_server.set_reuse_addr(true);
-        _ws_server.listen(websocket_port);
-        _ws_server.start_accept();
+        _ws_server.set_access_channels(websocketpp::log::alevel::none); //关闭访问日志
+        _ws_server.init_asio(); //初始化ASIO,可以指定线程数量，默认是单线程
+        _ws_server.set_open_handler(std::bind(&GatewayServer::onOpen, this, std::placeholders::_1)); //设置连接建立时的回调函数
+        _ws_server.set_close_handler(std::bind(&GatewayServer::onClose, this, std::placeholders::_1));  //设置连接关闭时的回调函数
+        auto ws_callback = std::bind(&GatewayServer::onMessage, this, std::placeholders::_1, std::placeholders::_2);  //设置收到消息时的回调函数
+        _ws_server.set_message_handler(ws_callback);    //设置收到消息时的回调函数
+        _ws_server.set_reuse_addr(true);                //设置地址复用，解决服务器重启后地址被占用的问题
+        _ws_server.listen(websocket_port);              //监听指定端口
+        _ws_server.start_accept();                      //开始接受连接
 
         //2. 搭建http服务器
         _http_server.Post(GET_MAIL_VERIFY_CODE,         (httplib::Server::Handler)std::bind(&GatewayServer::GetMailVerifyCode,         this, std::placeholders::_1, std::placeholders::_2));
@@ -169,18 +169,20 @@ public:
        // _http_server.Post(DELETE_TIMELINE_MSG,          (httplib::Server::Handler)std::bind(&GatewayServer::DeleteTimelineMsg,         this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_UNREAD_COUNT,             (httplib::Server::Handler)std::bind(&GatewayServer::GetUnreadCount,            this, std::placeholders::_1, std::placeholders::_2));
 
-
+        //3. 启动http服务器
         _http_thread = std::thread([this, http_port](){
             _http_server.listen("0.0.0.0", http_port);
         });
         _http_thread.detach();
     }
+    /* 启动服务器 */
     void start() {
         _ws_server.run();
     }
 private:
+    /* brief: WebSocket服务器连接建立时的回调函数 */
     void onOpen(websocketpp::connection_hdl hdl) { LOG_DEBUG("WebSocket 长连接建立成功 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get()); }
-
+    /* brief: WebSocket服务器连接关闭时的回调函数 */
     void onClose(websocketpp::connection_hdl hdl) {
         LOG_DEBUG("WebSocket 长连接断开");
         // 长连接断开时做的清理动作
@@ -200,16 +202,19 @@ private:
         _connections->remove(conn);
         LOG_DEBUG("{} - {} - {} 长连接断开，清理缓存数据", (size_t)conn.get(), uid, ssid);
     }
-
+    /* brief: 保持连接活跃 */
     void keepAlive(server_t::connection_ptr conn) {
+        //1. 连接对象为空或者连接状态异常则不进行连接保活
         if(!conn || conn->get_state() !=  websocketpp::session::state::value::open) {
             LOG_DEBUG("非正常连接状态，结束连接保活");
             return;
         } 
+        //2. 连接对象正常则发送ping消息进行连接保活
         conn->ping("");
+        //3. 设置定时器，60s后再次进行连接保活
         _ws_server.set_timer(60000, std::bind(&GatewayServer::keepAlive, this, conn));
     }
-
+    /* brief: 处理收到的消息 */
     void onMessage(websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
         // 收到第一条消息后，根据消息中的会话ID进行身份识别，将客户端长连接添加管理
         //1. 取出长连接对应的连接对象
@@ -236,7 +241,7 @@ private:
         LOG_DEBUG("新增长连接管理: {} - {} - {}", (size_t)conn.get(), *uid, ssid);
         keepAlive(conn);
     }
-
+    /* brief: 获取邮件验证码 */
     void GetMailVerifyCode(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
         MailVerifyCodeReq req;
@@ -267,7 +272,7 @@ private:
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
-
+    /* brief: 用户注册 */
     void UserRegister(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
         UserRegisterReq req;
@@ -298,6 +303,7 @@ private:
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
+    /* brief: 用户登录 */
     void UserLogin(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
         UserLoginReq req;
@@ -678,7 +684,7 @@ private:
             return err_response("好友子服务调用失败");
         }
         //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
-        auto conn = _connections->connection(req.request_id());
+        auto conn = _connections->connection(*uid);
         if(rsp.success() && conn) {
             LOG_DEBUG("找到被申请人 {} 长连接, 对其进行好友申请通知", req.request_id());
             auto user_rsp = _GetUserInfo(req.request_id(), *uid);
