@@ -30,6 +30,10 @@ DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送交换机");
 DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列");
 DEFINE_string(mq_push_binding_key, "push", "推送绑定键");
 
+// M5: 心跳触发未 ack 重传的可调参数
+DEFINE_int32(resend_batch, 50, "心跳触发未 ack 重传的批量上限");
+DEFINE_int32(resend_max_age_sec, 5, "未 ack 项入队后等待多少秒视为可重传");
+
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -42,6 +46,7 @@ int main(int argc, char *argv[])
                        FLAGS_mq_push_exchange, FLAGS_mq_push_queue, FLAGS_mq_push_binding_key);
     psb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_message_service, FLAGS_push_service);
     psb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
+    psb.set_resend_params(FLAGS_resend_batch, FLAGS_resend_max_age_sec);
     psb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads, FLAGS_ws_port);
 
     auto server = psb.build();

@@ -143,6 +143,9 @@ message MessageInfo {
     uint64 seq_id = 6;
     // 客户端生成的消息唯一 ID（UUID），服务端用于幂等去重，与 (user_id, client_msg_id) 唯一索引对齐
     string client_msg_id = 7;
+    // 接收者维度的 user_seq：仅在下行推送时按收件人填充，客户端用此字段构造 NotifyMsgPushAck.user_seq
+    // 写扩散场景下 push 服务 _local_send 前为每个收件人覆写；落库 / ES / 历史拉取路径不使用
+    optional uint64 user_seq = 8;
 }
 
 // 接收者维度的 user_seq 配对结构（写扩散群使用）

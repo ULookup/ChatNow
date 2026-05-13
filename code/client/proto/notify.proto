@@ -26,9 +26,11 @@ message NotifyClientAuth {
 }
 
 // 客户端确认收到指定消息
+// message_id 类型必须与服务端 server/proto/notify.proto 一致（int64 / Snowflake）
+// 否则 wire type 不一致会导致服务端反序列化失败
 message NotifyMsgPushAck {
     string user_id = 1;
-    string message_id = 2;
+    int64 message_id = 2;
     uint64 user_seq = 3;
     string chat_session_id = 4;
 }

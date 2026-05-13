@@ -5,7 +5,9 @@ DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件
 DEFINE_int32(log_level, 0, "发布模式下，用于指定日志的输出等级");
 
 DEFINE_int32(http_listen_port, 9000, "HTTP服务器监听端口");
-DEFINE_int32(websocket_listen_port, 9001, "WebSocket服务器监听端口");
+// B3: Gateway 不再监听 WebSocket，9001 端口由 push 服务终结。
+//     保留 flag 仅为兼容旧 conf 文件，值不再被使用。
+DEFINE_int32(websocket_listen_port, 9001, "[已废弃] gateway 不再监听 WS（已迁至 push 服务）");
 DEFINE_string(registry_host, "http://127.0.0.1:2379", "服务注册中心地址");
 
 DEFINE_string(base_service, "/service", "服务监控根目录");
@@ -34,7 +36,11 @@ int main(int argc, char *argv[])
                             FLAGS_file_service, FLAGS_user_service, FLAGS_transmite_service,
                             FLAGS_message_service, FLAGS_friend_service, FLAGS_chatsession_service,
                             FLAGS_push_service);
-    gsb.make_server_object(FLAGS_websocket_listen_port, FLAGS_http_listen_port);
+    if(FLAGS_websocket_listen_port != 0) {
+        LOG_WARN("gateway 不再监听 WebSocket，--websocket_listen_port={} 已被忽略（请使用 push_server）",
+                 FLAGS_websocket_listen_port);
+    }
+    gsb.make_server_object(FLAGS_http_listen_port);
 
     auto server = gsb.build();
     server->start();

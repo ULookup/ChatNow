@@ -9,8 +9,10 @@
 #include "etcd.hpp"
 #include "logger.hpp"
 #include "channel.hpp"
+#include "brpc_closure.hpp"
 
-#include "connection.hpp"
+// 注意：B3 — Gateway 已彻底无状态化，WebSocket 终结迁至 push 服务（push_server.h）。
+// 不再 include "connection.hpp"，不再监听 9001 端口，不再维护 uid→conn 映射。
 
 /* protobuf 框架代码 */
 #include "base.pb.h"
@@ -84,8 +86,7 @@ class GatewayServer
 public:
     using ptr = std::shared_ptr<GatewayServer>;
 
-    GatewayServer(int websocket_port,
-                int http_port,
+    GatewayServer(int http_port,
                 const std::shared_ptr<sw::redis::Redis> &redis_client,
                 const ServiceManager::ptr &channels,
                 const Discovery::ptr &service_discoverer,
@@ -98,7 +99,6 @@ public:
                 const std::string &chatsession_service_name,
                 const std::string &push_service_name = "/service/push_service")
         : _redis_session(std::make_shared<Session>(redis_client)),
-        _redis_status(std::make_shared<Status>(redis_client)),
         _mm_channels(channels),
         _service_discoverer(service_discoverer),
         _speech_service_name(speech_service_name),
@@ -109,18 +109,10 @@ public:
         _friend_service_name(friend_service_name),
         _chatsession_service_name(chatsession_service_name),
         _push_service_name(push_service_name),
-        _connections(std::make_shared<Connection>())
+        _http_port(http_port)
     {
-        //1. 搭建websocket服务器
-        _ws_server.set_access_channels(websocketpp::log::alevel::none); //关闭访问日志
-        _ws_server.init_asio(); //初始化ASIO,可以指定线程数量，默认是单线程
-        _ws_server.set_open_handler(std::bind(&GatewayServer::onOpen, this, std::placeholders::_1)); //设置连接建立时的回调函数
-        _ws_server.set_close_handler(std::bind(&GatewayServer::onClose, this, std::placeholders::_1));  //设置连接关闭时的回调函数
-        auto ws_callback = std::bind(&GatewayServer::onMessage, this, std::placeholders::_1, std::placeholders::_2);  //设置收到消息时的回调函数
-        _ws_server.set_message_handler(ws_callback);    //设置收到消息时的回调函数
-        _ws_server.set_reuse_addr(true);                //设置地址复用，解决服务器重启后地址被占用的问题
-        _ws_server.listen(websocket_port);              //监听指定端口
-        _ws_server.start_accept();                      //开始接受连接
+        // B3: Gateway 不再终结 WebSocket。WS 由 push 服务监听 9001。
+        //     此处仅注册 HTTP 路由；推送链路统一走 _pushNotify → PushService。
 
         //2. 搭建http服务器
         _http_server.Post(GET_MAIL_VERIFY_CODE,         (httplib::Server::Handler)std::bind(&GatewayServer::GetMailVerifyCode,         this, std::placeholders::_1, std::placeholders::_2));
@@ -172,20 +164,21 @@ public:
        // _http_server.Post(DELETE_TIMELINE_MSG,          (httplib::Server::Handler)std::bind(&GatewayServer::DeleteTimelineMsg,         this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_UNREAD_COUNT,             (httplib::Server::Handler)std::bind(&GatewayServer::GetUnreadCount,            this, std::placeholders::_1, std::placeholders::_2));
 
-        //3. 启动http服务器
-        _http_thread = std::thread([this, http_port](){
-            _http_server.listen("0.0.0.0", http_port);
-        });
-        _http_thread.detach();
     }
-    /* 启动服务器 */
+    /* 启动服务器：阻塞主线程在 HTTP 监听上
+     * httplib::listen 失败（bind / listen 错误）返回 false；不检查会让进程静默 exit 0
+     */
     void start() {
-        _ws_server.run();
+        LOG_INFO("Gateway 启动: http_port={} (WS 已迁至 push 服务)", _http_port);
+        if(!_http_server.listen("0.0.0.0", _http_port)) {
+            LOG_ERROR("HTTP 服务器监听失败 port={}", _http_port);
+            abort();
+        }
     }
 private:
     /* brief: 通过 Push 服务下发 NotifyMessage（无状态化推送链路）
-     *  - 替代旧的本机 WebSocket 直推；适配多 Gateway 实例
-     *  - 调用失败仅日志告警，由 Push 服务的 unacked / 离线兜底负责重试
+     *  - 异步 fire-and-forget；用 SelfDeleteRpcClosure 持有 cntl/req/rsp，
+     *    避免栈对象在异步回调到达前已析构（DoNothing 旧实现的 UAF）
      */
     void _pushNotify(const std::string &target_uid, const NotifyMessage &notify,
                      const std::string &rid = std::string()) {
@@ -195,76 +188,21 @@ private:
             return;
         }
         PushService_Stub stub(channel.get());
-        PushToUserReq req;
-        PushToUserRsp rsp;
-        brpc::Controller cntl;
-        req.set_request_id(rid);
-        req.set_user_id(target_uid);
-        req.mutable_notify()->CopyFrom(notify);
-        // fire-and-forget：不阻塞 HTTP 响应路径
-        stub.PushToUser(&cntl, &req, &rsp, brpc::DoNothing());
+        auto *closure = new SelfDeleteRpcClosure<PushToUserReq, PushToUserRsp>();
+        closure->req.set_request_id(rid);
+        closure->req.set_user_id(target_uid);
+        closure->req.mutable_notify()->CopyFrom(notify);
+        std::string uid_copy = target_uid;
+        closure->on_done = [uid_copy](brpc::Controller *c, const PushToUserRsp &) {
+            if(c->Failed()) {
+                LOG_WARN("PushToUser 失败 uid={}: {}", uid_copy, c->ErrorText());
+            }
+        };
+        stub.PushToUser(&closure->cntl, &closure->req, &closure->rsp, closure);
     }
-    /* brief: WebSocket服务器连接建立时的回调函数 */
-    void onOpen(websocketpp::connection_hdl hdl) { LOG_DEBUG("WebSocket 长连接建立成功 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get()); }
-    /* brief: WebSocket服务器连接关闭时的回调函数 */
-    void onClose(websocketpp::connection_hdl hdl) {
-        LOG_DEBUG("WebSocket 长连接断开");
-        // 长连接断开时做的清理动作
-        auto conn = _ws_server.get_con_from_hdl(hdl);
-        //0. 通过连接对象，获取对应的用户ID与登录会话ID
-        std::string uid, ssid;
-        bool ret =_connections->client(conn, uid, ssid);
-        if(ret == false) {
-            LOG_WARN("长连接断开，未找到长连接对应的客户端信息");
-            return;
-        }
-        //1. 移除登录会话信息
-        _redis_session->remove(ssid);
-        //2. 移除登录状态信息
-        _redis_status->remove(uid);
-        //3. 移除长连接管理数据
-        _connections->remove(conn);
-        LOG_DEBUG("{} - {} - {} 长连接断开，清理缓存数据", (size_t)conn.get(), uid, ssid);
-    }
-    /* brief: 保持连接活跃 */
-    void keepAlive(server_t::connection_ptr conn) {
-        //1. 连接对象为空或者连接状态异常则不进行连接保活
-        if(!conn || conn->get_state() !=  websocketpp::session::state::value::open) {
-            LOG_DEBUG("非正常连接状态，结束连接保活");
-            return;
-        } 
-        //2. 连接对象正常则发送ping消息进行连接保活
-        conn->ping("");
-        //3. 设置定时器，60s后再次进行连接保活
-        _ws_server.set_timer(60000, std::bind(&GatewayServer::keepAlive, this, conn));
-    }
-    /* brief: 处理收到的消息 */
-    void onMessage(websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
-        // 收到第一条消息后，根据消息中的会话ID进行身份识别，将客户端长连接添加管理
-        //1. 取出长连接对应的连接对象
-        auto conn = _ws_server.get_con_from_hdl(hdl);
-        //2. 针对消息内容进行反序列化 -- ClientAuthenticationReq -- 提取登录会话ID
-        ClientAuthenticationReq request;
-        bool ret = request.ParseFromString(msg->get_payload());
-        if(ret == false) {
-            LOG_ERROR("长连接身份识别失败：正文反序列化失败");
-            _ws_server.close(hdl, websocketpp::close::status::unsupported_data, "正文反序列化失败");
-            return;
-        }
-        //3. 在会话信息缓存中，查找会话信息
-        std::string ssid = request.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            //4. 会话信息不存在则关闭连接
-            LOG_ERROR("长连接身份识别失败：未找到会话信息 {}", ssid);
-            _ws_server.close(hdl, websocketpp::close::status::unsupported_data, "未找到会话信息");
-            return;
-        }
-        //5. 会话信息存在，则添加长连接管理
-        _connections->insert(conn, *uid, ssid);
-        LOG_DEBUG("新增长连接管理: {} - {} - {}", (size_t)conn.get(), *uid, ssid);
-        keepAlive(conn);
-    }
+    // B3: WS 入口与连接管理已下沉到 push 服务（push_server.h 的 make_ws_object）。
+    //     gateway 不再持有 onOpen / onClose / onMessage / keepAlive 句柄，
+    //     也不再访问 _connections / _ws_server。客户端鉴权 / 心跳 / ACK 全部走 push。
     /* brief: 获取邮件验证码 */
     void GetMailVerifyCode(const httplib::Request &request, httplib::Response &response) {
         //1. 取出http请求正文，将正文进行反序列化
@@ -2056,7 +1994,6 @@ private:
     }
 private:
     Session::ptr _redis_session;
-    Status::ptr _redis_status;
 
     std::string _speech_service_name;
     std::string _file_service_name;
@@ -2069,11 +2006,8 @@ private:
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discoverer;
 
-    Connection::ptr _connections;
-
-    server_t _ws_server;
+    int _http_port {0};
     httplib::Server _http_server;
-    std::thread _http_thread;
 };
 
 class GatewayServerBuilder
@@ -2123,9 +2057,9 @@ public:
 
         _service_discoverer = std::make_shared<Discovery>(reg_host, base_service_name, put_cb, del_cb);
     }
-    void make_server_object(int websocket_port, int http_port)
+    /* brief: B3 — Gateway 仅监听 HTTP；WebSocket 由 push 服务终结 */
+    void make_server_object(int http_port)
     {
-        _websocket_port = websocket_port;
         _http_port = http_port;
     }
     GatewayServer::ptr build() {
@@ -2141,8 +2075,7 @@ public:
             LOG_ERROR("还未初始化信道管理模块");
             abort();
         }
-        GatewayServer::ptr server = std::make_shared<GatewayServer>(_websocket_port,
-                                                                _http_port,
+        GatewayServer::ptr server = std::make_shared<GatewayServer>(_http_port,
                                                                 _redis_client,
                                                                 _mm_channels,
                                                                 _service_discoverer,
@@ -2157,7 +2090,6 @@ public:
         return server;
     }
 private:
-    int _websocket_port;
     int _http_port;
 
     std::shared_ptr<sw::redis::Redis> _redis_client;

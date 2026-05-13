@@ -105,17 +105,24 @@ public:
     }
 
     ~MQClient() {
-        // 优雅关闭：先在 ev 线程内关闭 channel/connection，再 break loop
+        // 优雅关闭：把 close + quit 串成同一个 task，避免 quit watcher 抢在 close 之前
+        // 跑完 ev_break，导致 channel 没有干净关掉（broker 看到 abrupt disconnect）。
         post_task([this](){
             try { _channel.close(); _connection.close(); } catch(...) {}
+            ev_break(_ev_loop, EVBREAK_ALL);
         });
-        ev_async_send(_ev_loop, &_ev_async);
         if(_async_thread.joinable()) _async_thread.join();
         ev_loop_destroy(_ev_loop);
     }
 
-    /* brief: 声明交换机 / 队列 / 绑定（含 DLX 链路） */
+    /* brief: 声明交换机 / 队列 / 绑定（含 DLX 链路）
+     * 当 settings.queue 为空时仅声明 exchange，便于 publisher-only 端避免声明无消费者的孤儿队列
+     */
     void declare(const declare_settings &settings) {
+        if(settings.queue.empty()) {
+            _declare_exchange_only(settings.exchange, exchange_type(settings.exchange_type));
+            return;
+        }
         AMQP::Table args;
         if(settings.exchange_type == DELAYED) {
             // 1) 先声明 DLX 链路
@@ -230,6 +237,21 @@ private:
             _task_queue.push(std::move(task));
         }
         ev_async_send(_ev_loop, &_task_watcher);
+    }
+
+    /* brief: 仅声明 exchange，不声明队列 / 绑定。供 publisher-only 端使用 */
+    bool _declare_exchange_only(const std::string &exchange, AMQP::ExchangeType type) {
+        std::promise<bool> promise;
+        auto future = promise.get_future();
+        post_task([this, exchange, type, &promise]() {
+            _channel.declareExchange(exchange, type)
+                .onSuccess([&promise](){ promise.set_value(true); })
+                .onError([&promise, exchange](const char *m){
+                    LOG_ERROR("声明交换机 {} 失败: {}", exchange, m ? m : "");
+                    promise.set_value(false);
+                });
+        });
+        return future.get();
     }
 
     /* brief: 声明 exchange + queue + bind 链路；返回是否成功 */

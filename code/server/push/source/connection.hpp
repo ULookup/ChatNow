@@ -27,6 +27,10 @@ public:
         std::string ssid;
         std::string device_id;
         long last_active_ts {0};   // 心跳更新
+        // M2: per-conn 发送串行化锁。websocketpp::connection::send 不是线程安全，
+        //     MQ 消费线程 / brpc IO 线程 / WS asio 线程多源并发 send 会撕帧。
+        //     用 shared_ptr 让 Connection 拷贝/move 安全，所有持有同一 conn 的拷贝共享同一把锁。
+        std::shared_ptr<std::mutex> send_mu {std::make_shared<std::mutex>()};
     };
 
     Connection() = default;
@@ -65,6 +69,14 @@ public:
         ssid = it->second.ssid;
         device_id = it->second.device_id;
         return true;
+    }
+
+    /* brief: 取该 conn 的发送串行化锁；连接已不存在则返回 nullptr */
+    std::shared_ptr<std::mutex> send_mutex(const server_t::connection_ptr &conn) {
+        std::unique_lock<std::mutex> lock(_mutex);
+        auto it = _conn_clients.find(conn);
+        if(it == _conn_clients.end()) return nullptr;
+        return it->second.send_mu;
     }
 
     void touch(const server_t::connection_ptr &conn) {

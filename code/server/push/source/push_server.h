@@ -6,6 +6,7 @@
 #include "channel.hpp"
 #include "rabbitmq.hpp"
 #include "data_redis.hpp"
+#include "brpc_closure.hpp"
 #include "base.pb.h"
 #include "notify.pb.h"
 #include "push.pb.h"
@@ -13,6 +14,8 @@
 #include <brpc/server.h>
 #include <thread>
 #include <chrono>
+#include <limits>
+#include <unordered_set>
 
 namespace chatnow
 {
@@ -48,6 +51,12 @@ public:
           _message_service_name(message_service_name),
           _mm_channels(channels) {}
 
+    /* M5: 重发参数注入（gflags 来源） */
+    void set_resend_params(long batch, long max_age_sec) {
+        _resend_batch = batch;
+        _resend_max_age_sec = max_age_sec;
+    }
+
     // brpc: 单用户推送（其它服务调用）
     void PushToUser(google::protobuf::RpcController* controller,
                     const ::chatnow::PushToUserReq* request,
@@ -58,7 +67,21 @@ public:
         const std::string &rid = request->request_id();
         response->set_request_id(rid);
 
-        std::string payload = request->notify().SerializeAsString();
+        // 若调用方带了 user_seq 且为聊天消息：覆写到 MessageInfo.user_seq，
+        // 让客户端能据此正确填 NotifyMsgPushAck（B1）。
+        std::string payload;
+        const NotifyMessage &notify = request->notify();
+        if(request->has_user_seq() &&
+           notify.notify_type() == NotifyType::CHAT_MESSAGE_NOTIFY &&
+           notify.has_new_message_info()) {
+            NotifyMessage per_user = notify;
+            per_user.mutable_new_message_info()->mutable_message_info()
+                ->set_user_seq(request->user_seq());
+            payload = per_user.SerializeAsString();
+        } else {
+            payload = notify.SerializeAsString();
+        }
+
         int delivered = _local_send(request->user_id(), payload);
         // 若是聊天消息推送：未 ack 入未送达缓冲，等客户端 ack/心跳触发补送
         if(request->has_user_seq() && _unacked) {
@@ -76,16 +99,35 @@ public:
                    ::google::protobuf::Closure* done) override
     {
         brpc::ClosureGuard rpc_guard(done);
-        std::string payload = request->notify().SerializeAsString();
         std::unordered_map<std::string, unsigned long> uid2seq;
         for(const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
+
+        const NotifyMessage &base_notify = request->notify();
+        // 仅消息推送类型才需要 per-uid 覆写 user_seq；其它通知（好友 / 会话）走原 payload
+        bool is_chat_msg = (base_notify.notify_type() == NotifyType::CHAT_MESSAGE_NOTIFY) &&
+                          base_notify.has_new_message_info();
+        std::string broadcast_payload;
+        if(!is_chat_msg) broadcast_payload = base_notify.SerializeAsString();
+
         int total = 0;
+        long long now_ts = static_cast<long long>(time(nullptr));
         for(const auto &uid : request->user_id_list()) {
+            std::string payload;
+            if(is_chat_msg) {
+                NotifyMessage per_user = base_notify;
+                auto it = uid2seq.find(uid);
+                if(it != uid2seq.end()) {
+                    per_user.mutable_new_message_info()->mutable_message_info()->set_user_seq(it->second);
+                }
+                payload = per_user.SerializeAsString();
+            } else {
+                payload = broadcast_payload;
+            }
             int n = _local_send(uid, payload);
             if(n > 0) total++;
             auto it = uid2seq.find(uid);
             if(it != uid2seq.end() && _unacked) {
-                _unacked->push(uid, it->second, static_cast<long long>(time(nullptr)));
+                _unacked->push(uid, it->second, now_ts);
             }
         }
         response->set_request_id(request->request_id());
@@ -106,13 +148,24 @@ public:
         }
         const auto &msg_info = internal_msg.message_info();
 
-        NotifyMessage notify;
-        notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
-        notify.mutable_new_message_info()->mutable_message_info()->CopyFrom(msg_info);
-        std::string payload = notify.SerializeAsString();
-
         std::unordered_map<std::string, unsigned long> uid2seq;
         for(const auto &p : internal_msg.user_seqs()) uid2seq[p.user_id()] = p.user_seq();
+
+        // B1: 推送前必须为每个收件人填好 user_seq —— 客户端按此字段回 ACK，
+        //     这里需要 per-uid 重新序列化，不能广播同一份 payload。
+        // 跨实例转发使用不带 user_seq 的模板（对端 PushBatch 收到后会按 user_seqs 注入）。
+        NotifyMessage notify_template;
+        notify_template.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
+        notify_template.mutable_new_message_info()->mutable_message_info()->CopyFrom(msg_info);
+        auto build_payload_for = [&](const std::string &uid) -> std::string {
+            NotifyMessage notify = notify_template;
+            auto it = uid2seq.find(uid);
+            if(it != uid2seq.end()) {
+                notify.mutable_new_message_info()->mutable_message_info()->set_user_seq(it->second);
+            }
+            // 大群读扩散无 user_seq → 不下发 ACK 链路（客户端按 (session_id, seq_id) 增量补漏）
+            return notify.SerializeAsString();
+        };
 
         // 1) 写未 ack 缓冲（在尝试推送前先入队，确保对端 ack 前可重传）
         long long now_ts = static_cast<long long>(time(nullptr));
@@ -127,7 +180,7 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for(const auto &uid : internal_msg.member_id_list()) {
-            int n = _local_send(uid, payload);
+            int n = _local_send(uid, build_payload_for(uid));
             if(n == 0) remote_uids.push_back(uid);
         }
         if(remote_uids.empty()) return ConsumeAction::Ack;
@@ -154,29 +207,25 @@ public:
                 continue;
             }
             PushService_Stub stub(channel.get());
-            // 注意：req/rsp/cntl 必须在堆上，brpc::DoNothing 异步回调中沿用
-            auto *req  = new PushBatchReq();
-            auto *rsp  = new PushBatchRsp();
-            auto *cntl = new brpc::Controller();
-            req->set_request_id(msg_info.client_msg_id());
-            for(const auto &u : uids) req->add_user_id_list(u);
-            req->mutable_notify()->CopyFrom(notify);
+            // 自删 Closure：cntl/req/rsp 与回调上下文一同生命周期管理
+            auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
+            closure->req.set_request_id(msg_info.client_msg_id());
+            for(const auto &u : uids) closure->req.add_user_id_list(u);
+            closure->req.mutable_notify()->CopyFrom(notify_template);
             for(const auto &u : uids) {
                 auto it = uid2seq.find(u);
                 if(it == uid2seq.end()) continue;
-                auto *p = req->add_user_seqs();
+                auto *p = closure->req.add_user_seqs();
                 p->set_user_id(u);
                 p->set_user_seq(it->second);
             }
-            // 自删 closure：回调里释放堆资源
-            auto *done = brpc::NewCallback(
-                [](brpc::Controller *c, PushBatchReq *q, PushBatchRsp *r) {
-                    if(c->Failed()) {
-                        LOG_WARN("PushBatch 跨实例失败: {}", c->ErrorText());
-                    }
-                    delete q; delete r; delete c;
-                }, cntl, req, rsp);
-            stub.PushBatch(cntl, req, rsp, done);
+            std::string peer_id = peer;
+            closure->on_done = [peer_id](brpc::Controller *c, const PushBatchRsp &) {
+                if(c->Failed()) {
+                    LOG_WARN("PushBatch 跨实例失败 peer={}: {}", peer_id, c->ErrorText());
+                }
+            };
+            stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
         }
         return ConsumeAction::Ack;
     }
@@ -185,44 +234,135 @@ public:
     void onClientNotify(const NotifyMessage &notify) {
         if(notify.notify_type() == NotifyType::MSG_PUSH_ACK) {
             const auto &ack = notify.msg_push_ack();
-            if(_unacked) _unacked->ack(ack.user_id(), ack.user_seq());
-            // 异步上报 last_ack_seq 到 message 服务
-            auto channel = _mm_channels->choose(_message_service_name);
-            if(channel) {
-                MsgStorageService_Stub stub(channel.get());
-                UpdateAckSeqReq req;
-                UpdateAckSeqRsp rsp;
-                brpc::Controller cntl;
-                req.set_user_id(ack.user_id());
-                req.set_chat_session_id(ack.chat_session_id());
-                req.set_user_seq(ack.user_seq());
-                stub.UpdateAckSeq(&cntl, &req, &rsp, brpc::DoNothing());
-                // fire-and-forget
+            // 防御：大群读扩散场景客户端不应回 ACK；user_seq=0 视为非法包丢弃，避免污染 last_ack_seq
+            if(ack.user_seq() == 0) {
+                LOG_WARN("收到非法 MSG_PUSH_ACK user_seq=0 uid={}", ack.user_id());
+                return;
             }
+            if(ack.user_id().empty() || ack.chat_session_id().empty()) {
+                LOG_WARN("收到非法 MSG_PUSH_ACK 缺字段 uid={} ssid={}",
+                         ack.user_id(), ack.chat_session_id());
+                return;
+            }
+            if(_unacked) _unacked->ack(ack.user_id(), ack.user_seq());
+            // 异步上报 last_ack_seq；失败 → LOG_WARN（DAO 单调推进，下次 ACK 会带更新的 seq 自动 catchup）
+            auto channel = _mm_channels->choose(_message_service_name);
+            if(!channel) {
+                LOG_WARN("UpdateAckSeq: message service 不可达 uid={} seq={}",
+                         ack.user_id(), ack.user_seq());
+                return;
+            }
+            MsgStorageService_Stub stub(channel.get());
+            auto *closure = new SelfDeleteRpcClosure<UpdateAckSeqReq, UpdateAckSeqRsp>();
+            closure->req.set_user_id(ack.user_id());
+            closure->req.set_chat_session_id(ack.chat_session_id());
+            closure->req.set_user_seq(ack.user_seq());
+            std::string uid = ack.user_id();
+            uint64_t seq = ack.user_seq();
+            closure->on_done = [uid, seq](brpc::Controller *c, const UpdateAckSeqRsp &r) {
+                if(c->Failed()) {
+                    LOG_WARN("UpdateAckSeq RPC 失败 uid={} seq={}: {}", uid, seq, c->ErrorText());
+                } else if(!r.success()) {
+                    LOG_WARN("UpdateAckSeq 业务失败 uid={} seq={}: {}", uid, seq, r.errmsg());
+                }
+            };
+            stub.UpdateAckSeq(&closure->cntl, &closure->req, &closure->rsp, closure);
         } else if(notify.notify_type() == NotifyType::CLIENT_HEARTBEAT) {
             const auto &hb = notify.heartbeat();
-            // 拉取未 ack 列表，逐条补送（这里简化：直接发对应序号占位，
-            // 完整实现还需要从 message 表回查实际 MessageInfo 再填到 NotifyMessage）
-            if(_unacked) {
-                auto pending = _unacked->drain(hb.user_id(), 50);
-                for(const auto &seq_str : pending) {
-                    LOG_DEBUG("Heartbeat-补送 uid={} seq={}", hb.user_id(), seq_str);
-                }
-            }
+            _on_heartbeat_resend(hb);
         }
     }
 
+    /* M5: 心跳触发未 ack 重传 —
+     *  - peek_due：拿到一批入队超过 max_age 的成熟 user_seq（不删除）
+     *  - 异步调 message.GetOfflineMsg(uid, last_user_seq, msg_count)；不阻塞 WS asio 单线程
+     *  - 回调里按 message_id->user_seq 映射配对（不依赖列表下标，规避 select_by_ids 跨会话排序）
+     *  - bump_score：把这批 score 推到 now，并续期 7 天 TTL，避免老 unacked 整 key 过期消失
+     */
+    void _on_heartbeat_resend(const ::chatnow::NotifyHeartbeat &hb) {
+        if(!_unacked) return;
+        const std::string uid = hb.user_id();
+        if(uid.empty()) return;
+        auto pending = _unacked->peek_due(uid, _resend_batch, _resend_max_age_sec);
+        if(pending.empty()) return;
+        // 解析 user_seq 数值；构 set 给回调过滤；同时算 last_user_seq 起点
+        std::unordered_set<uint64_t> pending_set;
+        pending_set.reserve(pending.size());
+        uint64_t min_seq = std::numeric_limits<uint64_t>::max();
+        for(const auto &s : pending) {
+            try {
+                uint64_t v = std::stoull(s);
+                pending_set.insert(v);
+                if(v < min_seq) min_seq = v;
+            } catch(...) { LOG_WARN("Heartbeat-补送 非法 user_seq={}", s); }
+        }
+        if(pending_set.empty()) return;
+        uint64_t last_user_seq = min_seq > 0 ? min_seq - 1 : 0;
+
+        auto channel = _mm_channels->choose(_message_service_name);
+        if(!channel) {
+            LOG_WARN("Heartbeat-补送：message 服务不可达 uid={}", uid);
+            return;
+        }
+        MsgStorageService_Stub stub(channel.get());
+        auto *closure = new SelfDeleteRpcClosure<GetOfflineMsgReq, GetOfflineMsgRsp>();
+        closure->req.set_request_id(uid);
+        closure->req.set_user_id(uid);
+        closure->req.set_last_message_id(static_cast<int64_t>(last_user_seq));
+        closure->req.set_msg_count(static_cast<int32_t>(pending.size()));
+
+        // 回调中执行 send + bump_score；按值捕获所需上下文
+        std::string uid_copy = uid;
+        auto unacked = _unacked;
+        auto pending_copy = pending;
+        auto pending_set_copy = std::move(pending_set);
+        // 注意：回调里调用 _local_send(uid, payload) 仍要走 _connections，
+        //      _connections 是本服务对象的 shared_ptr 字段，PushServiceImpl
+        //      生命周期由 brpc 持有，回调到达时 impl 必然存活（M1 已确保关停顺序）
+        PushServiceImpl *self = this;
+        closure->on_done = [self, uid_copy, unacked, pending_copy, pending_set_copy](
+            brpc::Controller *c, const GetOfflineMsgRsp &rsp)
+        {
+            if(c->Failed() || !rsp.success()) {
+                LOG_WARN("Heartbeat-补送 GetOfflineMsg 失败 uid={}: {}",
+                         uid_copy, c->Failed() ? c->ErrorText() : rsp.errmsg());
+                return;
+            }
+            int sent = 0;
+            for(int i = 0; i < rsp.msg_list_size(); ++i) {
+                const auto &mi = rsp.msg_list(i);
+                if(!mi.has_user_seq()) continue;  // 缺 user_seq → 不在 pending 列表
+                uint64_t us = mi.user_seq();
+                if(pending_set_copy.find(us) == pending_set_copy.end()) continue;
+                ::chatnow::NotifyMessage notify;
+                notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
+                notify.mutable_new_message_info()->mutable_message_info()->CopyFrom(mi);
+                self->_local_send(uid_copy, notify.SerializeAsString());
+                ++sent;
+            }
+            if(unacked) unacked->bump_score(uid_copy, pending_copy);
+            LOG_INFO("Heartbeat-补送 uid={} 取出 {} 条 实际重发 {} 条",
+                     uid_copy, pending_copy.size(), sent);
+        };
+        stub.GetOfflineMsg(&closure->cntl, &closure->req, &closure->rsp, closure);
+    }
+
 private:
-    /* brief: 本实例直接通过 WS 下发；返回送达的连接数 */
+    /* brief: 本实例直接通过 WS 下发；返回送达的连接数
+     * M2: per-conn send 串行化 — 取连接关联的 send_mutex 后再 send，
+     *     防止 MQ 消费线程 / brpc IO 线程 / WS asio 线程并发 send 同一 conn 撕帧 / crash。
+     */
     int _local_send(const std::string &uid, const std::string &payload) {
         auto conns = _connections->connections(uid);
         int sent = 0;
         for(auto &c : conns) {
             try {
-                if(c && c->get_state() == websocketpp::session::state::value::open) {
-                    c->send(payload, websocketpp::frame::opcode::value::binary);
-                    ++sent;
-                }
+                if(!c || c->get_state() != websocketpp::session::state::value::open) continue;
+                auto mu = _connections->send_mutex(c);
+                if(!mu) continue;  // conn 已被 close handler / reaper 清理
+                std::lock_guard<std::mutex> lock(*mu);
+                c->send(payload, websocketpp::frame::opcode::value::binary);
+                ++sent;
             } catch(std::exception &e) {
                 LOG_WARN("WS send 失败 uid={}: {}", uid, e.what());
             }
@@ -238,6 +378,9 @@ private:
     std::string _instance_id;
     std::string _message_service_name;
     ServiceManager::ptr _mm_channels;
+    // M5: 心跳触发重发的可调参数（gflag 注入；默认值在 conf 缺省时使用）
+    long _resend_batch        {50};
+    long _resend_max_age_sec  {5};
 };
 
 class PushServer
@@ -247,10 +390,20 @@ public:
     PushServer(const Discovery::ptr &disc,
                const Registry::ptr &reg,
                const std::shared_ptr<brpc::Server> &rpc,
-               server_t *ws_server)
-        : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(ws_server) {}
+               server_t *ws_server,
+               const MQClient::ptr &mq_client,
+               const Subscriber::ptr &push_subscriber)
+        : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(ws_server),
+          _mq_client(mq_client), _push_subscriber(push_subscriber) {}
     ~PushServer() = default;
 
+    /* M1: 关停顺序（消除 UAF）—
+     *   1) 主动停 MQ 消费：清空 _push_subscriber 与 _mq_client（MQClient 析构关闭 channel + join 线程）
+     *      → onPushMessage 不再调度，PushService 不再被外部触发
+     *   2) 停 WS：服务端 stop，等待 ws_thread join
+     *   3) brpc Stop + Join：等待所有进行中的 PushToUser/PushBatch RPC 真正完成
+     *      → 此后 brpc::Server 析构 SERVER_OWNS_SERVICE 才能安全 delete PushServiceImpl
+     */
     void start() {
         // RPC + WebSocket 同进程跑；任意一边异常退出立即通知另一边停服
         _ws_thread = std::thread([this]() {
@@ -260,18 +413,24 @@ public:
             } catch(std::exception &e) {
                 LOG_ERROR("Push WS 线程异常退出: {}", e.what());
             }
-            // ws 退出 → 通知 brpc 停服
             _rpc_server->Stop(0);
         });
         _rpc_server->RunUntilAskedToQuit();
+        // 关停顺序：MQ 消费 → WS → brpc Join → brpc::Server 析构 delete impl
+        _push_subscriber.reset();
+        _mq_client.reset();
         _ws_server->stop();
         if(_ws_thread.joinable()) _ws_thread.join();
+        _rpc_server->Join();
+        LOG_INFO("Push 关停完成");
     }
 private:
     Discovery::ptr _service_discover;
     Registry::ptr _reg_client;
     std::shared_ptr<brpc::Server> _rpc_server;
     server_t *_ws_server;
+    MQClient::ptr _mq_client;
+    Subscriber::ptr _push_subscriber;
     std::thread _ws_thread;
 };
 
@@ -415,6 +574,12 @@ public:
         });
     }
 
+    /* M5: 设置心跳重发参数（应在 make_rpc_object 之前调用） */
+    void set_resend_params(int batch, int max_age_sec) {
+        _resend_batch = batch;
+        _resend_max_age_sec = max_age_sec;
+    }
+
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if(!_redis) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
         if(!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
@@ -424,6 +589,7 @@ public:
             _connections, _redis_session, _redis_status,
             _online_route, _unacked, _instance_id,
             _message_service_name, _mm_channels);
+        _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) { LOG_ERROR("Push: AddService 失败"); abort(); }
 
@@ -449,8 +615,19 @@ public:
         LOG_INFO("Push 服务启动: rpc_port={} ws_port={}", port, ws_port);
     }
 
+    /* M1: build() 把 brpc / MQClient / Subscriber 等的 shared_ptr 全部 move 到 PushServer，
+     *     之后 builder 内部持有的全部置空。这样 main 函数销毁 builder 时不会拖住
+     *     这些对象的生命周期，PushServer::start() 末尾对它们的 reset 才能真正触发析构，
+     *     使 MQClient ev 线程在 brpc::Server 析构（delete PushServiceImpl）之前停下，
+     *     消除 review 报告中的 UAF 路径。
+     */
     PushServer::ptr build() {
-        return std::make_shared<PushServer>(_service_discover, _reg_client, _rpc_server, &_ws_server);
+        return std::make_shared<PushServer>(std::move(_service_discover),
+                                            std::move(_reg_client),
+                                            std::move(_rpc_server),
+                                            &_ws_server,
+                                            std::move(_mq_client),
+                                            std::move(_push_subscriber));
     }
 private:
     std::shared_ptr<sw::redis::Redis> _redis;
@@ -469,6 +646,10 @@ private:
     declare_settings _push_settings;
     MQClient::ptr _mq_client;
     Subscriber::ptr _push_subscriber;
+
+    // M5: 心跳重发参数
+    int _resend_batch       {50};
+    int _resend_max_age_sec {5};
 
     Connection::ptr _connections;
     server_t _ws_server;
