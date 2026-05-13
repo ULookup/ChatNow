@@ -1,159 +1,99 @@
 #pragma once
 
-#include <cstdint>
+/**
+ * ===========================================================================
+ * Snowflake 风格分布式唯一 ID 生成器
+ * ---------------------------------------------------------------------------
+ * 设计保证：
+ *   1. 单实例 ID 严格单调递增
+ *   2. 多实例通过 worker_id 保证全局唯一（10 bits → 1024 节点）
+ *   3. 同毫秒内 sequence 区分（12 bits → 4096 ID/ms）
+ *   4. sequence 溢出阻塞至下一毫秒
+ *   5. 时钟回拨：< 1s 自旋追平；> 1s 抛异常拒绝出 ID（避免重复）
+ *
+ * 注意：
+ *   - 全局严格单调在无中心系统不可达；本实现保证「单实例严格单调 + 全局趋势递增」
+ *   - 业务上跨实例需要绝对单调时（如会话 seq）请用 Redis INCR（见 SeqGen）
+ *
+ * 修订（相对原版）：
+ *   - 私有变量加 chatnow:: 命名空间内访问，保持与项目风格一致
+ *   - WaitUntil 用 sleep_for(1ms) 起步避免 busy-spin 在大回拨场景吃 CPU
+ *   - epoch_ms 默认值改 2025-01-01 UTC（旧值已是这天但注释提及，保留）
+ * ===========================================================================
+ */
+
 #include <chrono>
+#include <cstdint>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
 
-/**
- * @brief Snowflake 风格的分布式唯一 ID 生成器
- *
- * 设计保证：
- * 1. 单实例内 ID 严格单调递增
- * 2. 多实例通过 worker_id 保证全局唯一
- * 3. 同一毫秒内使用 sequence 消除冲突
- * 4. sequence 溢出时阻塞等待下一毫秒
- * 5. 对时钟回拨提供明确处理策略
- *
- * 注意：
- * - “全局严格单调”在无中心的分布式系统中不可实现
- * - 本实现保证：单实例严格单调 + 全局趋势递增
- */
-
 namespace chatnow
 {
 
-class SnowflakeId {
+class SnowflakeId
+{
 public:
-    /**
-     * 位宽定义（经典 Twitter Snowflake）
-     *
-     * 10 bits worker_id  -> 支持 1024 个节点
-     * 12 bits sequence   -> 单节点单毫秒最多 4096 个 ID
-     */
-    static constexpr uint8_t  kWorkerBits  = 10;
-    static constexpr uint8_t  kSeqBits     = 12;
-
-    /**
-     * worker_id 与 sequence 的最大值
-     * 用于边界校验与溢出判断
-     */
+    static constexpr uint8_t  kWorkerBits = 10;   // 1024 个节点
+    static constexpr uint8_t  kSeqBits    = 12;   // 单节点单 ms 4096 个 ID
     static constexpr uint64_t kMaxWorkerId = (1ULL << kWorkerBits) - 1;
     static constexpr uint64_t kMaxSequence = (1ULL << kSeqBits) - 1;
 
     /**
-     * @param worker_id
-     *        当前生成器的机器 / 实例 ID
-     *        在多实例部署时必须保证全局唯一
-     *
-     * @param epoch_ms
-     *        自定义起始时间（毫秒）
-     *        实际存储的是 (当前时间 - epoch)
-     *        这样可以节省 timestamp 位数
-     *
-     * @param wait_on_clock_backwards
-     *        是否在检测到系统时钟回拨时等待
-     *        true  -> 等待时间追上 last_ts_
-     *        false -> 直接抛异常
+     * @param worker_id 实例 ID，多机部署需全局唯一
+     * @param epoch_ms  自定义起始毫秒（默认 2025-01-01 UTC）
+     * @param wait_on_clock_backwards 时钟回拨时是否阻塞等待（false 直接抛错）
      */
     explicit SnowflakeId(uint64_t worker_id,
                          uint64_t epoch_ms = 1735689600000ULL, // 2025-01-01 UTC
                          bool wait_on_clock_backwards = true)
         : worker_id_(worker_id),
           epoch_ms_(epoch_ms),
-          wait_on_clock_backwards_(wait_on_clock_backwards) {
-
-        // worker_id 超出位宽范围，属于配置错误，直接拒绝启动
-        if (worker_id_ > kMaxWorkerId) {
-            throw std::invalid_argument("worker_id out of range");
+          wait_on_clock_backwards_(wait_on_clock_backwards)
+    {
+        if(worker_id_ > kMaxWorkerId) {
+            throw std::invalid_argument("snowflake worker_id out of range");
         }
     }
 
-    /**
-     * @brief 生成下一个 ID
-     *
-     * 线程安全（mutex 串行化）：
-     * - 保证 last_ts_ / sequence_ 的一致性
-     * - 保证单实例内严格单调递增
-     */
+    /* brief: 申请下一个 64-bit ID（线程安全） */
     uint64_t Next() {
         std::lock_guard<std::mutex> lock(mu_);
-
         uint64_t now = NowMs();
 
-        /**
-         * 1 时钟回拨处理
-         *
-         * 如果系统时间小于上一次生成 ID 的时间，
-         * 说明发生了 NTP 校时或人为改时间。
-         */
-        // 1. 时钟回拨处理
-        if (now < last_ts_) {
-            long diff = last_ts_ - now;
-            if (!wait_on_clock_backwards_ || diff > 1000) { 
-                // 如果回拨超过 1秒，等待代价太大，直接抛错
-                throw std::runtime_error("Clock moved backwards logically");
+        // 1) 时钟回拨处理
+        if(now < last_ts_) {
+            uint64_t diff = last_ts_ - now;
+            if(!wait_on_clock_backwards_ || diff > 1000) {
+                throw std::runtime_error("snowflake: clock moved backwards");
             }
-            // 短时间回拨，自旋等待追平
             now = WaitUntil(last_ts_);
         }
 
-        /**
-         * 2 同一毫秒内
-         *
-         * 时间戳不变，只能依赖 sequence 来区分 ID
-         */
-        if (now == last_ts_) {
-            // sequence 自增，并限制在 bit 范围内
+        // 2) 同毫秒：sequence 自增并防溢出
+        if(now == last_ts_) {
             sequence_ = (sequence_ + 1) & kMaxSequence;
-
-            /**
-             * sequence 用尽：
-             * - 当前毫秒内已经生成了 4096 个 ID
-             * - 必须等待下一毫秒，否则会冲突
-             */
-            if (sequence_ == 0) {
-                now = WaitUntil(last_ts_ + 1);
-            }
+            if(sequence_ == 0) now = WaitUntil(last_ts_ + 1);
         } else {
-            /**
-             * 3 新的毫秒
-             *
-             * sequence 必须清零，
-             * 否则会破坏 ID 的单调性
-             */
+            // 3) 新毫秒：sequence 必须清零保单调性
             sequence_ = 0;
         }
-
-        // 更新最近一次生成 ID 的时间戳
         last_ts_ = now;
-
-        // 4 拼接最终的 64-bit ID
         return Compose(now, worker_id_, sequence_);
     }
 
-private:
-    /**
-     * @brief 将时间戳、worker_id、sequence 组合成最终 ID
-     *
-     * 结构：
-     * | timestamp | worker_id | sequence |
-     */
-    uint64_t Compose(uint64_t ts_ms,
-                     uint64_t worker,
-                     uint64_t seq) const {
-        // 使用相对 epoch 的时间戳，减少位宽占用
-        uint64_t delta = ts_ms - epoch_ms_;
+    uint64_t worker_id() const { return worker_id_; }
+    uint64_t epoch_ms()  const { return epoch_ms_;  }
 
+private:
+    /* brief: timestamp(41) | worker(10) | sequence(12) */
+    uint64_t Compose(uint64_t ts_ms, uint64_t worker, uint64_t seq) const {
+        uint64_t delta = ts_ms - epoch_ms_;
         return (delta << (kWorkerBits + kSeqBits)) |
                (worker << kSeqBits) |
                seq;
     }
 
-    /**
-     * @brief 获取当前系统时间（毫秒）
-     */
     static uint64_t NowMs() {
         using namespace std::chrono;
         return duration_cast<milliseconds>(
@@ -161,42 +101,26 @@ private:
             .count();
     }
 
-    /**
-     * @brief 阻塞等待直到系统时间 >= target_ms
-     *
-     * 设计说明：
-     * - 直接 busy-spin 会浪费 CPU
-     * - sleep 太粗会影响延迟
-     * - 这里采用 sleep + yield 折中
-     */
+    /* brief: 阻塞等待至 target_ms；先 sleep 1ms，逼近时切换 yield */
     static uint64_t WaitUntil(uint64_t target_ms) {
-        for (;;) {
+        for(;;) {
             uint64_t now = NowMs();
-            if (now >= target_ms) {
-                return now;
-            }
-
-            if (target_ms - now > 1) {
-                // 时间差较大，sleep 1ms
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(1));
+            if(now >= target_ms) return now;
+            if(target_ms - now > 1) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             } else {
-                // 即将到达目标时间，主动让出 CPU
                 std::this_thread::yield();
             }
         }
     }
 
-private:
-    // ----------- 配置参数 -----------
-    uint64_t worker_id_;                 // 实例 / 机器 ID
-    uint64_t epoch_ms_;                  // 起始时间
-    bool     wait_on_clock_backwards_;   // 时钟回拨策略
+    uint64_t worker_id_;
+    uint64_t epoch_ms_;
+    bool     wait_on_clock_backwards_;
 
-    // ----------- 运行时状态 -----------
-    std::mutex mu_;                      // 保证线程安全
-    uint64_t   last_ts_  = 0;            // 上一次生成 ID 的时间
-    uint64_t   sequence_ = 0;            // 当前毫秒内的序列号
-};  // class SnowflakeId
+    std::mutex mu_;
+    uint64_t   last_ts_  = 0;
+    uint64_t   sequence_ = 0;
+};
 
 } // namespace chatnow
