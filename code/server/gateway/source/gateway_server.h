@@ -23,6 +23,7 @@
 #include "chatsession.pb.h"
 #include "gateway.pb.h"
 #include "notify.pb.h"
+#include "push.pb.h"
 
 namespace chatnow
 {
@@ -83,7 +84,7 @@ class GatewayServer
 public:
     using ptr = std::shared_ptr<GatewayServer>;
 
-    GatewayServer(int websocket_port, 
+    GatewayServer(int websocket_port,
                 int http_port,
                 const std::shared_ptr<sw::redis::Redis> &redis_client,
                 const ServiceManager::ptr &channels,
@@ -94,7 +95,8 @@ public:
                 const std::string &transmite_service_name,
                 const std::string &message_service_name,
                 const std::string &friend_service_name,
-                const std::string &chatsession_service_name)
+                const std::string &chatsession_service_name,
+                const std::string &push_service_name = "/service/push_service")
         : _redis_session(std::make_shared<Session>(redis_client)),
         _redis_status(std::make_shared<Status>(redis_client)),
         _mm_channels(channels),
@@ -106,6 +108,7 @@ public:
         _message_service_name(message_service_name),
         _friend_service_name(friend_service_name),
         _chatsession_service_name(chatsession_service_name),
+        _push_service_name(push_service_name),
         _connections(std::make_shared<Connection>())
     {
         //1. 搭建websocket服务器
@@ -180,6 +183,27 @@ public:
         _ws_server.run();
     }
 private:
+    /* brief: 通过 Push 服务下发 NotifyMessage（无状态化推送链路）
+     *  - 替代旧的本机 WebSocket 直推；适配多 Gateway 实例
+     *  - 调用失败仅日志告警，由 Push 服务的 unacked / 离线兜底负责重试
+     */
+    void _pushNotify(const std::string &target_uid, const NotifyMessage &notify,
+                     const std::string &rid = std::string()) {
+        auto channel = _mm_channels->choose(_push_service_name);
+        if(!channel) {
+            LOG_WARN("Push 服务节点不可用，通知未下发 uid={} type={}", target_uid, (int)notify.notify_type());
+            return;
+        }
+        PushService_Stub stub(channel.get());
+        PushToUserReq req;
+        PushToUserRsp rsp;
+        brpc::Controller cntl;
+        req.set_request_id(rid);
+        req.set_user_id(target_uid);
+        req.mutable_notify()->CopyFrom(notify);
+        // fire-and-forget：不阻塞 HTTP 响应路径
+        stub.PushToUser(&cntl, &req, &rsp, brpc::DoNothing());
+    }
     /* brief: WebSocket服务器连接建立时的回调函数 */
     void onOpen(websocketpp::connection_hdl hdl) { LOG_DEBUG("WebSocket 长连接建立成功 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get()); }
     /* brief: WebSocket服务器连接关闭时的回调函数 */
@@ -683,10 +707,8 @@ private:
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("好友子服务调用失败");
         }
-        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
-        auto conn = _connections->connection(*uid);
-        if(rsp.success() && conn) {
-            LOG_DEBUG("找到被申请人 {} 长连接, 对其进行好友申请通知", req.request_id());
+        //4. 业务处理成功 → 向被申请人推送 FRIEND_ADD_APPLY_NOTIFY（通过 Push 服务，多实例可达）
+        if(rsp.success()) {
             auto user_rsp = _GetUserInfo(req.request_id(), *uid);
             if(!user_rsp) {
                 LOG_ERROR("请求ID - {} 获取当前客户端用户信息失败", req.request_id());
@@ -695,7 +717,7 @@ private:
             NotifyMessage notify;
             notify.set_notify_type(NotifyType::FRIEND_ADD_APPLY_NOTIFY);
             notify.mutable_friend_add_apply()->mutable_user_info()->CopyFrom(user_rsp->user_info());
-            conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            _pushNotify(req.respondent_id(), notify, req.request_id());
         }
         //5. 向客户端进行响应
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
@@ -749,19 +771,18 @@ private:
                 LOG_ERROR("请求ID - {} 获取用户信息失败", req.request_id());
                 return err_response("获取用户信息失败");
             }
-            auto process_conn = _connections->connection(*uid);
-            auto apply_conn = _connections->connection(req.apply_user_id());
-            if(apply_conn) {
-                //4. 将处理结果给申请人进行通知
+            //4. 将处理结果给申请人推送（无条件，Push 服务负责离线兜底）
+            {
                 NotifyMessage notify;
                 notify.set_notify_type(NotifyType::FRIEND_ADD_PROCESS_NOTIFY);
                 auto process_result = notify.mutable_friend_process_result();
                 process_result->mutable_user_info()->CopyFrom(process_user_rsp->user_info());
                 process_result->set_agree(req.agree());
-                apply_conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+                _pushNotify(req.apply_user_id(), notify, req.request_id());
             }
-            //5. 若处理结果是同意，需要创建有会话的通知
-            if(req.agree() && apply_conn) { // 对申请人的通知 -- 会话信息就是处理人信息
+            //5. 若同意 → 双向推送会话创建通知
+            if(req.agree()) {
+                // 5.1 给申请人：会话信息为处理人信息
                 NotifyMessage notify;
                 notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
                 auto chat_session = notify.mutable_new_chat_session_info();
@@ -769,17 +790,17 @@ private:
                 chat_session->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
                 chat_session->mutable_chat_session_info()->set_chat_session_name(process_user_rsp->user_info().nickname());
                 chat_session->mutable_chat_session_info()->set_avatar(process_user_rsp->user_info().avatar());
-                apply_conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
-            }
-            if(req.agree() && process_conn) { // 对处理人的通知 -- 会话信息就是申请人信息
-                NotifyMessage notify;
-                notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
-                auto chat_session = notify.mutable_new_chat_session_info();
-                chat_session->mutable_chat_session_info()->set_single_chat_friend_id(req.apply_user_id());
-                chat_session->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
-                chat_session->mutable_chat_session_info()->set_chat_session_name(apply_user_rsp->user_info().nickname());
-                chat_session->mutable_chat_session_info()->set_avatar(apply_user_rsp->user_info().avatar());
-                process_conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+                _pushNotify(req.apply_user_id(), notify, req.request_id());
+
+                // 5.2 给处理人：会话信息为申请人信息
+                NotifyMessage notify2;
+                notify2.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
+                auto chat_session2 = notify2.mutable_new_chat_session_info();
+                chat_session2->mutable_chat_session_info()->set_single_chat_friend_id(req.apply_user_id());
+                chat_session2->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
+                chat_session2->mutable_chat_session_info()->set_chat_session_name(apply_user_rsp->user_info().nickname());
+                chat_session2->mutable_chat_session_info()->set_avatar(apply_user_rsp->user_info().avatar());
+                _pushNotify(*uid, notify2, req.request_id());
             }
         }
         //6. 对客户端进行响应
@@ -820,14 +841,12 @@ private:
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("好友子服务调用失败");
         }
-        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
-        auto conn = _connections->connection(req.peer_id());
-        if(rsp.success() && conn) {
-            LOG_DEBUG("对被删除人 {} 进行好友删除通知", req.peer_id());
+        //4. 业务成功 → 向被删除人推送 FRIEND_REMOVE_NOTIFY（多实例可达）
+        if(rsp.success()) {
             NotifyMessage notify;
             notify.set_notify_type(NotifyType::FRIEND_REMOVE_NOTIFY);
             notify.mutable_friend_remove()->set_user_id(*uid);
-            conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+            _pushNotify(req.peer_id(), notify, req.request_id());
         }
         //5. 向客户端进行响应
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
@@ -1019,16 +1038,14 @@ private:
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("好友子服务调用失败");
         }
-        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
+        //4. 业务成功 → 向所有成员推送 CHAT_SESSION_CREATE_NOTIFY（多实例可达）
         if(rsp.success()) {
             for(int i = 0; i < req.member_id_list_size(); ++i) {
-                auto conn = _connections->connection(req.member_id_list(i));
-                if(!conn) { continue; }
                 NotifyMessage notify;
                 notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
                 auto chat_session = notify.mutable_new_chat_session_info();
                 chat_session->mutable_chat_session_info()->CopyFrom(rsp.chat_session_info());
-                conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
+                _pushNotify(req.member_id_list(i), notify, req.request_id());
             }
         }
         //5. 向客户端进行响应
@@ -1375,24 +1392,17 @@ private:
             LOG_ERROR("请求ID - {} 消息转发子服务调用失败: {}", req.request_id(), cntl.ErrorText());
             return err_response("消息转发子服务调用失败");
         }
-        //4. 若业务处理成功 -- 且获取被申请方用户长连接成功，则向被申请方进行好友申请事件通知
-        if(target_rsp.success()) {
-            for(int i = 0; i < target_rsp.target_id_list_size(); ++i) {
-                std::string notify_uid = target_rsp.target_id_list(i);
-                if(notify_uid == *uid) continue; //不通知自己
-                auto conn = _connections->connection(notify_uid);
-                if(!conn) { continue; }
-                NotifyMessage notify;
-                notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
-                auto msg_info = notify.mutable_new_message_info();
-                msg_info->mutable_message_info()->CopyFrom(target_rsp.message());
-                conn->send(notify.SerializeAsString(), websocketpp::frame::opcode::value::binary);
-            }
-        }
-        //5. 向客户端进行响应
+        //4. 推送由 Push 服务通过 msg_push_queue 异步下发，Gateway 不再本机推送（无状态化）
+        //   message 服务在 onDBMessage 写完 timeline 后会向 push_queue 投递一份 InternalMessage
+        //   Push 服务消费后查 Redis 路由 → 跨实例 brpc 转发 → WebSocket 下发 + 待重传
+        //5. 向客户端响应（带 message_id / seq_id 让客户端做事实校验）
         rsp.set_request_id(req.request_id());
         rsp.set_success(target_rsp.success());
         rsp.set_errmsg(target_rsp.errmsg());
+        if(target_rsp.success()) {
+            rsp.set_message_id(target_rsp.message_id());
+            rsp.set_seq_id(target_rsp.seq_id());
+        }
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     //========================================================//
@@ -2055,6 +2065,7 @@ private:
     std::string _message_service_name;
     std::string _friend_service_name;
     std::string _chatsession_service_name;
+    std::string _push_service_name;
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discoverer;
 
@@ -2077,7 +2088,7 @@ public:
         _redis_client = RedisClientFactory::create(host, port, db, keep_alive);
     }
     /* brief: 用于构造服务发现&信道管理客户端对象 */
-    void make_discovery_object(const std::string &reg_host, 
+    void make_discovery_object(const std::string &reg_host,
                             const std::string &base_service_name,
                             const std::string &speech_service_name,
                             const std::string &file_service_name,
@@ -2085,7 +2096,8 @@ public:
                             const std::string &transmite_service_name,
                             const std::string &message_service_name,
                             const std::string &friend_service_name,
-                            const std::string &chatsession_service_name)
+                            const std::string &chatsession_service_name,
+                            const std::string &push_service_name = "/service/push_service")
     {
         _speech_service_name = speech_service_name;
         _file_service_name = file_service_name;
@@ -2094,6 +2106,7 @@ public:
         _message_service_name = message_service_name;
         _friend_service_name = friend_service_name;
         _chatsession_service_name = chatsession_service_name;
+        _push_service_name = push_service_name;
 
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(_speech_service_name);
@@ -2103,6 +2116,7 @@ public:
         _mm_channels->declared(_message_service_name);
         _mm_channels->declared(_friend_service_name);
         _mm_channels->declared(_chatsession_service_name);
+        _mm_channels->declared(_push_service_name);
 
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
         auto del_cb = std::bind(&ServiceManager::onServiceOffline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
@@ -2127,8 +2141,8 @@ public:
             LOG_ERROR("还未初始化信道管理模块");
             abort();
         }
-        GatewayServer::ptr server = std::make_shared<GatewayServer>(_websocket_port, 
-                                                                _http_port, 
+        GatewayServer::ptr server = std::make_shared<GatewayServer>(_websocket_port,
+                                                                _http_port,
                                                                 _redis_client,
                                                                 _mm_channels,
                                                                 _service_discoverer,
@@ -2138,7 +2152,8 @@ public:
                                                                 _transmite_service_name,
                                                                 _message_service_name,
                                                                 _friend_service_name,
-                                                                _chatsession_service_name);
+                                                                _chatsession_service_name,
+                                                                _push_service_name);
         return server;
     }
 private:
@@ -2154,6 +2169,7 @@ private:
     std::string _message_service_name;
     std::string _friend_service_name;
     std::string _chatsession_service_name;
+    std::string _push_service_name;
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discoverer;
 };

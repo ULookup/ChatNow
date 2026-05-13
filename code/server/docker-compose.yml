@@ -118,7 +118,6 @@ services:
       - ./entrypoint.sh:/im/bin/entrypoint.sh
     ports:
       - 9000:9000
-      - 9001:9001
     restart: always
     depends_on:
       - etcd
@@ -126,6 +125,24 @@ services:
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
       /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379 -c "/im/bin/gateway_server -flagfile=/im/conf/gateway_server.conf"
+  push_server:
+    build: ./push
+    container_name: push_server-service
+    volumes:
+      - ./conf/push_server.conf:/im/conf/push_server.conf
+      - ./middle/data/logs:/var/lib/logs:rw
+      - ./middle/data/data:/var/lib/data:rw
+      - ./entrypoint.sh:/im/bin/entrypoint.sh
+    ports:
+      - 10008:10008
+      - 9001:9001
+    restart: always
+    depends_on:
+      - etcd
+      - redis
+      - rabbitmq
+    entrypoint:
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379,5672 -c "/im/bin/push_server -flagfile=/im/conf/push_server.conf"
   message_server:
     build: ./message
     container_name: message_server-service

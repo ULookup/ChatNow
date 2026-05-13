@@ -31,7 +31,7 @@ endforeach()
 # 3.3 生成ODB框架代码
 # 3.3.1 添加所需的odb映射代码文件名称
 set(odb_path ${CMAKE_CURRENT_SOURCE_DIR}/../odb)
-set(odb_files message.hxx user_timeline.hxx)
+set(odb_files message.hxx user_timeline.hxx chat_session.hxx chat_session_member.hxx chat_session_view.hxx)
 # 3.3.2 检查框架代码文件是否已经生成
 set(odb_hxx "")
 set(odb_cxx "")
@@ -60,11 +60,11 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 # 5. 声明目标及依赖
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog 
-    -lfmt -lbrpc -lssl -lcrypto 
-    -lprotobuf -lleveldb -letcd-cpp-api 
+target_link_libraries(${target} -lgflags -lspdlog
+    -lfmt -lbrpc -lssl -lcrypto
+    -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
-    -lhiredis -lcpr -lelasticlient -ljsoncpp
+    -lhiredis -lredis++ -lcpr -lelasticlient -ljsoncpp
     -lamqpcpp -lev)
 
 set(test_client "message_client")

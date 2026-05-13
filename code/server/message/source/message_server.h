@@ -2,8 +2,10 @@
 
 #include <brpc/server.h>
 #include "data_es.hpp"
+#include "data_redis.hpp"
 #include "mysql_message.hpp"
 #include "mysql_user_timeline.hpp"
+#include "mysql_chat_session_member.hpp"
 #include "etcd.hpp"
 #include "logger.hpp"
 #include "utils.hpp"
@@ -27,15 +29,18 @@ class MessageServiceImpl : public chatnow::MsgStorageService
 {
 public:
     MessageServiceImpl(const std::string &file_service_name,
-                        const std::string &user_service_name, 
+                        const std::string &user_service_name,
                         const std::string &chatsession_service_name,
-                        const ServiceManager::ptr &channels, 
+                        const ServiceManager::ptr &channels,
                         const std::shared_ptr<elasticlient::Client> &es_client,
                         const std::shared_ptr<odb::core::database> &mysql_client,
                         const std::shared_ptr<Subscriber> &mq_subscriber,
                         const std::shared_ptr<Subscriber> &es_subscriber,
                         const declare_settings &db_settings,
-                        const declare_settings &es_settings) 
+                        const declare_settings &es_settings,
+                        const SeqGen::ptr &seq_gen,
+                        const Publisher::ptr &push_publisher = nullptr,
+                        const PushOutbox::ptr &push_outbox = nullptr)
                         : _file_service_name(file_service_name),
                         _user_service_name(user_service_name),
                         _chatsession_service_name(chatsession_service_name),
@@ -44,10 +49,14 @@ public:
                         _db(mysql_client),
                         _mysql_usertimeline_table(std::make_shared<UserTimeLineTable>(mysql_client)),
                         _mysql_message_table(std::make_shared<MessageTable>(mysql_client)),
+                        _mysql_member_table(std::make_shared<ChatSessionMemberTable>(mysql_client)),
                         _mq_subscriber(mq_subscriber),
                         _es_subscriber(es_subscriber),
                         _db_settings(db_settings),
-                        _es_settings(es_settings)
+                        _es_settings(es_settings),
+                        _seq_gen(seq_gen),
+                        _push_publisher(push_publisher),
+                        _push_outbox(push_outbox)
     {
         _es_client->createIndex();
     }
@@ -169,21 +178,26 @@ public:
         std::string uid = request->user_id();
         std::string chat_ssid = request->chat_session_id();
         int msg_count = request->msg_count();
-        //2. 从Timeline获取最近的消息ID列表
-        LOG_DEBUG("从用户 {} 的 Timeline 获取会话 {} 的最近消息ID", uid, chat_ssid);
-        std::vector<UserTimeline> timeline_list = _mysql_usertimeline_table->list_latest(uid, chat_ssid, msg_count);
-        if(timeline_list.empty()) {
+        //2. 从 Timeline 获取最近的消息 ID（小群写扩散路径）
+        LOG_DEBUG("从用户 {} 的 Timeline 获取会话 {} 的最近 {} 条", uid, chat_ssid, msg_count);
+        std::vector<UserTimeline> timeline_list =
+            _mysql_usertimeline_table->list_session_latest(uid, chat_ssid, static_cast<size_t>(msg_count));
+
+        std::vector<chatnow::Message> msg_list;
+        if(!timeline_list.empty()) {
+            std::vector<unsigned long> msg_id_list;
+            msg_id_list.reserve(timeline_list.size());
+            for(const auto &t : timeline_list) msg_id_list.push_back(t.message_id());
+            msg_list = _mysql_message_table->select_by_ids(msg_id_list);
+        } else {
+            // 大群读扩散兜底：直接按 (session_id, seq_id) 取最近 N 条
+            msg_list = _mysql_message_table->recent_by_seq(chat_ssid, static_cast<int>(msg_count));
+        }
+        if(msg_list.empty()) {
             response->set_request_id(rid);
             response->set_success(true);
             return;
         }
-        //2.1 提取所有的message_id
-        std::vector<unsigned long> msg_id_list;
-        for(const auto &timeline : timeline_list) {
-            msg_id_list.push_back(timeline.message_id());
-        }
-        //3. 用message_id去Message表拉取真正的元信息
-        auto msg_list = _mysql_message_table->select_by_ids(msg_id_list);
 
         std::unordered_set<std::string> file_id_list;
         for(const auto &msg : msg_list) {
@@ -215,6 +229,8 @@ public:
             auto message_info = response->add_msg_list();
             message_info->set_message_id(msg.message_id());
             message_info->set_chat_session_id(msg.session_id());
+            message_info->set_seq_id(msg.seq_id());
+            message_info->set_client_msg_id(msg.client_msg_id());
             message_info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
             message_info->mutable_sender()->CopyFrom(user_map[msg.user_id()]);
             switch(msg.message_type()) {
@@ -312,20 +328,19 @@ public:
             response->set_errmsg(errmsg);
         };
 
-        // 1. 提取参数
+        // 1. 提取参数（last_message_id 字段语义：客户端本地最大 user_seq）
         std::string rid = request->request_id();
         std::string user_id = request->user_id();
-        unsigned long last_msg_id = request->last_message_id();
+        unsigned long last_user_seq = static_cast<unsigned long>(request->last_message_id());
         int msg_count = request->msg_count();
-        
+
         // 容错处理
         if(msg_count <= 0) msg_count = 50;
         if(msg_count > 1000) msg_count = 1000;
 
-        // 2. 从 Timeline 全局获取消息 ID (多取一条用于判断 has_more)
-        // 注意：这里调用的是上面新增的 list_global_after
+        // 2. 全局增量：按 user_seq > last_user_seq 拉取（多取一条用于 has_more 判断）
         std::vector<UserTimeline> timeline_list = _mysql_usertimeline_table->list_global_after(
-            user_id, last_msg_id, msg_count + 1);
+            user_id, last_user_seq, msg_count + 1);
 
         // 3. 判断是否还有更多数据
         bool has_more = false;
@@ -352,7 +367,7 @@ public:
         auto msg_list = _mysql_message_table->select_by_ids(msg_id_list);
         if(msg_list.empty()) {
             // Timeline 有 ID 但 Message 表没数据（极少见的数据不一致）
-            LOG_WARN("增量同步时 Timeline 存在数据但 Message 表缺失, User: {}, StartID: {}", user_id, last_msg_id);
+            LOG_WARN("增量同步时 Timeline 存在数据但 Message 表缺失, User: {}, last_user_seq: {}", user_id, last_user_seq);
             response->set_request_id(rid);
             response->set_success(true);
             response->set_has_more(has_more); // 依然返回 has_more 状态，客户端可能需要跳过这些 ID
@@ -388,12 +403,14 @@ public:
 
         for(const auto &msg : msg_list) {
             auto info = response->add_msg_list();
-            
-            // 填充基础信息
+
+            // 填充基础信息（含会话内 seq、客户端幂等 ID）
             info->set_message_id(msg.message_id());
             info->set_chat_session_id(msg.session_id());
+            info->set_seq_id(msg.seq_id());
+            info->set_client_msg_id(msg.client_msg_id());
             info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
-            
+
             // 填充发送者信息
             if (user_map.find(msg.user_id()) != user_map.end()) {
                 info->mutable_sender()->CopyFrom(user_map[msg.user_id()]);
@@ -428,119 +445,244 @@ public:
             }
         }
     }
-    /* brief: 获取未读消息数量 */
+    /* brief: 获取未读消息数量
+     *  - last_read_msg_id 字段语义：客户端传过来的是会话内 last_read_seq（兼容旧字段名）
+     *  - 走 (user_id, session_id, session_seq > last_read_seq) 的 count；O(log n)
+     */
     virtual void GetUnreadCount(google::protobuf::RpcController* controller,
                                 const ::chatnow::GetUnreadCountReq* request,
                                 ::chatnow::GetUnreadCountRsp* response,
                                 ::google::protobuf::Closure* done)
     {
         brpc::ClosureGuard rpc_guard(done);
-        
-        // 1. 提取参数
+
         std::string rid = request->request_id();
         std::string user_id = request->user_id();
         std::string chat_ssid = request->chat_session_id();
-        unsigned long last_read_id = request->last_read_msg_id();
+        unsigned long last_read_seq = static_cast<unsigned long>(request->last_read_msg_id());
 
-        // 2. 获取该会话最新的消息 ID
-        unsigned long latest_msg_id = _mysql_usertimeline_table->get_latest_msg_id(user_id, chat_ssid);
-
+        unsigned long latest_seq = _mysql_usertimeline_table->latest_session_seq(user_id, chat_ssid);
         int unread_count = 0;
-
-        // 3. 优化逻辑：如果库里的最新消息ID <= 用户已读ID，说明没有未读消息，无需 count
-        if (latest_msg_id > 0 && latest_msg_id > last_read_id) {
-            unread_count = _mysql_usertimeline_table->get_unread_count(user_id, chat_ssid, last_read_id);
+        if(latest_seq > last_read_seq) {
+            unread_count = _mysql_usertimeline_table->unread_count_by_seq(user_id, chat_ssid, last_read_seq);
         }
 
-        // 4. 组织响应
         response->set_request_id(rid);
         response->set_success(true);
         response->set_unread_count(unread_count);
-        response->set_latest_msg_id(latest_msg_id);
+        response->set_latest_msg_id(static_cast<int64_t>(latest_seq));
 
-        LOG_DEBUG("请求ID {} - 未读数计算完成: uid={}, session={}, last_read={}, unread={}, latest={}", 
-            rid, user_id, chat_ssid, last_read_id, unread_count, latest_msg_id);
+        LOG_DEBUG("请求ID {} - 未读: uid={} ssid={} last_read_seq={} unread={} latest_seq={}",
+            rid, user_id, chat_ssid, last_read_seq, unread_count, latest_seq);
+    }
+
+    /* brief: 客户端幂等查询（Transmite 调用） */
+    virtual void SelectByClientMsg(google::protobuf::RpcController* controller,
+                                   const ::chatnow::SelectByClientMsgReq* request,
+                                   ::chatnow::SelectByClientMsgRsp* response,
+                                   ::google::protobuf::Closure* done)
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        const std::string &rid = request->request_id();
+        response->set_request_id(rid);
+
+        if(request->client_msg_id().empty() || request->user_id().empty()) {
+            response->set_success(true);
+            response->set_exists(false);
+            return;
+        }
+        auto msg = _mysql_message_table->select_by_client_msg(request->user_id(), request->client_msg_id());
+        if(!msg) {
+            response->set_success(true);
+            response->set_exists(false);
+            return;
+        }
+        // 命中：组装最小 MessageInfo 返回（用户看不到内容差异即可）
+        auto *info = response->mutable_message();
+        info->set_message_id(msg->message_id());
+        info->set_chat_session_id(msg->session_id());
+        info->set_seq_id(msg->seq_id());
+        info->set_client_msg_id(msg->client_msg_id());
+        info->set_timestamp(boost::posix_time::to_time_t(msg->create_time()));
+        // sender 信息要查 user 服务才能填全；幂等返回时由 Transmite 决定是否再补
+        info->mutable_sender()->set_user_id(msg->user_id());
+        // 内容根据消息类型回填（仅文本/file_id；文件二进制由客户端自己拉）
+        info->mutable_message()->set_message_type(msg->message_type());
+        switch(msg->message_type()) {
+            case MessageType::STRING:
+                info->mutable_message()->mutable_string_message()->set_content(msg->content());
+                break;
+            case MessageType::IMAGE:
+                info->mutable_message()->mutable_image_message()->set_file_id(msg->file_id());
+                break;
+            case MessageType::FILE:
+                info->mutable_message()->mutable_file_message()->set_file_id(msg->file_id());
+                info->mutable_message()->mutable_file_message()->set_file_name(msg->file_name());
+                info->mutable_message()->mutable_file_message()->set_file_size(msg->file_size());
+                break;
+            case MessageType::SPEECH:
+                info->mutable_message()->mutable_speech_message()->set_file_id(msg->file_id());
+                break;
+            default: break;
+        }
+        response->set_success(true);
+        response->set_exists(true);
+        LOG_DEBUG("SelectByClientMsg 命中 uid={} cid={} mid={}",
+                  request->user_id(), request->client_msg_id(), msg->message_id());
+    }
+
+    /* brief: ACK 收敛（Push 服务收到客户端 ACK 后调用）
+     *  - 仅向前推进 last_ack_seq；不会回退
+     */
+    virtual void UpdateAckSeq(google::protobuf::RpcController* controller,
+                              const ::chatnow::UpdateAckSeqReq* request,
+                              ::chatnow::UpdateAckSeqRsp* response,
+                              ::google::protobuf::Closure* done)
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        response->set_request_id(request->request_id());
+        if(!_mysql_member_table) {
+            // 兼容：member 表 DAO 未注入则直接成功（推送链路降级）
+            response->set_success(true);
+            return;
+        }
+        bool ok = _mysql_member_table->update_last_ack_seq(
+            request->chat_session_id(), request->user_id(), request->user_seq());
+        response->set_success(ok);
+        if(!ok) response->set_errmsg("update last_ack_seq failed");
     }
     //================================================================================================//
     //=========================================== 消费回调 ============================================//
     //================================================================================================//
-        ConsumeAction onDBMessage(const char *body, size_t sz, bool redelivered) {
-        LOG_DEBUG("收到新消息，进行存储处理！");
-        //1. 取出序列化的消息内容进行反序列化
-        chatnow::InternalMessage  internal_msg;
-        bool ret = internal_msg.ParseFromArray(body, sz);
-        if(ret == false) {
-            LOG_ERROR("对消费到的消息进行反序列化失败");
+    /* brief: DB 消费：写 message 主表 + (写扩散群) user_timeline
+     *  - 文件上传由客户端前置完成，本路径仅落 file_id
+     *  - 大群（is_large_group=true）启用读扩散，仅写 message 主表
+     */
+    ConsumeAction onDBMessage(const char *body, size_t sz, bool redelivered) {
+        LOG_DEBUG("收到新消息，进行存储处理！redelivered={}", redelivered);
+        //1. 反序列化
+        chatnow::InternalMessage internal_msg;
+        if(!internal_msg.ParseFromArray(body, sz)) {
+            LOG_ERROR("DB-Consumer: 反序列化失败");
             return ConsumeAction::NackDiscard;
         }
 
         const auto &msg_info = internal_msg.message_info();
+        const unsigned long mid = msg_info.message_id();
+        const unsigned long session_seq = msg_info.seq_id();
+        const std::string &client_msg_id = msg_info.client_msg_id();
+
+        //2. 提取消息体（文件已由客户端前置上传，仅取 file_id / 文本内容）
         std::string file_id, file_name, content;
         int64_t file_size = 0;
-        //2. 根据不同的消息类型进行不同的处理
         auto msg_type = msg_info.message().message_type();
-        if (msg_type == MessageType::STRING) {
-            content = msg_info.message().string_message().content();
-        } else {
-            // 如果是文件/图片/语音，先上传到文件子服务拿到 file_id
-            bool file_ret = false;
-            if (msg_type == MessageType::IMAGE) {
-                const auto &m = msg_info.message().image_message();
-                file_ret = _PutFile("", m.image_content(), m.image_content().size(), file_id);
-            } else if (msg_type == MessageType::FILE) {
-                const auto &m = msg_info.message().file_message();
-                file_name = m.file_name();
-                file_size = m.file_size();
-                file_ret = _PutFile(file_name, m.file_contents(), file_size, file_id);
-            } else if (msg_type == MessageType::SPEECH) {
-                const auto &m = msg_info.message().speech_message();
-                file_ret = _PutFile("", m.file_contents(), m.file_contents().size(), file_id);
-            }
-
-            if (!file_ret) {
-                LOG_ERROR("文件上传失败，放弃后续存储");
-                return ConsumeAction::NackRequeue; 
-            }
+        switch(msg_type) {
+            case MessageType::STRING:
+                content = msg_info.message().string_message().content();
+                break;
+            case MessageType::IMAGE:
+                file_id = msg_info.message().image_message().file_id();
+                break;
+            case MessageType::FILE:
+                file_id = msg_info.message().file_message().file_id();
+                file_name = msg_info.message().file_message().file_name();
+                file_size = msg_info.message().file_message().file_size();
+                break;
+            case MessageType::SPEECH:
+                file_id = msg_info.message().speech_message().file_id();
+                break;
+            default:
+                LOG_ERROR("DB-Consumer: 未知消息类型 mid={}", mid);
+                return ConsumeAction::NackDiscard;
         }
-        //3. 提取消息的元消息
-        chatnow::Message msg(msg_info.message_id(), 
-                            msg_info.chat_session_id(), 
-                            msg_info.sender().user_id(), 
+        // 文件类型必须带 file_id（客户端前置上传契约）
+        if(msg_type != MessageType::STRING && file_id.empty()) {
+            LOG_ERROR("DB-Consumer: 非文本消息缺少 file_id mid={}", mid);
+            return ConsumeAction::NackDiscard;
+        }
+
+        //3. 组装 Message 对象
+        chatnow::Message msg(mid,
+                            msg_info.chat_session_id(),
+                            msg_info.sender().user_id(),
                             msg_info.message().message_type(),
                             boost::posix_time::from_time_t(msg_info.timestamp()),
                             MessageStatus::NORMAL);
+        msg.seq_id(session_seq);
         msg.content(content);
         msg.file_id(file_id);
         msg.file_name(file_name);
         msg.file_size(file_size);
-        //4. 取出会话所有成员
+        if(!client_msg_id.empty()) msg.client_msg_id(client_msg_id);
+
+        //4. 写扩散：组装 user_timeline 列表（仅小群；大群跳过实现读扩散）
         std::vector<UserTimeline> timeline_list;
-        const auto &member_ids = internal_msg.member_id_list();
-
-        timeline_list.reserve(member_ids.size());
-        for(const auto &member : member_ids) {
-            UserTimeline timeline;
-            timeline.message_id(msg_info.message_id());
-            timeline.message_time(boost::posix_time::from_time_t(msg_info.timestamp()));
-            timeline.session_id(msg_info.chat_session_id());
-            timeline.user_id(member);
-            timeline_list.push_back(timeline);
+        if(!internal_msg.is_large_group()) {
+            // 把 user_seqs 整理为 map 便于 O(1) 查找
+            std::unordered_map<std::string, unsigned long> uid2seq;
+            for(const auto &p : internal_msg.user_seqs()) {
+                uid2seq[p.user_id()] = p.user_seq();
+            }
+            timeline_list.reserve(internal_msg.member_id_list_size());
+            auto msg_pt = boost::posix_time::from_time_t(msg_info.timestamp());
+            for(const auto &member : internal_msg.member_id_list()) {
+                UserTimeline tl;
+                tl.user_id(member);
+                tl.session_id(msg_info.chat_session_id());
+                tl.message_id(mid);
+                tl.message_time(msg_pt);
+                tl.session_seq(session_seq);
+                auto it = uid2seq.find(member);
+                if(it != uid2seq.end()) tl.user_seq(it->second);
+                timeline_list.push_back(std::move(tl));
+            }
         }
-        //5. 开启事务，向消息表和Timeline表持久化数据
+
+        //5. 事务落库
         try {
-            odb::transaction trans(_db->begin()); //开启事务
-
+            odb::transaction trans(_db->begin());
             _mysql_message_table->insert(msg);
-            _mysql_usertimeline_table->insert(timeline_list);
-
+            if(!timeline_list.empty()) {
+                _mysql_usertimeline_table->insert(timeline_list);
+            }
             trans.commit();
 
-            LOG_INFO("DB Consumer: 消息落库 MsgID: {}", msg_info.message_id());
-           
+            LOG_INFO("DB-Consumer: 消息落库 mid={} seq={} large={} timeline_count={}",
+                     mid, session_seq, internal_msg.is_large_group(), timeline_list.size());
+
+            // 6. 落库成功后投递到 push_queue（fire-and-forget；推送服务消费）
+            //    投递失败 → 落 PushOutbox（Redis ZSET），由独立 reaper 定期重投，避免推送丢失
+            if(_push_publisher) {
+                std::string payload = internal_msg.SerializeAsString();
+                auto outbox = _push_outbox;  // 拷一份引用进 lambda
+                long long now_ts = static_cast<long long>(time(nullptr));
+                try {
+                    _push_publisher->publish_confirm(payload,
+                        [mid, payload, outbox, now_ts](PublishStatus status, const std::string &err) {
+                            if(status != PublishStatus::Acked) {
+                                LOG_WARN("Push-Publisher: 投递 push_queue 失败 mid={} err={}, 入 outbox", mid, err);
+                                if(outbox) outbox->enqueue(payload, now_ts);
+                            }
+                        });
+                } catch(std::exception &e) {
+                    LOG_WARN("Push-Publisher: 同步异常 mid={} err={}, 入 outbox", mid, e.what());
+                    if(_push_outbox) _push_outbox->enqueue(payload, now_ts);
+                }
+            }
+            return ConsumeAction::Ack;
+        } catch(const odb::object_already_persistent &e) {
+            // 唯一索引冲突（uk_session_seq / uk_client_msg）→ MQ 重投导致的重复消费，幂等丢弃
+            LOG_WARN("DB-Consumer: 重复消息（唯一索引命中），幂等丢弃 mid={} client_msg_id={} err={}",
+                     mid, client_msg_id, e.what());
             return ConsumeAction::Ack;
         } catch(std::exception &e) {
-            LOG_ERROR("DB Consumer: 数据库事务失败 MsgID: {}, Error: {}", msg_info.message_id(), e.what());
-            // 数据库写入异常, 重新入队让 MQ 重试，避免消息丢失
+            // redelivered=true 表示这条消息已经被 broker 重新投递过 → 上一次明确失败
+            // 再次失败则视为永久错误，进 DLX（避免 hot spin）
+            if(redelivered) {
+                LOG_ERROR("DB-Consumer: 二次失败转 DLX mid={} err={}", mid, e.what());
+                return ConsumeAction::NackDiscard;
+            }
+            LOG_ERROR("DB-Consumer: 事务失败（首次），重投 mid={} err={}", mid, e.what());
             return ConsumeAction::NackRequeue;
         }
     }
@@ -578,11 +720,16 @@ public:
         );
 
         if (!ret) {
-            LOG_ERROR("[ES-Consumer] 写入 ES 失败: MsgID={}", message_id);
-            return ConsumeAction::NackRequeue; // 写入 ES 失败，重新入队让 MQ 重试，避免消息丢失
+            // 二次失败 → 进 DLX 由 fail-store 处理，避免长时间循环重投
+            if(redelivered) {
+                LOG_ERROR("[ES-Consumer] 二次失败转 DLX mid={}", message_id);
+                return ConsumeAction::NackDiscard;
+            }
+            LOG_ERROR("[ES-Consumer] 写入 ES 失败（首次），重投: MsgID={}", message_id);
+            return ConsumeAction::NackRequeue;
         } else {
             LOG_DEBUG("[ES-Consumer] 索引成功: MsgID={}", message_id);
-            return ConsumeAction::Ack; // 索引成功，确认消费
+            return ConsumeAction::Ack;
         }
     }
 private:
@@ -673,12 +820,16 @@ private:
     std::shared_ptr<odb::core::database> _db;
     MessageTable::ptr _mysql_message_table;
     UserTimeLineTable::ptr _mysql_usertimeline_table;
+    ChatSessionMemberTable::ptr _mysql_member_table;
     ESMessage::ptr _es_client;
     Subscriber::ptr _mq_subscriber;
     Subscriber::ptr _es_subscriber;
     declare_settings _db_settings;
     declare_settings _es_settings;
     ServiceManager::ptr _mm_channels;
+    SeqGen::ptr _seq_gen;            // 启动时回填 / 推送链路重传
+    Publisher::ptr _push_publisher;  // 写完 timeline 后向 push_queue 投递
+    PushOutbox::ptr _push_outbox;    // push_queue 投递失败兜底
 };
 
 class MessageServer
@@ -718,6 +869,31 @@ class MessageServerBuilder
 public:
     /* brief: 构造es客户端对象 */
     void make_es_object(const std::vector<std::string> host_list) { _es_client = ESClientFactory::create(host_list); }
+    /* brief: 构造 Redis 客户端 + SeqGen + PushOutbox */
+    void make_redis_object(const std::string &host, uint16_t port, int db,
+                           bool keep_alive, int pool_size)
+    {
+        _redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+        _seq_gen = std::make_shared<SeqGen>(_redis);
+        _push_outbox = std::make_shared<PushOutbox>(_redis);
+    }
+    /* brief: 构造推送队列 Publisher（写 timeline 后向 push_queue 投递） */
+    void make_push_publisher(const std::string &exchange,
+                             const std::string &queue,
+                             const std::string &binding_key)
+    {
+        if(!_mq_client) {
+            LOG_WARN("MQ 未初始化，跳过 push publisher");
+            return;
+        }
+        _push_settings = {
+            .exchange = exchange,
+            .exchange_type = chatnow::DIRECT,
+            .queue = queue,
+            .binding_key = binding_key
+        };
+        _push_publisher = std::make_shared<Publisher>(_mq_client, _push_settings);
+    }
     /* brief: 构造mysql客户端对象 */
     void make_mysql_object(const std::string &user,
                         const std::string &password,
@@ -805,8 +981,17 @@ public:
             LOG_ERROR("还未初始化消息队列客户端模块");
             abort();
         }
+        if(!_seq_gen) {
+            LOG_ERROR("还未初始化 SeqGen / Redis");
+            abort();
+        }
         _rpc_server = std::make_shared<brpc::Server>();
-        MessageServiceImpl *message_service = new MessageServiceImpl(_file_service_name, _user_service_name, _chatsession_service_name, _mm_channels, _es_client, _mysql_client, _subscriber_db, _subscriber_es, _db_queue_settings, _es_queue_settings);
+        MessageServiceImpl *message_service = new MessageServiceImpl(
+            _file_service_name, _user_service_name, _chatsession_service_name,
+            _mm_channels, _es_client, _mysql_client,
+            _subscriber_db, _subscriber_es,
+            _db_queue_settings, _es_queue_settings,
+            _seq_gen, _push_publisher, _push_outbox);
         int ret = _rpc_server->AddService(message_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -855,9 +1040,14 @@ private:
 
     declare_settings _db_queue_settings;
     declare_settings _es_queue_settings;
+    declare_settings _push_settings;
     MQClient::ptr _mq_client;
     Subscriber::ptr _subscriber_db;
     Subscriber::ptr _subscriber_es;
+    Publisher::ptr _push_publisher;
+    std::shared_ptr<sw::redis::Redis> _redis;
+    SeqGen::ptr _seq_gen;
+    PushOutbox::ptr _push_outbox;
     
 
     Discovery::ptr _service_discover;   // 服务发现客户端

@@ -34,7 +34,17 @@ DEFINE_string(mq_msg_queue_es, "msg_queue_es", "持久化ES消息的发布队列
 DEFINE_string(mq_db_binding_key, "", "持久化DB的绑定键");
 DEFINE_string(mq_es_binding_key, "", "持久化ES的绑定键");
 
+DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送队列的交换机名称（DIRECT）");
+DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列名称");
+DEFINE_string(mq_push_binding_key, "push", "推送队列绑定键");
+
 DEFINE_string(es_host, "http://127.0.0.1:9200/", "ES搜索引擎服务器URL");
+
+DEFINE_string(redis_host, "127.0.0.1", "Redis 服务器访问地址");
+DEFINE_int32(redis_port, 6379, "Redis 服务器访问端口");
+DEFINE_int32(redis_db, 0, "Redis 选择的库");
+DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
+DEFINE_int32(redis_pool_size, 8, "Redis 连接池大小");
 
 
 int main(int argc, char *argv[])
@@ -43,7 +53,9 @@ int main(int argc, char *argv[])
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::MessageServerBuilder msb;
+    msb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue_db, FLAGS_mq_msg_queue_es, FLAGS_mq_db_binding_key, FLAGS_mq_es_binding_key);
+    msb.make_push_publisher(FLAGS_mq_push_exchange, FLAGS_mq_push_queue, FLAGS_mq_push_binding_key);
     msb.make_es_object({FLAGS_es_host});
     msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service, FLAGS_chatsession_service);

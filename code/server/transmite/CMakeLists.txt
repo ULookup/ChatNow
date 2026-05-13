@@ -7,7 +7,7 @@ set(target "transmite_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files base.proto user.proto transmite.proto chatsession.proto)
+set(proto_files base.proto user.proto transmite.proto chatsession.proto message.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
@@ -34,10 +34,11 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 # 5. 声明目标及依赖
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog 
-    -lfmt -lbrpc -lssl -lcrypto 
-    -lprotobuf -lleveldb -letcd-cpp-api 
-    -lcpprest -lcurl -lamqpcpp -lev)
+target_link_libraries(${target} -lgflags -lspdlog
+    -lfmt -lbrpc -lssl -lcrypto
+    -lprotobuf -lleveldb -letcd-cpp-api
+    -lcpprest -lcurl -lamqpcpp -lev
+    -lhiredis -lredis++)
 
 set(test_client "transmite_client")
 # 4. 获取源码目录下的所有源码文件

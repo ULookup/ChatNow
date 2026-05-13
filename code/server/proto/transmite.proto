@@ -14,27 +14,33 @@ import "base.proto";
  
 option cc_generic_services = true; 
  
-//这个用于和网关进行通信 
-message NewMessageReq { 
-    string request_id = 1; 
-    optional string user_id = 2; 
-    optional string session_id = 3; 
-    string chat_session_id = 4; 
-    MessageContent message = 5; 
-} 
-message NewMessageRsp { 
-    string request_id = 1; 
-    bool success = 2; 
-    string errmsg = 3; 
-} 
+//这个用于和网关进行通信
+message NewMessageReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string chat_session_id = 4;
+    MessageContent message = 5;
+    // 客户端生成的幂等 ID（UUID），断网重发使用同一个值；服务端命中即返回旧消息
+    string client_msg_id = 6;
+}
+message NewMessageRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    // 返回服务端生成的 message_id 与会话内 seq_id，客户端据此与本地消息对齐
+    int64 message_id = 4;
+    uint64 seq_id = 5;
+}
  
-//这个用于内部的通信,生成完整的消息信息，并获取消息的转发人员列表 
-message GetTransmitTargetRsp { 
-    string request_id = 1; 
-    bool success = 2;  string errmsg = 3; 
-    MessageInfo message = 4; 
-    repeated string target_id_list = 5; 
-} 
+//这个用于内部的通信,生成完整的消息信息，并获取消息的转发人员列表
+message GetTransmitTargetRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    MessageInfo message = 4;
+    repeated string target_id_list = 5;
+}
  
 service MsgTransmitService { 
  rpc GetTransmitTarget(NewMessageReq) returns (GetTransmitTargetRsp); 

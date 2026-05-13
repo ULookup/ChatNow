@@ -127,21 +127,40 @@ message MessageContent {
         ImageMessageInfo image_message = 5;//图片消息 
     }; 
 } 
-//消息结构 
-message MessageInfo { 
-    int64 message_id = 1;//消息 ID 
-    string chat_session_id = 2;//消息所属聊天会话 ID 
-    int64 timestamp = 3;//消息产生时间 
-    UserInfo sender = 4;//消息发送者信息 
-    MessageContent message = 5; 
- } 
+//消息结构
+message MessageInfo {
+    // 雪花全局 ID。
+    // 注意：标准 Snowflake 占用 63 位（41 位时间戳 + 10 位 worker + 12 位序列号），
+    // 最高位恒为 0，因此存为 int64 不会出现负值。如果未来切换到带符号高位的 ID 算法，
+    // 需将此处改为 uint64 并同步客户端。
+    int64 message_id = 1;
+    string chat_session_id = 2;//消息所属聊天会话 ID
+    int64 timestamp = 3;//消息产生时间
+    UserInfo sender = 4;//消息发送者信息
+    MessageContent message = 5;
+    // ============= 高并发链路扩展字段 =============
+    // 会话内单调递增序号，用于客户端按 (session_id, seq_id) 增量同步与丢消息检测
+    uint64 seq_id = 6;
+    // 客户端生成的消息唯一 ID（UUID），服务端用于幂等去重，与 (user_id, client_msg_id) 唯一索引对齐
+    string client_msg_id = 7;
+}
+
+// 接收者维度的 user_seq 配对结构（写扩散群使用）
+message UserSeqPair {
+    string user_id = 1;
+    uint64 user_seq = 2;
+}
 
 // 【新增】内部投递消息 (Fat Message)
 // 这个结构体不仅包含消息内容，还包含了查好的发送者信息和群成员列表
 // 直接发给 MQ，下游的存储服务拿到它直接写库，不用再查 RPC
 message InternalMessage {
-    MessageInfo message_info = 1;       // 完整消息信息（含发送者详情）
+    MessageInfo message_info = 1;       // 完整消息信息（含发送者详情、seq_id、client_msg_id）
     repeated string member_id_list = 2; // 接收者/群成员 ID 列表 (用于写扩散 Timeline)
+    // 写扩散群：每个成员对应的 user_seq；读扩散大群此字段为空
+    repeated UserSeqPair user_seqs = 3;
+    // 是否为大群（>200 成员）—— 大群启用读扩散，仅写 message 主表，不写 user_timeline
+    bool is_large_group = 4;
 }
 
 message FileDownloadData { 

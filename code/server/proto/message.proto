@@ -132,11 +132,45 @@ message GetUnreadCountRsp {
     int32 unread_count = 4;     // Timeline中 > last_read_msg_id 的数量
     int64 latest_msg_id = 5;    // 同时返回最新的消息ID，方便会话服务更新快照
 }
- 
-service MsgStorageService { 
-    rpc GetHistoryMsg(GetHistoryMsgReq) returns (GetHistoryMsgRsp);  
-    rpc GetRecentMsg(GetRecentMsgReq) returns (GetRecentMsgRsp); 
-    rpc MsgSearch(MsgSearchReq) returns (MsgSearchRsp); 
+
+// ==========================================
+// 5. 客户端幂等查询 (供 Transmite 使用)
+// ==========================================
+// 场景：Transmite 收到带 client_msg_id 的请求，先查重命中即直接返回旧消息
+message SelectByClientMsgReq {
+    string request_id = 1;
+    string user_id = 2;
+    string client_msg_id = 3;
+}
+
+message SelectByClientMsgRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+    bool exists = 4;            // 是否已落库
+    MessageInfo message = 5;    // exists 为 true 时返回原始消息
+}
+
+// ==========================================
+// 6. ACK 收敛 (供 Push 服务使用)
+// ==========================================
+message UpdateAckSeqReq {
+    string request_id = 1;
+    string user_id = 2;
+    string chat_session_id = 3;
+    uint64 user_seq = 4;        // 客户端确认收到的 user_seq
+}
+
+message UpdateAckSeqRsp {
+    string request_id = 1;
+    bool success = 2;
+    string errmsg = 3;
+}
+
+service MsgStorageService {
+    rpc GetHistoryMsg(GetHistoryMsgReq) returns (GetHistoryMsgRsp);
+    rpc GetRecentMsg(GetRecentMsgReq) returns (GetRecentMsgRsp);
+    rpc MsgSearch(MsgSearchReq) returns (MsgSearchRsp);
     // 1. 增量拉取：客户端上线同步专用
     rpc GetOfflineMsg(GetOfflineMsgReq) returns (GetOfflineMsgRsp);
     // 2. 内部查询：给会话服务/搜索服务补充内容用
@@ -145,4 +179,8 @@ service MsgStorageService {
     rpc DeleteTimelineMsg(DeleteTimelineMsgReq) returns (DeleteTimelineMsgRsp);
     // 4. 状态辅助：帮会话服务算未读数
     rpc GetUnreadCount(GetUnreadCountReq) returns (GetUnreadCountRsp);
+    // 5. 幂等查询：Transmite 入口处去重
+    rpc SelectByClientMsg(SelectByClientMsgReq) returns (SelectByClientMsgRsp);
+    // 6. ACK 收敛：Push 服务上报 last_ack_seq
+    rpc UpdateAckSeq(UpdateAckSeqReq) returns (UpdateAckSeqRsp);
 }

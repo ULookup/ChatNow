@@ -10,6 +10,33 @@ enum NotifyType {
     CHAT_SESSION_CREATE_NOTIFY = 2;
     CHAT_MESSAGE_NOTIFY = 3;
     FRIEND_REMOVE_NOTIFY = 4;
+    // 客户端→服务端：WebSocket 首条鉴权（携带 session_id + device_id）
+    CLIENT_AUTH = 49;
+    // 客户端→服务端：消息送达 ACK
+    MSG_PUSH_ACK = 50;
+    // 客户端→服务端：心跳，可携带 last_user_seq 触发服务端补送
+    CLIENT_HEARTBEAT = 51;
+}
+
+// 客户端 WebSocket 首条鉴权
+message NotifyClientAuth {
+    string session_id = 1;
+    string device_id = 2;
+    optional uint64 last_user_seq = 3;
+}
+
+// 客户端确认收到指定消息
+message NotifyMsgPushAck {
+    string user_id = 1;
+    string message_id = 2;
+    uint64 user_seq = 3;
+    string chat_session_id = 4;
+}
+
+// 客户端心跳：携带本地最大 user_seq
+message NotifyHeartbeat {
+    string user_id = 1;
+    uint64 last_user_seq = 2;
 }
 
 message NotifyFriendAddApply {
@@ -39,5 +66,8 @@ message NotifyMessage {
         NotifyFriendRemove friend_remove = 7;
         NotifyNewChatSession new_chat_session_info = 5;//会话信息
         NotifyNewMessage new_message_info = 6;//消息信息
+        NotifyMsgPushAck msg_push_ack = 8;//客户端 ACK
+        NotifyHeartbeat heartbeat = 9;//客户端心跳
+        NotifyClientAuth client_auth = 10;//客户端 WebSocket 首条鉴权
     }
 }

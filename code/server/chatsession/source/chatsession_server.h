@@ -9,6 +9,7 @@
 #include "mysql_chat_session_member.hpp"   // mysql数据管理客户端封装
 #include "mysql_chat_session.hpp"   // mysql数据管理客户端封装
 #include "data_es.hpp"
+#include "data_redis.hpp"   // Members 缓存
 #include "base.pb.h"
 #include "chatsession.pb.h"
 #include "user.pb.h"
@@ -30,14 +31,16 @@ public:
                         const ServiceManager::ptr &channel_manager,
                         const std::string &user_service_name,
                         const std::string &file_service_name,
-                        const std::string &message_service_name)
+                        const std::string &message_service_name,
+                        const Members::ptr &members_cache = nullptr)
                         : _es_chat_session(std::make_shared<ESChatSession>(es_client)),
                         _mysql_chat_session(std::make_shared<ChatSessionTable>(mysql_client)),
                         _mysql_chat_session_member(std::make_shared<ChatSessionMemberTable>(mysql_client)),
                         _mm_channels(channel_manager),
                         _user_service_name(user_service_name),
                         _file_service_name(file_service_name),
-                        _message_service_name(message_service_name) 
+                        _message_service_name(message_service_name),
+                        _members_cache(members_cache)
     {
         _es_chat_session->create_index();
     }
@@ -218,6 +221,8 @@ public:
             LOG_ERROR("请求ID - {} 向数据库添加会话成员信息失败", rid);
             return err_response(rid, "向数据库添加会话成员信息失败");
         }
+        // Redis 成员缓存失效（让下次发消息走 RPC 回填，避免新建会话漏成员）
+        if(_members_cache) _members_cache->invalidate(cssID);
         //5.  组织响应
         response->set_request_id(rid);
         response->set_success(true);
@@ -433,6 +438,7 @@ public:
             LOG_ERROR("请求ID - {} 向数据库批量添加会话成员失败", rid);
             return err_response(rid, "向数据库批量添加会话成员失败");
         }
+        if(_members_cache) _members_cache->invalidate(ssid);
         //4. 填充响应
         response->set_request_id(rid);
         response->set_success(true);
@@ -479,6 +485,7 @@ public:
             LOG_ERROR("请求ID - {} 移除数据库数据的成员数据失败", rid);
             return err_response(rid, "移除数据库数据的成员数据失败");
         }
+        if(_members_cache) _members_cache->invalidate(ssid);
 
         //4. 填充响应
         response->set_request_id(rid);
@@ -880,6 +887,7 @@ public:
             LOG_ERROR("请求ID - {} 用户 {} 退出会话 {} 失败", rid, uid, ssid);
             return err_response(rid, "用户退出会话失败");
         }
+        if(_members_cache) _members_cache->invalidate(ssid);
         //5. 组织响应
         response->set_request_id(rid);
         response->set_success(true);
@@ -1047,6 +1055,7 @@ private:
 
     ChatSessionTable::ptr _mysql_chat_session;
     ChatSessionMemberTable::ptr _mysql_chat_session_member;
+    Members::ptr _members_cache;
     /* 以下是 RPC 调用客户端相关对象 */
     ServiceManager::ptr _mm_channels;
     std::string _user_service_name;
@@ -1085,6 +1094,13 @@ class ChatSessionServerBuilder
 public:
     /* brief: 构造es客户端对象 */
     void make_es_object(const std::vector<std::string> host_list) { _es_client = ESClientFactory::create(host_list); }
+    /* brief: 构造 Redis 客户端 + Members 缓存（用于成员失效） */
+    void make_redis_object(const std::string &host, uint16_t port, int db,
+                           bool keep_alive, int pool_size)
+    {
+        _redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+        _members_cache = std::make_shared<Members>(_redis);
+    }
     /* brief: 构造mysql客户端对象 */
     void make_mysql_object(const std::string &user,
                         const std::string &password,
@@ -1137,7 +1153,7 @@ public:
             abort();
         }
 
-        ChatSessionServiceImpl *chatsession_service = new ChatSessionServiceImpl(_es_client, _mysql_client, _mm_channels, _user_service_name, _file_service_name, _message_service_name);
+        ChatSessionServiceImpl *chatsession_service = new ChatSessionServiceImpl(_es_client, _mysql_client, _mm_channels, _user_service_name, _file_service_name, _message_service_name, _members_cache);
         int ret = _rpc_server->AddService(chatsession_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -1175,6 +1191,8 @@ private:
 
     std::shared_ptr<elasticlient::Client> _es_client;
     std::shared_ptr<odb::core::database> _mysql_client;
+    std::shared_ptr<sw::redis::Redis> _redis;
+    Members::ptr _members_cache;
 
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discover;

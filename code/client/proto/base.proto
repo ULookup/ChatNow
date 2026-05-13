@@ -61,6 +61,10 @@ message MessageInfo {
     int64 timestamp = 3;//消息产生时间
     UserInfo sender = 4;//消息发送者信息
     MessageContent message = 5;
+    // 会话内单调递增序号，用于客户端按 (session_id, seq_id) 增量同步与丢消息检测
+    uint64 seq_id = 6;
+    // 客户端生成的消息唯一 ID（UUID），用于幂等去重
+    string client_msg_id = 7;
 }
 
 message Message {

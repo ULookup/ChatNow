@@ -60,11 +60,12 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 # 5. 声明目标及依赖
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog 
-    -lfmt -lbrpc -lssl -lcrypto 
-    -lprotobuf -lleveldb -letcd-cpp-api 
+target_link_libraries(${target} -lgflags -lspdlog
+    -lfmt -lbrpc -lssl -lcrypto
+    -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
-    -lcpr -lelasticlient -ljsoncpp)
+    -lcpr -lelasticlient -ljsoncpp
+    -lhiredis -lredis++)
 
 set(test_client "chatsession_client")
 # 4. 获取源码目录下的所有源码文件

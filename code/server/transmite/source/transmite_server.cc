@@ -19,6 +19,13 @@ DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
 
 DEFINE_string(user_service, "/service/user_service", "用户管理子服务名称");
 DEFINE_string(chatsession_service, "/service/chatsession_service", "会话管理子服务名称");
+DEFINE_string(message_service, "/service/message_service", "消息存储子服务名称（用于幂等查询）");
+
+DEFINE_string(redis_host, "127.0.0.1", "Redis 服务器访问地址");
+DEFINE_int32(redis_port, 6379, "Redis 服务器访问端口");
+DEFINE_int32(redis_db, 0, "Redis 选择的库");
+DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
+DEFINE_int32(redis_pool_size, 8, "Redis 连接池大小");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
 DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
@@ -43,9 +50,12 @@ int main(int argc, char *argv[])
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::TransmiteServerBuilder tsb;
+    // 注意：先初始化 Redis（worker_id 自动分配依赖 Redis），再初始化 ID 生成器
+    tsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
+    tsb.set_instance_owner(FLAGS_access_host);
     tsb.make_id_generator_object(FLAGS_instance_num, FLAGS_epoch_ms, FLAGS_wait_on_clock_backwards);
     tsb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue, FLAGS_mq_msg_binding_key);
-    tsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_user_service, FLAGS_chatsession_service);
+    tsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_user_service, FLAGS_chatsession_service, FLAGS_message_service);
     tsb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
     tsb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
 

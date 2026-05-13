@@ -409,6 +409,8 @@ void NetClient::sendMessage(const QString &loginSessionId, const QString &chatSe
     pbReq.setRequestId(makeRequestId());
     pbReq.setSessionId(loginSessionId);
     pbReq.setChatSessionId(chatSessionId);
+    // 客户端幂等 ID：UUID v4，断网重发使用同一个值；服务端命中即返回旧消息
+    pbReq.setClientMsgId(QUuid::createUuid().toString(QUuid::WithoutBraces));
 
     // 构造 MessageContent
     chatnow::MessageContent messageContent;
