@@ -656,6 +656,74 @@ private:
 };
 
 // =============================================================================
+// ES 索引投递 outbox 兜底（message.onDBMessage → es_index_exchange 投递失败时持久化）
+// =============================================================================
+
+class ESOutbox
+{
+public:
+    using ptr = std::shared_ptr<ESOutbox>;
+    ESOutbox(const std::shared_ptr<sw::redis::Redis> &c) : _c(c) {}
+
+    void enqueue(const std::string &payload, long long score_ts) {
+        try { _c->zadd(kEsOutboxKey, payload, static_cast<double>(score_ts)); }
+        catch(std::exception &e) { LOG_ERROR("ESOutbox.enqueue 失败: {}", e.what()); }
+    }
+
+    std::vector<std::string> peek(long limit = 50) {
+        std::vector<std::string> res;
+        try {
+            _c->zrange(kEsOutboxKey, 0, limit - 1, std::back_inserter(res));
+        } catch(std::exception &e) { LOG_ERROR("ESOutbox.peek 失败: {}", e.what()); }
+        return res;
+    }
+
+    void remove(const std::string &payload) {
+        try { _c->zrem(kEsOutboxKey, payload); }
+        catch(std::exception &e) { LOG_ERROR("ESOutbox.remove 失败: {}", e.what()); }
+    }
+
+    bool try_acquire_reaper_lease(const std::string &owner, int ttl_sec) {
+        static const char *kAcquireLua =
+            "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    redis.call('EXPIRE', KEYS[1], ARGV[2]); return 1 "
+            "end "
+            "return 0";
+        try {
+            std::vector<std::string> keys = {kEsOutboxLockKey};
+            std::vector<std::string> args = {owner, std::to_string(ttl_sec)};
+            return _c->eval<long long>(kAcquireLua, keys.begin(), keys.end(),
+                                        args.begin(), args.end()) == 1;
+        } catch(std::exception &e) {
+            LOG_ERROR("ESOutbox.try_acquire_reaper_lease 失败: {}", e.what());
+            return false;
+        }
+    }
+
+    void release_reaper_lease(const std::string &owner) {
+        static const char *kReleaseLua =
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    return redis.call('DEL', KEYS[1]) "
+            "end "
+            "return 0";
+        try {
+            std::vector<std::string> keys = {kEsOutboxLockKey};
+            std::vector<std::string> args = {owner};
+            _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        } catch(std::exception &e) {
+            LOG_ERROR("ESOutbox.release_reaper_lease 失败: {}", e.what());
+        }
+    }
+
+private:
+    std::shared_ptr<sw::redis::Redis> _c;
+    static constexpr const char *kEsOutboxKey     = "im:es:outbox";
+    static constexpr const char *kEsOutboxLockKey = "im:es:outbox:lock";
+};
+
+// =============================================================================
 // 推送未 ACK 缓冲（B5 用：超时未 ack 的消息进 Sorted Set，按时间戳重传）
 // =============================================================================
 
