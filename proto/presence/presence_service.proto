@@ -1,0 +1,80 @@
+syntax = "proto3";
+package chatnow.presence;
+
+import "common/envelope.proto";
+
+enum PresenceState {
+    PRESENCE_UNSPECIFIED = 0;
+    ONLINE = 1;
+    AWAY = 2;
+    BUSY = 3;
+    OFFLINE = 4;
+    INVISIBLE = 5;
+}
+
+message Presence {
+    string user_id = 1;
+    PresenceState state = 2;
+    int64 last_active_at_ms = 3;
+    repeated string active_device_types = 4;
+    optional string custom_status = 5;
+}
+
+service PresenceService {
+    rpc SetPresence(SetPresenceReq) returns (SetPresenceRsp);
+    rpc GetPresence(GetPresenceReq) returns (GetPresenceRsp);
+    rpc BatchGetPresence(BatchGetPresenceReq) returns (BatchGetPresenceRsp);
+    rpc SubscribePresence(SubscribeReq) returns (SubscribeRsp);
+    rpc UnsubscribePresence(UnsubscribeReq) returns (UnsubscribeRsp);
+    rpc SendTyping(TypingReq) returns (TypingRsp);
+}
+
+message SetPresenceReq {
+    string request_id = 1;
+    string user_id = 2;
+    PresenceState state = 3;
+    optional string custom_status = 4;
+}
+message SetPresenceRsp {
+    ResponseHeader header = 1;
+}
+
+message GetPresenceReq {
+    string request_id = 1;
+    string user_id = 2;
+}
+message GetPresenceRsp {
+    ResponseHeader header = 1;
+    Presence presence = 2;
+}
+
+message BatchGetPresenceReq {
+    string request_id = 1;
+    repeated string user_ids = 2;
+}
+message BatchGetPresenceRsp {
+    ResponseHeader header = 1;
+    map<string, Presence> presences = 2;
+}
+
+message SubscribeReq {
+    string request_id = 1;
+    string user_id = 2;
+    repeated string subscribe_user_ids = 3;
+}
+message SubscribeRsp { ResponseHeader header = 1; }
+
+message UnsubscribeReq {
+    string request_id = 1;
+    string user_id = 2;
+    repeated string unsubscribe_user_ids = 3;
+}
+message UnsubscribeRsp { ResponseHeader header = 1; }
+
+message TypingReq {
+    string request_id = 1;
+    string user_id = 2;
+    string conversation_id = 3;
+    bool is_typing = 4;
+}
+message TypingRsp { ResponseHeader header = 1; }
