@@ -49,9 +49,9 @@ namespace chatnow
 {
 
 enum class ChatSessionType : unsigned char {
-    SINGLE = 1,
-    GROUP  = 2
-    // 后续可扩：BROADCAST(系统通知) / ROOM(直播间) / ASSISTANT(机器人)
+    SINGLE  = 1,
+    GROUP   = 2,
+    CHANNEL = 3    // 频道/广播（预留）
 };
 
 enum class ChatSessionStatus : unsigned char {

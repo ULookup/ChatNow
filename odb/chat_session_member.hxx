@@ -128,6 +128,9 @@ public:
     }
     void quit_time(const boost::posix_time::ptime &v) { _quit_time = v; }
 
+    std::string draft() const { return _draft ? *_draft : std::string(); }
+    void draft(const std::string &v) { _draft = v; }
+
 private:
     friend class odb::access;
 
@@ -181,6 +184,10 @@ private:
 
     #pragma db type("DATETIME(3)")
     odb::nullable<boost::posix_time::ptime> _quit_time;
+
+    // —— 草稿（proto SelfMemberInfo.draft） ——
+    #pragma db type("text")
+    odb::nullable<std::string> _draft;
 
     // (session_id, user_id) 唯一：含已退群成员；二次入群语义为 UPDATE
     #pragma db index("uk_session_user") unique members(_session_id, _user_id)

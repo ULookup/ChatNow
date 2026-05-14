@@ -150,6 +150,21 @@ public:
     std::string revoke_by() const { return _revoke_by ? *_revoke_by : std::string(); }
     void revoke_by(const std::string &v) { _revoke_by = v; }
 
+    boost::posix_time::ptime edit_time() const {
+        return _edit_time ? *_edit_time : boost::posix_time::ptime();
+    }
+    void edit_time(const boost::posix_time::ptime &v) { _edit_time = v; }
+
+    std::string forward_from_uid() const {
+        return _forward_from_uid ? *_forward_from_uid : std::string();
+    }
+    void forward_from_uid(const std::string &v) { _forward_from_uid = v; }
+
+    boost::posix_time::ptime forward_at() const {
+        return _forward_at ? *_forward_at : boost::posix_time::ptime();
+    }
+    void forward_at(const boost::posix_time::ptime &v) { _forward_at = v; }
+
 private:
     friend class odb::access;
 
@@ -202,6 +217,17 @@ private:
 
     #pragma db type("varchar(32)")
     odb::nullable<std::string> _revoke_by;
+
+    // —— 编辑时间（proto Message.edited_at_ms） ——
+    #pragma db type("DATETIME(3)")
+    odb::nullable<boost::posix_time::ptime> _edit_time;
+
+    // —— 转发来源（proto Message.forward_info） ——
+    #pragma db type("varchar(32)")
+    odb::nullable<std::string> _forward_from_uid;
+
+    #pragma db type("DATETIME(3)")
+    odb::nullable<boost::posix_time::ptime> _forward_at;
 
     // 主路径 + 防重：seq 由 Redis 分发本就唯一，UNIQUE 兜底防 MQ 重投/双写
     #pragma db index("uk_session_seq") unique members(_session_id, _seq_id)
