@@ -669,7 +669,36 @@ public:
             LOG_INFO("DB-Consumer: 消息落库 mid={} seq={} large={} timeline_count={}",
                      mid, session_seq, internal_msg.is_large_group(), timeline_list.size());
 
-            // 6. 落库成功后投递到 push_queue（fire-and-forget；推送服务消费）
+            // 6. DB commit 成功后投递 ES 索引事件（仅文本消息）
+            //    失败 → 落 ESOutbox，由独立 reaper 定期重投
+            if(msg_type == MessageType::STRING && _es_publisher) {
+                ESIndexEvent es_event;
+                es_event.set_message_id(static_cast<int64_t>(mid));
+                es_event.set_chat_session_id(msg_info.chat_session_id());
+                es_event.set_user_id(msg_info.sender().user_id());
+                es_event.set_content(content);
+                es_event.set_timestamp(msg_info.timestamp());
+                es_event.set_seq_id(session_seq);
+                es_event.set_message_type(MessageType::STRING);
+
+                std::string es_payload = es_event.SerializeAsString();
+                long long now_ts = static_cast<long long>(time(nullptr));
+                auto es_outbox = _es_outbox;
+                try {
+                    _es_publisher->publish_confirm(es_payload,
+                        [es_payload, es_outbox, mid, now_ts](PublishStatus st, const std::string &err) {
+                            if(st != PublishStatus::Acked) {
+                                LOG_WARN("ES-Publisher: 投递 es_index_exchange 失败 mid={} err={}, 入 ES outbox", mid, err);
+                                if(es_outbox) es_outbox->enqueue(es_payload, now_ts);
+                            }
+                        });
+                } catch(std::exception &e) {
+                    LOG_WARN("ES-Publisher: 同步异常 mid={} err={}, 入 ES outbox", mid, e.what());
+                    if(_es_outbox) _es_outbox->enqueue(es_payload, now_ts);
+                }
+            }
+
+            // 7. 落库成功后投递到 push_queue（fire-and-forget；推送服务消费）
             //    投递失败 → 落 PushOutbox（Redis ZSET），由独立 reaper 定期重投，避免推送丢失
             if(_push_publisher) {
                 std::string payload = internal_msg.SerializeAsString();
