@@ -333,7 +333,50 @@ public:
             } catch(...) { LOG_WARN("Heartbeat-补送 非法 user_seq={}", s); }
         }
         if(pending_set.empty()) return;
-        uint64_t last_user_seq = min_seq > 0 ? min_seq - 1 : 0;
+
+        // 先查本地缓存
+        std::vector<uint64_t> cache_hits;
+        std::vector<uint64_t> cache_misses;
+        {
+            std::lock_guard<std::mutex> lock(_msg_cache_mu);
+            for(uint64_t us : pending_set) {
+                std::string key = uid + ":" + std::to_string(us);
+                if(_msg_cache.find(key) != _msg_cache.end()) {
+                    cache_hits.push_back(us);
+                } else {
+                    cache_misses.push_back(us);
+                }
+            }
+        }
+
+        // 缓存命中：直接 _local_send
+        int sent_from_cache = 0;
+        for(uint64_t us : cache_hits) {
+            std::string key = uid + ":" + std::to_string(us);
+            std::string payload;
+            {
+                std::lock_guard<std::mutex> lock(_msg_cache_mu);
+                auto it = _msg_cache.find(key);
+                if(it != _msg_cache.end()) payload = (*it->second)->payload;
+            }
+            if(!payload.empty()) {
+                _local_send(uid, payload);
+                ++sent_from_cache;
+            }
+        }
+
+        // 全部命中：跳过 RPC
+        if(cache_misses.empty()) {
+            if(_unacked) _unacked->bump_score(uid, pending);
+            LOG_INFO("Heartbeat-补送 uid={} 取出 {} 条 全部命中缓存 (sent={})",
+                     uid, pending.size(), sent_from_cache);
+            return;
+        }
+
+        // 仅对未命中的走 RPC
+        uint64_t min_miss = *std::min_element(cache_misses.begin(), cache_misses.end());
+        uint64_t last_user_seq = min_miss > 0 ? min_miss - 1 : 0;
+        std::unordered_set<uint64_t> miss_set(cache_misses.begin(), cache_misses.end());
 
         auto channel = _mm_channels->choose(_message_service_name);
         if(!channel) {
@@ -347,16 +390,13 @@ public:
         closure->req.set_last_message_id(static_cast<int64_t>(last_user_seq));
         closure->req.set_msg_count(static_cast<int32_t>(pending.size()));
 
-        // 回调中执行 send + bump_score；按值捕获所需上下文
         std::string uid_copy = uid;
         auto unacked = _unacked;
         auto pending_copy = pending;
-        auto pending_set_copy = std::move(pending_set);
-        // 注意：回调里调用 _local_send(uid, payload) 仍要走 _connections，
-        //      _connections 是本服务对象的 shared_ptr 字段，PushServiceImpl
-        //      生命周期由 brpc 持有，回调到达时 impl 必然存活（M1 已确保关停顺序）
+        auto miss_set_copy = std::move(miss_set);
+        int sent_cache = sent_from_cache;
         PushServiceImpl *self = this;
-        closure->on_done = [self, uid_copy, unacked, pending_copy, pending_set_copy](
+        closure->on_done = [self, uid_copy, unacked, pending_copy, miss_set_copy, sent_cache](
             brpc::Controller *c, const GetOfflineMsgRsp &rsp)
         {
             if(c->Failed() || !rsp.success()) {
@@ -364,12 +404,12 @@ public:
                          uid_copy, c->Failed() ? c->ErrorText() : rsp.errmsg());
                 return;
             }
-            int sent = 0;
+            int sent = sent_cache;
             for(int i = 0; i < rsp.msg_list_size(); ++i) {
                 const auto &mi = rsp.msg_list(i);
-                if(!mi.has_user_seq()) continue;  // 缺 user_seq → 不在 pending 列表
+                if(!mi.has_user_seq()) continue;
                 uint64_t us = mi.user_seq();
-                if(pending_set_copy.find(us) == pending_set_copy.end()) continue;
+                if(miss_set_copy.find(us) == miss_set_copy.end()) continue;
                 ::chatnow::NotifyMessage notify;
                 notify.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
                 notify.mutable_new_message_info()->mutable_message_info()->CopyFrom(mi);
@@ -377,8 +417,8 @@ public:
                 ++sent;
             }
             if(unacked) unacked->bump_score(uid_copy, pending_copy);
-            LOG_INFO("Heartbeat-补送 uid={} 取出 {} 条 实际重发 {} 条",
-                     uid_copy, pending_copy.size(), sent);
+            LOG_INFO("Heartbeat-补送 uid={} 取出 {} 条 实际重发 {} 条 (缓存命中 {} 条)",
+                     uid_copy, pending_copy.size(), sent, sent_cache);
         };
         stub.GetOfflineMsg(&closure->cntl, &closure->req, &closure->rsp, closure);
     }
