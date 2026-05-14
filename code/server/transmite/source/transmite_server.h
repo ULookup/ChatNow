@@ -15,6 +15,9 @@
 #include "transmite.pb.h"  // protobuf框架代码
 #include <brpc/server.h>
 #include <butil/logging.h>
+#include <atomic>
+#include <chrono>
+#include <thread>
 
 namespace chatnow
 {
@@ -304,17 +307,50 @@ public:
 
     TransmiteServer(const Discovery::ptr &service_discover,
                 const Registry::ptr &reg_client,
-                const std::shared_ptr<brpc::Server> &server)
-        : _service_discover(service_discover), _reg_client(reg_client), _rpc_server(server) {}
-    ~TransmiteServer() = default;
-    /* brief: 搭建RPC服务器，并启动服务器 */
+                const std::shared_ptr<brpc::Server> &server,
+                const WorkerIdAllocator::ptr &worker_allocator = nullptr)
+        : _service_discover(service_discover), _reg_client(reg_client), _rpc_server(server),
+          _worker_allocator(worker_allocator) {}
+    ~TransmiteServer() {
+        _watchdog_running.store(false);
+        if(_watchdog_thread.joinable()) _watchdog_thread.join();
+    }
+
+    /* M4: 搭建RPC服务器，并启动服务器
+     *  - 启动 lease_lost watchdog：每 1s 轮询 worker_id 租约状态，
+     *    一旦发现租约丢失（其他实例占走了同一 worker_id），主动停服 + abort，
+     *    避免 SnowflakeId 用已被别人占据的 worker_id 继续发号产生重号。
+     */
     void start() {
+        if(_worker_allocator) {
+            _watchdog_running.store(true);
+            _watchdog_thread = std::thread([this]() {
+                while(_watchdog_running.load()) {
+                    if(_worker_allocator->lease_lost()) {
+                        // brpc Stop(0) 不会打断 in-flight handler；
+                        // 在 worker_id 已被别人占走的状态下，每多发一个雪花 ID 都
+                        // 必然撞向对端实例，污染 message 主键唯一约束。
+                        // → 唯一正确语义：立刻 abort，让所有 bthread 一起死。
+                        LOG_ERROR("worker_id 租约丢失，立即 abort 防雪花 ID 重号");
+                        try { if(_reg_client) _reg_client->unregister(); } catch(...) {}
+                        std::abort();
+                    }
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+            });
+        }
         _rpc_server->RunUntilAskedToQuit();
+        // 主退出后顺手 stop watchdog（若不是 watchdog 触发退出）
+        _watchdog_running.store(false);
+        if(_watchdog_thread.joinable()) _watchdog_thread.join();
     }
 private:
     Discovery::ptr _service_discover;   // 服务发现客户端
     Registry::ptr _reg_client;          // 服务注册客户端
     std::shared_ptr<brpc::Server> _rpc_server;
+    WorkerIdAllocator::ptr _worker_allocator;
+    std::atomic<bool> _watchdog_running {false};
+    std::thread _watchdog_thread;
 };
 
 /* 建造者模式: 将对象真正的构造过程封装，便于后期扩展和调整 */
@@ -368,7 +404,11 @@ public:
         _reg_client = std::make_shared<Registry>(reg_host);
         _reg_client->registry(service_name, access_host);
     }
-    /* brief: 构造 RabbitMQ 客户端对象 */
+    /* brief: 构造 RabbitMQ 客户端对象
+     * 契约：transmite 是 publisher-only，exchange_name 必须与 message 服务的
+     *      mq_msg_exchange 完全一致（FANOUT 下 binding 不参与匹配，仅 exchange 决定路由）。
+     *      queue_name / binding_key 留空，避免声明孤儿队列。
+     */
     void make_mq_object(const std::string &user,
                     const std::string &password,
                     const std::string &host,
@@ -376,17 +416,31 @@ public:
                     const std::string &queue_name,
                     const std::string &binding_key)
     {
+        if(exchange_name.empty()) {
+            LOG_ERROR("Transmite MQ exchange 不能为空，必须与 message 服务的 mq_msg_exchange 对齐");
+            abort();
+        }
+        // publisher-only：即使配置写了 queue/binding，也必须清空后再 declare，
+        // 否则 transmite 会声明绑到同一 exchange 的孤儿队列（FANOUT 下复制副本却无消费者）。
+        std::string queue_for_declare;
+        std::string binding_for_declare;
+        if(!queue_name.empty() || !binding_key.empty()) {
+            LOG_WARN("Transmite 是 publisher-only，忽略配置中的 mq_msg_queue={} / mq_msg_binding_key={}，"
+                     "避免声明孤儿队列（请清空配置）",
+                     queue_name, binding_key);
+        }
         _exchange_name = exchange_name;
-        _routing_key = binding_key;
+        _routing_key.clear();  // publisher-only：FANOUT 路由忽略 routing_key，固定空串
         std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
         _mq_client = std::make_shared<MQClient>(amqp_url);
         declare_settings settings {
             .exchange = exchange_name,
             .exchange_type = chatnow::FANOUT,
-            .queue = queue_name,
-            .binding_key = binding_key
+            .queue = queue_for_declare,
+            .binding_key = binding_for_declare
         };
         _publisher = std::make_shared<Publisher>(_mq_client, settings);
+        LOG_INFO("Transmite MQ 已就绪: exchange={} (FANOUT, publisher-only)", exchange_name);
     }
     /* brief: 构造 Redis 客户端 + SeqGen + Members + RateLimiter */
     void make_redis_object(const std::string &host, uint16_t port, int db,
@@ -456,7 +510,9 @@ public:
             abort();
         }
 
-        TransmiteServer::ptr server = std::make_shared<TransmiteServer>(_service_discover, _reg_client, _rpc_server);
+        // M4: 把 worker_allocator 传给 server，让 watchdog 线程在 start() 中轮询 lease_lost
+        TransmiteServer::ptr server = std::make_shared<TransmiteServer>(
+            _service_discover, _reg_client, _rpc_server, _worker_allocator);
         return server;
     }
 private:

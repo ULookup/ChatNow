@@ -54,6 +54,7 @@ int main(int argc, char *argv[])
 
     chatnow::MessageServerBuilder msb;
     msb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
+    msb.set_reaper_owner(FLAGS_access_host + ":" + std::to_string(::getpid()));
     msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue_db, FLAGS_mq_msg_queue_es, FLAGS_mq_db_binding_key, FLAGS_mq_es_binding_key);
     msb.make_push_publisher(FLAGS_mq_push_exchange, FLAGS_mq_push_queue, FLAGS_mq_push_binding_key);
     msb.make_es_object({FLAGS_es_host});

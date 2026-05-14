@@ -20,7 +20,9 @@
 #include "file.pb.h"
 #include "user.pb.h"
 #include "chatsession.pb.h"
+#include <atomic>
 #include <chrono>
+#include <thread>
 
 namespace chatnow
 {
@@ -60,7 +62,9 @@ public:
     {
         _es_client->createIndex();
     }
-    ~MessageServiceImpl() = default;
+    ~MessageServiceImpl() {
+        stop_outbox_reaper();
+    }
     virtual void GetHistoryMsg(google::protobuf::RpcController* controller,
                        const ::chatnow::GetHistoryMsgReq* request,
                        ::chatnow::GetHistoryMsgRsp* response,
@@ -356,14 +360,20 @@ public:
             return;
         }
 
-        // 4. 提取 Message ID 列表
+        // 4. 提取 Message ID 列表，并建立 message_id → user_seq 映射，
+        //    保证响应中每条 MessageInfo.user_seq 与 timeline 的 user_seq 严格对齐
+        //    （select_by_ids 内部按 seq_id ASC 排序，与 timeline 顺序不同，
+        //     直接 by-index 配对会跨会话错配）
         std::vector<unsigned long> msg_id_list;
         msg_id_list.reserve(timeline_list.size());
+        std::unordered_map<unsigned long, unsigned long> mid_to_user_seq;
+        mid_to_user_seq.reserve(timeline_list.size());
         for(const auto &tl : timeline_list) {
             msg_id_list.push_back(tl.message_id());
+            mid_to_user_seq[tl.message_id()] = tl.user_seq();
         }
 
-        // 5. 批量查询消息正文 (使用之前实现的 select_by_ids)
+        // 5. 批量查询消息正文
         auto msg_list = _mysql_message_table->select_by_ids(msg_id_list);
         if(msg_list.empty()) {
             // Timeline 有 ID 但 Message 表没数据（极少见的数据不一致）
@@ -404,12 +414,14 @@ public:
         for(const auto &msg : msg_list) {
             auto info = response->add_msg_list();
 
-            // 填充基础信息（含会话内 seq、客户端幂等 ID）
+            // 填充基础信息（含会话内 seq、客户端幂等 ID、收件人 user_seq）
             info->set_message_id(msg.message_id());
             info->set_chat_session_id(msg.session_id());
             info->set_seq_id(msg.seq_id());
             info->set_client_msg_id(msg.client_msg_id());
             info->set_timestamp(boost::posix_time::to_time_t(msg.create_time()));
+            auto seq_it = mid_to_user_seq.find(msg.message_id());
+            if(seq_it != mid_to_user_seq.end()) info->set_user_seq(seq_it->second);
 
             // 填充发送者信息
             if (user_map.find(msg.user_id()) != user_map.end()) {
@@ -532,7 +544,8 @@ public:
     }
 
     /* brief: ACK 收敛（Push 服务收到客户端 ACK 后调用）
-     *  - 仅向前推进 last_ack_seq；不会回退
+     *  - 仅向前推进 last_ack_seq；不会回退（DAO 走 SELECT FOR UPDATE 单调推进）
+     *  - 入参非法 → 直接拒绝；DAO 失败 → 返回 false 让调用方重试
      */
     virtual void UpdateAckSeq(google::protobuf::RpcController* controller,
                               const ::chatnow::UpdateAckSeqReq* request,
@@ -541,9 +554,10 @@ public:
     {
         brpc::ClosureGuard rpc_guard(done);
         response->set_request_id(request->request_id());
-        if(!_mysql_member_table) {
-            // 兼容：member 表 DAO 未注入则直接成功（推送链路降级）
-            response->set_success(true);
+        if(request->user_id().empty() || request->chat_session_id().empty() ||
+           request->user_seq() == 0) {
+            response->set_success(false);
+            response->set_errmsg("invalid args: user_id/chat_session_id/user_seq required");
             return;
         }
         bool ok = _mysql_member_table->update_last_ack_seq(
@@ -685,6 +699,64 @@ public:
             LOG_ERROR("DB-Consumer: 事务失败（首次），重投 mid={} err={}", mid, e.what());
             return ConsumeAction::NackRequeue;
         }
+    }
+
+    /* M3: PushOutbox reaper —
+     *   - 单独线程，每 kReapIntervalSec 唤醒；
+     *   - Redis SET NX EX 单实例租约（kLeaseTtlSec）保证多副本只一个实例真正消费；
+     *   - 从 outbox ZSET 取 kBatchLimit 条失败 payload，重投到 push_publisher；
+     *   - peek-then-zrem 防同批反复重投；publish_confirm 失败回调里重新 enqueue + bump 时间戳。
+     */
+    void start_outbox_reaper(const std::string &owner) {
+        if(!_push_outbox || !_push_publisher) {
+            LOG_WARN("PushOutbox reaper 未启动：outbox / publisher 未注入");
+            return;
+        }
+        constexpr int kReapIntervalSec = 5;
+        constexpr int kLeaseTtlSec     = 30;
+        constexpr int kBatchLimit      = 50;
+        _reaper_running.store(true);
+        _reaper_owner = owner;
+        _reaper_thread = std::thread([this]() {
+            while(_reaper_running.load()) {
+                try {
+                    if(!_push_outbox->try_acquire_reaper_lease(_reaper_owner, kLeaseTtlSec)) {
+                        std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+                        continue;
+                    }
+                    auto batch = _push_outbox->peek(kBatchLimit);
+                    if(batch.empty()) {
+                        std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+                        continue;
+                    }
+                    LOG_INFO("PushOutbox reaper: 取出 {} 条失败投递准备重投", batch.size());
+                    for(const auto &payload : batch) _push_outbox->remove(payload);
+                    auto outbox = _push_outbox;
+                    for(const auto &payload : batch) {
+                        std::string p = payload;
+                        _push_publisher->publish_confirm(p,
+                            [outbox, p](PublishStatus status, const std::string &err) {
+                                if(status == PublishStatus::Acked) return;
+                                LOG_WARN("PushOutbox reaper 重投仍失败，回排入 outbox：{}", err);
+                                if(outbox) outbox->enqueue(
+                                    p, static_cast<long long>(time(nullptr)));
+                            });
+                    }
+                } catch(std::exception &e) {
+                    LOG_ERROR("PushOutbox reaper 异常: {}", e.what());
+                } catch(...) {
+                    LOG_ERROR("PushOutbox reaper 未知异常");
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+            }
+            if(_push_outbox) _push_outbox->release_reaper_lease(_reaper_owner);
+            LOG_INFO("PushOutbox reaper 已停止");
+        });
+    }
+
+    void stop_outbox_reaper() {
+        _reaper_running.store(false);
+        if(_reaper_thread.joinable()) _reaper_thread.join();
     }
 
     ConsumeAction onESMessage(const char *body, size_t sz, bool redelivered) {
@@ -830,6 +902,11 @@ private:
     SeqGen::ptr _seq_gen;            // 启动时回填 / 推送链路重传
     Publisher::ptr _push_publisher;  // 写完 timeline 后向 push_queue 投递
     PushOutbox::ptr _push_outbox;    // push_queue 投递失败兜底
+
+    // M3: outbox reaper 状态
+    std::atomic<bool> _reaper_running {false};
+    std::thread _reaper_thread;
+    std::string _reaper_owner;
 };
 
 class MessageServer
@@ -837,30 +914,43 @@ class MessageServer
 public:
     using ptr = std::shared_ptr<MessageServer>;
 
-    MessageServer(const Discovery::ptr &service_discover, 
-                const Registry::ptr &reg_client, 
+    MessageServer(const Discovery::ptr &service_discover,
+                const Registry::ptr &reg_client,
                 const MQClient::ptr &mq_client,
                 const std::shared_ptr<elasticlient::Client> &es_client,
-                const std::shared_ptr<odb::core::database> &mysql_client, 
-                const std::shared_ptr<brpc::Server> &server) 
+                const std::shared_ptr<odb::core::database> &mysql_client,
+                const std::shared_ptr<brpc::Server> &server,
+                MessageServiceImpl *service_impl)
         : _service_discover(service_discover),
-        _reg_client(reg_client), 
+        _reg_client(reg_client),
         _mq_client(mq_client),
         _es_client(es_client),
-        _mysql_client(mysql_client), 
-        _rpc_server(server) {}
+        _mysql_client(mysql_client),
+        _rpc_server(server),
+        _service_impl(service_impl) {}
     ~MessageServer() = default;
-    /* brief: 搭建RPC服务器，并启动服务器 */
+    /* M3: 按顺序退出，避免 ev 线程访问已 delete 的 MessageServiceImpl
+     *  1) RunUntilAskedToQuit 返回（brpc 已开始 Stop）
+     *  2) 先停 reaper 主线程（不再发起 publish_confirm）
+     *  3) 释放 mq_client → MQClient 析构关闭 channel + join ev 线程，未决回调丢弃
+     *  4) brpc Join 等 in-flight RPC，brpc::Server 析构再 delete impl
+     */
     void start() {
         _rpc_server->RunUntilAskedToQuit();
+        // 关停顺序：reaper → MQ ev 线程 → brpc Join → brpc::Server 析构 delete impl
+        if(_service_impl) _service_impl->stop_outbox_reaper();
+        _mq_client.reset();
+        _rpc_server->Join();
+        LOG_INFO("Message 关停完成");
     }
 private:
-    Discovery::ptr _service_discover;   // 服务发现客户端
-    Registry::ptr _reg_client;          // 服务注册客户端
+    Discovery::ptr _service_discover;
+    Registry::ptr _reg_client;
     MQClient::ptr _mq_client;
     std::shared_ptr<elasticlient::Client> _es_client;
-    std::shared_ptr<odb::core::database> _mysql_client; // mysql 数据库客户端
+    std::shared_ptr<odb::core::database> _mysql_client;
     std::shared_ptr<brpc::Server> _rpc_server;
+    MessageServiceImpl *_service_impl {nullptr};  // 仅观察指针（owned by brpc）
 };
 
 /* 建造者模式: 将对象真正的构造过程封装，便于后期扩展和调整 */
@@ -930,9 +1020,11 @@ public:
         _reg_client = std::make_shared<Registry>(reg_host);
         _reg_client->registry(service_name, access_host);
     }
-    /* brief: 构造 RabbitMQ 客户端对象 */
-    void make_mq_object(const std::string &user, 
-                    const std::string &password, 
+    /* brief: 构造 RabbitMQ 客户端对象
+     * 契约：exchange_name 必须与 transmite 服务的 mq_msg_exchange 完全一致（FANOUT 路由依赖 exchange 名）
+     */
+    void make_mq_object(const std::string &user,
+                    const std::string &password,
                     const std::string &host,
                     const std::string &exchange_name,
                     const std::string &queue_name_db,
@@ -940,8 +1032,18 @@ public:
                     const std::string &binding_key_db,
                     const std::string &binding_key_es)
     {
+        if(exchange_name.empty()) {
+            LOG_ERROR("Message MQ exchange 不能为空，必须与 transmite 服务的 mq_msg_exchange 对齐");
+            abort();
+        }
+        if(queue_name_db.empty() || queue_name_es.empty()) {
+            LOG_ERROR("Message MQ queue 不能为空: db={} es={}", queue_name_db, queue_name_es);
+            abort();
+        }
+        LOG_INFO("Message MQ 已就绪: exchange={} (FANOUT) db_queue={} es_queue={}",
+                 exchange_name, queue_name_db, queue_name_es);
         std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
-        _mq_client = std::make_shared<MQClient>(amqp_url); 
+        _mq_client = std::make_shared<MQClient>(amqp_url);
         //声明 DB 队列
         _db_queue_settings = {
             .exchange = exchange_name,
@@ -992,6 +1094,7 @@ public:
             _subscriber_db, _subscriber_es,
             _db_queue_settings, _es_queue_settings,
             _seq_gen, _push_publisher, _push_outbox);
+        _service_impl = message_service;  // 观察指针，build() 时透传给 MessageServer
         int ret = _rpc_server->AddService(message_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -1013,7 +1116,14 @@ public:
         _subscriber_db->consume(std::move(callback_db));
         _subscriber_es->consume(std::move(callback_es));
         LOG_INFO("队列订阅完成，服务全面启动！");
+
+        // M3: 启动 PushOutbox reaper（多副本只一个实例真正消费，靠 Redis SET NX EX 选主）
+        std::string owner = _reaper_owner.empty()
+            ? std::to_string(::getpid()) : _reaper_owner;
+        message_service->start_outbox_reaper(owner);
     }
+    /* brief: 设置 reaper owner 标识（access_host:pid 等），用于多实例租约辨识 */
+    void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
     MessageServer::ptr build() {
         if(!_service_discover) {
             LOG_ERROR("还未初始化服务发现模块");
@@ -1028,8 +1138,17 @@ public:
             abort();
         }
 
-        MessageServer::ptr server = std::make_shared<MessageServer>(_service_discover, _reg_client, _mq_client, _es_client, _mysql_client, _rpc_server);
-
+        // M3 析构序：与 push 服务同样把 mq_client 等强引用 move 给 MessageServer，
+        // 让 main 销毁 builder 时不再拖着 ev 线程；MessageServer::start() 末尾的
+        // _mq_client.reset() 才能真正触发 ev 线程退出，再 brpc Join 安全析构 impl。
+        MessageServer::ptr server = std::make_shared<MessageServer>(
+            std::move(_service_discover),
+            std::move(_reg_client),
+            std::move(_mq_client),
+            std::move(_es_client),
+            std::move(_mysql_client),
+            std::move(_rpc_server),
+            _service_impl);
         return server;
     }
 private:
@@ -1048,14 +1167,14 @@ private:
     std::shared_ptr<sw::redis::Redis> _redis;
     SeqGen::ptr _seq_gen;
     PushOutbox::ptr _push_outbox;
-    
+    std::string _reaper_owner;
+    MessageServiceImpl *_service_impl {nullptr};  // brpc 拥有，仅观察指针用
 
     Discovery::ptr _service_discover;   // 服务发现客户端
     Registry::ptr _reg_client;          // 服务注册客户端
     std::shared_ptr<elasticlient::Client> _es_client;
     std::shared_ptr<odb::core::database> _mysql_client; // mysql 数据库客户端
     std::shared_ptr<brpc::Server> _rpc_server;
-
 };
 
 }

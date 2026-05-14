@@ -44,7 +44,8 @@ namespace key
     inline constexpr const char* kOnline     = "im:online:";        // uid        -> SET<push_instance_id>
     inline constexpr const char* kPushRoute  = "im:push:route:";    // uid        -> push_instance_id (单设备)
     inline constexpr const char* kUnacked    = "im:unack:";         // uid        -> Sorted Set<msg_id, ts>
-    inline constexpr const char* kPushOutbox = "im:push:outbox";    // 全局 Sorted Set<serialized_payload, ts> 投递失败兜底
+    inline constexpr const char* kPushOutbox     = "im:push:outbox";       // 全局 Sorted Set<serialized_payload, ts> 投递失败兜底
+    inline constexpr const char* kPushOutboxLock = "im:push:outbox:lock";  // M3 reaper 单实例租约 key
 } // namespace key
 
 /* brief: 默认 TTL 常量 */
@@ -520,6 +521,47 @@ public:
         try { _c->zrem(key::kPushOutbox, payload); }
         catch(std::exception &e) { LOG_ERROR("PushOutbox.remove 失败: {}", e.what()); }
     }
+
+    /* brief: M3 reaper 单实例租约 — SET NX EX 上锁；已持有则原子续约。
+     *        必须 Lua 原子，否则 acquire 的 GET+EXPIRE 与 release 的 GET+DEL 都有 TOCTOU race，
+     *        race 下两个实例可能同时认为自己持锁，导致 outbox 双发。
+     *        返回是否拿到 / 续到锁。
+     */
+    bool try_acquire_reaper_lease(const std::string &owner, int ttl_sec) {
+        static const char *kAcquireLua =
+            "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    redis.call('EXPIRE', KEYS[1], ARGV[2]); return 1 "
+            "end "
+            "return 0";
+        try {
+            std::vector<std::string> keys = {key::kPushOutboxLock};
+            std::vector<std::string> args = {owner, std::to_string(ttl_sec)};
+            auto ret = _c->eval<long long>(kAcquireLua, keys.begin(), keys.end(),
+                                           args.begin(), args.end());
+            return ret == 1;
+        } catch(std::exception &e) {
+            LOG_ERROR("PushOutbox.try_acquire_reaper_lease 失败: {}", e.what());
+            return false;
+        }
+    }
+
+    /* brief: M3 reaper 主动释放租约（CAS：仅 owner 与自己一致时 DEL，原子） */
+    void release_reaper_lease(const std::string &owner) {
+        static const char *kReleaseLua =
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    return redis.call('DEL', KEYS[1]) "
+            "end "
+            "return 0";
+        try {
+            std::vector<std::string> keys = {key::kPushOutboxLock};
+            std::vector<std::string> args = {owner};
+            _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        } catch(std::exception &e) {
+            LOG_ERROR("PushOutbox.release_reaper_lease 失败: {}", e.what());
+        }
+    }
 private:
     std::shared_ptr<sw::redis::Redis> _c;
 };
@@ -550,18 +592,17 @@ public:
         try { _c->zrem(key::kUnacked + uid, std::to_string(user_seq)); }
         catch(std::exception &e) { LOG_ERROR("UnackedPush.ack 失败 {}: {}", uid, e.what()); }
     }
-    /* brief: 取所有"成熟可重传"的 user_seq（按时间升序）
+    /* brief: 取所有"成熟可重传"的 user_seq（按时间升序，仅查询不修改）
      *  - max_age_sec：仅返回入队时间 ≤ now - max_age_sec 的项（避免立即重传刚入队的）
-     *  - limit：闭区间 [0, limit-1]，所以传 limit 实际拿 limit 条
+     *  - limit：最多返回 limit 条
      */
-    std::vector<std::string> drain(const std::string &uid,
-                                   long limit = 100,
-                                   long max_age_sec = 5) {
+    std::vector<std::string> peek_due(const std::string &uid,
+                                      long limit = 100,
+                                      long max_age_sec = 5) {
         std::vector<std::string> res;
         if(limit <= 0) return res;
         try {
             long long now = static_cast<long long>(time(nullptr));
-            // 按 score 范围拿（过滤掉太新的 unacked，让客户端有合理 ACK 窗口）
             using namespace sw::redis;
             _c->zrangebyscore(key::kUnacked + uid,
                               BoundedInterval<double>(0, static_cast<double>(now - max_age_sec),
@@ -569,10 +610,34 @@ public:
                               LimitOptions{0, limit},
                               std::back_inserter(res));
         } catch(std::exception &e) {
-            LOG_ERROR("UnackedPush.drain 失败 {}: {}", uid, e.what());
+            LOG_ERROR("UnackedPush.peek_due 失败 {}: {}", uid, e.what());
         }
         return res;
     }
+
+    /* brief: 触发重发后把这批 user_seq 的 score 重置为 now（推迟下次重传时机）
+     *  - 用 ZADD XX 仅当存在时才更新；若客户端已 ack，zrem 已经删除，本调用 no-op
+     *  - 配合 peek_due 使用：peek_due → 实际重发 → bump_score 推迟同批的下次重发
+     */
+    void bump_score(const std::string &uid,
+                    const std::vector<std::string> &user_seqs,
+                    std::chrono::seconds ttl = kUnackedTtl) {
+        if(user_seqs.empty()) return;
+        try {
+            std::string k = key::kUnacked + uid;
+            long long now = static_cast<long long>(time(nullptr));
+            using namespace sw::redis;
+            std::vector<std::pair<std::string, double>> items;
+            items.reserve(user_seqs.size());
+            for(const auto &s : user_seqs) items.emplace_back(s, static_cast<double>(now));
+            _c->zadd(k, items.begin(), items.end(), UpdateType::EXIST);
+            // 续期 key TTL，避免长期未 ack 项随整 key 7 天到期消失
+            _c->expire(k, ttl);
+        } catch(std::exception &e) {
+            LOG_ERROR("UnackedPush.bump_score 失败 {}: {}", uid, e.what());
+        }
+    }
+
 private:
     std::shared_ptr<sw::redis::Redis> _c;
 };

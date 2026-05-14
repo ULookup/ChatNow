@@ -254,8 +254,17 @@ public:
         return res;
     }
 
-    /* brief: 通用 update（高频细粒度修改请用下方专用接口） */
+    /* brief: 通用 update（高频细粒度修改请用下方专用接口）
+     *  - 注意：ODB 的 update 会写全行。chatsession 路径写回的 last_ack_seq /
+     *    last_read_seq 是 chatsession 进入事务时的快照值，可能已被 push 推进。
+     *  - 设计取舍：last_ack_seq / last_read_seq 的写权威在 push / message 服务，
+     *    它们走的是原子 UPDATE GREATEST(...)，永远以 DB 现值为准；
+     *    即使 chatsession 这次 update 把字段瞬时覆盖回旧值，下一条 ACK 到来时
+     *    GREATEST 会立即纠正，最坏一个 ACK 周期的偏差，业务可接受。
+     *  - 因此本路径不再额外加 SELECT FOR UPDATE 行锁防御，避免无谓的事务等待。
+     */
     bool update(const std::shared_ptr<ChatSessionMember> &csm) {
+        if(!csm) return false;
         try {
             odb::transaction trans(_db->begin());
             _db->update(*csm);
@@ -267,51 +276,72 @@ public:
         return true;
     }
 
-    /* brief: 推进已读游标（仅在新值 > 旧值时写）— 防止多端回滚 */
-    bool update_last_read_seq(const std::string &ssid, const std::string &uid, unsigned long new_seq) {
+    /* brief: 批量 update — 同事务内写多行，用于转让群主等需原子的多行变更 */
+    bool update(const std::vector<std::shared_ptr<ChatSessionMember>> &items) {
         try {
             odb::transaction trans(_db->begin());
-            using query = odb::query<ChatSessionMember>;
-            std::shared_ptr<ChatSessionMember> m(_db->query_one<ChatSessionMember>(
-                query::session_id == ssid && query::user_id == uid));
-            if(!m) {
-                trans.commit();
-                return false;
-            }
-            if(m->last_read_seq() < new_seq) {
-                m->last_read_seq(new_seq);
-                _db->update(*m);
+            for(const auto &csm : items) {
+                if(!csm) continue;
+                _db->update(*csm);
             }
             trans.commit();
         } catch(std::exception &e) {
-            LOG_ERROR("更新已读游标失败 {}-{}: {}", ssid, uid, e.what());
+            LOG_ERROR("批量更新会话成员失败: {}", e.what());
             return false;
         }
         return true;
     }
 
-    /* brief: 推进送达游标（多端送达回执，单调递增） */
+    /* brief: 推进已读游标（仅在新值 > 旧值时写）— 防止多端回滚 */
+    /* brief: 推进已读游标（多端已读，单调递增）— 原子 UPDATE GREATEST */
+    bool update_last_read_seq(const std::string &ssid, const std::string &uid, unsigned long new_seq) {
+        return _atomic_advance_seq("last_read_seq", ssid, uid, new_seq);
+    }
+
+    /* brief: 推进送达游标（多端送达回执，单调递增）— 原子 UPDATE GREATEST
+     *  - DB 层强保证单调；不会被其它服务的全行 UPDATE 覆盖回退
+     *  - 返回 true 表示 SQL 执行无异常（包括 GREATEST 等值不推进的幂等场景）
+     *  - 不区分"行不存在 vs 等值不推进"：调用方对两者均不重试（已退群 / 幂等重复）
+     */
     bool update_last_ack_seq(const std::string &ssid, const std::string &uid, unsigned long new_seq) {
+        return _atomic_advance_seq("last_ack_seq", ssid, uid, new_seq);
+    }
+
+private:
+    /* brief: 单字段原子推进 — UPDATE chat_session_member SET <col>=GREATEST(<col>, n) WHERE ssid=? AND uid=?
+     *  - column 必须是白名单常量字符串（来自代码内部，无外部输入），不需要转义
+     *  - ssid / uid 走最小转义（仅 ' 和 \）防御性兜底，避免上游脏数据触发注入
+     */
+    bool _atomic_advance_seq(const char *column, const std::string &ssid,
+                             const std::string &uid, unsigned long new_seq)
+    {
         try {
             odb::transaction trans(_db->begin());
-            using query = odb::query<ChatSessionMember>;
-            std::shared_ptr<ChatSessionMember> m(_db->query_one<ChatSessionMember>(
-                query::session_id == ssid && query::user_id == uid));
-            if(!m) {
-                trans.commit();
-                return false;
-            }
-            if(m->last_ack_seq() < new_seq) {
-                m->last_ack_seq(new_seq);
-                _db->update(*m);
-            }
+            std::ostringstream sql;
+            sql << "UPDATE chat_session_member SET " << column
+                << " = GREATEST(" << column << ", " << new_seq << ")"
+                << " WHERE session_id = '" << _escape_id(ssid) << "'"
+                << "   AND user_id = '"    << _escape_id(uid)  << "'";
+            _db->execute(sql.str());
             trans.commit();
+            return true;
         } catch(std::exception &e) {
-            LOG_ERROR("更新送达游标失败 {}-{}: {}", ssid, uid, e.what());
+            LOG_ERROR("推进 {} 失败 {}-{}: {}", column, ssid, uid, e.what());
             return false;
         }
-        return true;
     }
+
+    static std::string _escape_id(const std::string &s) {
+        std::string out;
+        out.reserve(s.size());
+        for(char c : s) {
+            if(c == '\'' || c == '\\') out.push_back('\\');
+            out.push_back(c);
+        }
+        return out;
+    }
+
+public:
 
     /* brief: 设置 / 取消禁言 — 通过 mute_until 自然过期，不需后台清理 */
     bool set_mute_until(const std::string &ssid, const std::string &uid,

@@ -65,6 +65,8 @@ message MessageInfo {
     uint64 seq_id = 6;
     // 客户端生成的消息唯一 ID（UUID），用于幂等去重
     string client_msg_id = 7;
+    // 接收者维度的 user_seq：仅服务端下行推送时填充。客户端构造 NotifyMsgPushAck 时必须回填此字段
+    optional uint64 user_seq = 8;
 }
 
 message Message {

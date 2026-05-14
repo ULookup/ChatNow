@@ -533,7 +533,7 @@ public:
         //5. 同步数据到数据库
         bool ret = _mysql_chat_session_member->update({csm, newcsm});
         if(ret == false) {
-            LOG_ERROR("请求ID - {} 同步转让数据到数据库失败");
+            LOG_ERROR("请求ID - {} 同步转让数据到数据库失败", rid);
             return err_response(rid, "同步转让数据到数据库失败");
         }
         //6. 组织响应
@@ -586,7 +586,7 @@ public:
             if(modifyer->role() == ChatSessionRole::OWNER) {
                 csm->role(role);
             } else {
-                LOG_ERROR("请求ID - {} 用户没有权限更改管理员 {} 的权限", rid, uid, cuid);
+                LOG_ERROR("请求ID - {} 用户 {} 没有权限更改管理员 {} 的权限", rid, uid, cuid);
                 return err_response(rid, "当前用户没有权限更改目标用户的权限");
             }
         } else {
@@ -724,14 +724,14 @@ public:
         //2. 取出用户在会话中的信息
         auto csm = _mysql_chat_session_member->select(ssid, uid);
         if(!csm) {
-            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid);
+            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid, ssid);
             return err_response(rid, "查询用户在会话中的信息失败");
         }
         //3. 更改免打扰状态并同步到数据库
         csm->muted(request->is_muted());
         bool ret = _mysql_chat_session_member->update(csm);
         if(ret == false) {
-            LOG_ERROR("请求ID - {} 用户 {} 更改在会话 {} 中的免打扰状态失败");
+            LOG_ERROR("请求ID - {} 用户 {} 更改在会话 {} 中的免打扰状态失败", rid, uid);
             return err_response(rid, "用户更改在会话中的免打扰状态失败");
         }
         //4. 组织响应
@@ -759,7 +759,7 @@ public:
         //2. 取出用户在会话中的信息
         auto csm = _mysql_chat_session_member->select(ssid, uid);
         if(!csm) {
-            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid);
+            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid, ssid);
             return err_response(rid, "查询用户在会话中的信息失败");
         }
         //3. 更改置顶状态
@@ -799,7 +799,7 @@ public:
         //2. 取出用户在会话中的信息
         auto csm = _mysql_chat_session_member->select(ssid, uid);
         if(!csm) {
-            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid);
+            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid, ssid);
             return err_response(rid, "查询用户在会话中的信息失败");
         }
         //3. 更改隐藏/显示状态
@@ -833,7 +833,7 @@ public:
         //2. 取出用户在会话中的信息
         auto csm = _mysql_chat_session_member->select(ssid, uid);
         if(!csm) {
-            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid);
+            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid, ssid);
             return err_response(rid, "查询用户在会话中的信息失败");
         }
         //3. 组织响应
@@ -873,7 +873,7 @@ public:
         //2. 取出用户在会话中的信息
         auto csm = _mysql_chat_session_member->select(ssid, uid);
         if(!csm) {
-            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid);
+            LOG_ERROR("请求ID - {} 查询用户 {} 在会话 {} 中的信息失败", rid, uid, ssid);
             return err_response(rid, "查询用户在会话中的信息失败");
         }
         //3. 鉴权，如果是群主则必须先转移群主
@@ -881,8 +881,8 @@ public:
             LOG_ERROR("请求ID - {} 该用户 {} 必须先转让群主", rid, uid);
             return err_response(rid, "该用户必须先转让群主");
         }
-        //4. 移除用户在数据库的信息
-        bool ret = _mysql_chat_session_member->remove(*csm);
+        //4. 软删除：set_quit 置 is_quit=true + quit_time + 计数 -1
+        bool ret = _mysql_chat_session_member->set_quit(ssid, uid);
         if(ret == false) {
             LOG_ERROR("请求ID - {} 用户 {} 退出会话 {} 失败", rid, uid, ssid);
             return err_response(rid, "用户退出会话失败");
@@ -908,15 +908,16 @@ public:
         std::string rid = request->request_id();
         std::string uid = request->user_id();
         std::string ssid = request->chat_session_id();
-        unsigned long msg_id = request->message_id();
+        // proto 字段名为 message_id，但本接口的语义是"已读位点 = 会话内 seq_id"，
+        // 与 chat_session_member.last_read_seq 字段对齐
+        unsigned long read_seq = request->message_id();
 
-        // 执行数据库更新
-        bool ret = _mysql_chat_session_member->update_last_read_msg(uid, ssid, msg_id);
+        bool ret = _mysql_chat_session_member->update_last_read_seq(ssid, uid, read_seq);
         if (ret == false) {
-            LOG_ERROR("请求ID - {} 更新会话成员 {} 已读消息ID失败", rid, uid);
-            err_response(rid, "更新会话成员已读消息ID失败");
+            LOG_ERROR("请求ID - {} 更新会话成员 {} 已读位点失败", rid, uid);
+            return err_response(rid, "更新会话成员已读位点失败");
         }
-        LOG_INFO("REQ: {} - 用户 {} 在会话 {} 已读至 {}", rid, uid, ssid, msg_id);
+        LOG_INFO("REQ: {} - 用户 {} 在会话 {} 已读至 seq={}", rid, uid, ssid, read_seq);
         response->set_request_id(rid);
         response->set_success(true);
     }
