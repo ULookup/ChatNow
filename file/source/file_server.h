@@ -9,8 +9,10 @@
 #include "infra/etcd.hpp"
 #include "infra/logger.hpp"
 #include "utils/utils.hpp"
-#include "base.pb.h"
-#include "file.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "media/media_service.pb.h"
 
 namespace chatnow
 {

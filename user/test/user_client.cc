@@ -4,8 +4,10 @@
 #include <gtest/gtest.h>
 #include <thread>
 #include "utils/utils.hpp"
-#include "user.pb.h"
-#include "base.pb.h"
+#include "identity/identity_service.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");

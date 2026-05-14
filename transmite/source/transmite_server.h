@@ -8,11 +8,14 @@
 #include "infra/snowflake.hpp"
 #include "dao/data_redis.hpp"
 #include "utils/worker_id.hpp"
-#include "base.pb.h"
-#include "user.pb.h"
-#include "chatsession.pb.h"
-#include "message.pb.h"
-#include "transmite.pb.h"  // protobuf框架代码
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "identity/identity_service.pb.h"
+#include "conversation/conversation_service.pb.h"
+#include "message/message_types.pb.h"
+#include "message/message_service.pb.h"
+#include "transmite/transmite_service.pb.h"
 #include <brpc/server.h>
 #include <butil/logging.h>
 #include <atomic>

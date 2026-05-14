@@ -6,8 +6,10 @@
 #include "mq/channel.hpp"
 #include "infra/etcd.hpp"
 #include "utils/utils.hpp"
-#include "file.pb.h"
-#include "base.pb.h"
+#include "media/media_service.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
 #include <gflags/gflags.h>
 #include <gtest/gtest.h>
 #include <thread>

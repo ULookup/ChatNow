@@ -8,9 +8,11 @@
 #include "dao/data_es.hpp"      // es数据管理客户端封装
 #include "dao/mysql_user.hpp"   // mysql数据管理客户端封装
 #include "dao/data_redis.hpp"   // redis数据管理客户端封装
-#include "base.pb.h"
-#include "user.pb.h"        // protobuf框架代码
-#include "file.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "identity/identity_service.pb.h"
+#include "media/media_service.pb.h"
 
 
 namespace chatnow

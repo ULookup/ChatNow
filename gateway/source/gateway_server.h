@@ -15,17 +15,19 @@
 // 不再 include "connection.hpp"，不再监听 9001 端口，不再维护 uid→conn 映射。
 
 /* protobuf 框架代码 */
-#include "base.pb.h"
-#include "speech.pb.h"
-#include "file.pb.h"
-#include "user.pb.h"
-#include "transmite.pb.h"
-#include "message.pb.h"
-#include "friend.pb.h"
-#include "chatsession.pb.h"
-#include "gateway.pb.h"
-#include "notify.pb.h"
-#include "push.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "common/presence.pb.h"
+#include "identity/identity_service.pb.h"
+#include "relationship/relationship_service.pb.h"
+#include "conversation/conversation_service.pb.h"
+#include "message/message_types.pb.h"
+#include "message/message_service.pb.h"
+#include "media/media_service.pb.h"
+#include "push/notify.pb.h"
+#include "push/push_service.pb.h"
+#include "transmite/transmite_service.pb.h"
 
 namespace chatnow
 {

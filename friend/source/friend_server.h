@@ -12,10 +12,13 @@
 #include "dao/mysql_relation.hpp"   // mysql数据管理客户端封装
 #include "dao/mysql_friend_apply.hpp"   // mysql数据管理客户端封装
 #include "dao/data_redis.hpp"   // redis数据管理客户端封装
-#include "base.pb.h"
-#include "user.pb.h"        // protobuf框架代码
-#include "message.pb.h"
-#include "friend.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "identity/identity_service.pb.h"
+#include "message/message_types.pb.h"
+#include "message/message_service.pb.h"
+#include "relationship/relationship_service.pb.h"
 
 
 namespace chatnow

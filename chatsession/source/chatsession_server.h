@@ -10,11 +10,14 @@
 #include "dao/mysql_chat_session.hpp"   // mysql数据管理客户端封装
 #include "dao/data_es.hpp"
 #include "dao/data_redis.hpp"   // Members 缓存
-#include "base.pb.h"
-#include "chatsession.pb.h"
-#include "user.pb.h"
-#include "file.pb.h"
-#include "message.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "conversation/conversation_service.pb.h"
+#include "identity/identity_service.pb.h"
+#include "media/media_service.pb.h"
+#include "message/message_types.pb.h"
+#include "message/message_service.pb.h"
 
 namespace chatnow
 {

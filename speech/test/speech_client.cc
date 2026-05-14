@@ -7,7 +7,10 @@
 #include "mq/channel.hpp"
 #include "infra/etcd.hpp"
 #include "infra/asr.hpp"
-#include "speech.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "media/media_service.pb.h"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");

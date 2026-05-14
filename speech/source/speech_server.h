@@ -1,7 +1,10 @@
 #include "infra/asr.hpp"      // 语言识别模块封装
 #include "infra/etcd.hpp"     // 服务注册模块封装
 #include "infra/logger.hpp"   // 日志模块封装
-#include "speech.pb.h"  // protobuf框架代码
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "media/media_service.pb.h"
 #include <brpc/server.h>    //
 #include <butil/logging.h>  // 实现语音识别子服务
 

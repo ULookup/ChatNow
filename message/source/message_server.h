@@ -15,11 +15,13 @@
 #include "message.hxx"
 #include "user_timeline.hxx"
 
-#include "base.pb.h"
-#include "message.pb.h"
-#include "file.pb.h"
-#include "user.pb.h"
-#include "chatsession.pb.h"
+#include "common/types.pb.h"
+#include "common/error.pb.h"
+#include "common/envelope.pb.h"
+#include "message/message_types.pb.h"
+#include "message/message_service.pb.h"
+#include "message/message_internal.pb.h"
+#include "identity/identity_service.pb.h"
 #include <atomic>
 #include <chrono>
 #include <thread>
