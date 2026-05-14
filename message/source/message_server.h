@@ -1088,6 +1088,7 @@ public:
         _redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
         _seq_gen = std::make_shared<SeqGen>(_redis);
         _push_outbox = std::make_shared<PushOutbox>(_redis);
+        _es_outbox = std::make_shared<ESOutbox>(_redis);
     }
     /* brief: 构造推送队列 Publisher（写 timeline 后向 push_queue 投递） */
     void make_push_publisher(const std::string &exchange,
@@ -1105,6 +1106,44 @@ public:
             .binding_key = binding_key
         };
         _push_publisher = std::make_shared<Publisher>(_mq_client, _push_settings);
+    }
+    /* brief: 构造 ES 索引 Publisher（onDBMessage 在 DB commit 后投递 ESIndexEvent） */
+    void make_es_publisher(const std::string &exchange,
+                           const std::string &queue,
+                           const std::string &binding_key)
+    {
+        if(!_mq_client) {
+            LOG_WARN("MQ 未初始化，跳过 ES publisher");
+            return;
+        }
+        _es_pub_settings = {
+            .exchange = exchange,
+            .exchange_type = chatnow::DIRECT,
+            .queue = queue,
+            .binding_key = binding_key
+        };
+        _es_publisher = std::make_shared<Publisher>(_mq_client, _es_pub_settings);
+    }
+    /* brief: 构造 ES 索引事件消费者（DB commit 后投递的 ESIndexEvent） */
+    void make_es_index_subscriber(const std::string &exchange,
+                                   const std::string &queue,
+                                   const std::string &binding_key)
+    {
+        if(!_mq_client) {
+            LOG_WARN("MQ 未初始化，跳过 ES index subscriber");
+            return;
+        }
+        _es_index_settings = {
+            .exchange = exchange,
+            .exchange_type = chatnow::DIRECT,
+            .queue = queue,
+            .binding_key = binding_key
+        };
+        auto dummy_cb = [](const char*, size_t, bool) -> chatnow::ConsumeAction {
+            return chatnow::ConsumeAction::Ack;
+        };
+        _subscriber_es_index = chatnow::MQFactory::create<chatnow::Subscriber>(
+            _mq_client, _es_index_settings, dummy_cb);
     }
     /* brief: 构造mysql客户端对象 */
     void make_mysql_object(const std::string &user,
@@ -1215,7 +1254,8 @@ public:
             _mm_channels, _es_client, _mysql_client,
             _subscriber_db, _subscriber_es,
             _db_queue_settings, _es_queue_settings,
-            _seq_gen, _push_publisher, _push_outbox);
+            _seq_gen, _push_publisher, _push_outbox,
+            _es_publisher, _es_outbox);
         _service_impl = message_service;  // 观察指针，build() 时透传给 MessageServer
         int ret = _rpc_server->AddService(message_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
@@ -1238,6 +1278,11 @@ public:
         LOG_INFO("开始向 Broker 订阅消费者队列...");
         _subscriber_db->consume(std::move(callback_db));
         _subscriber_es->consume(std::move(callback_es));
+        if(_subscriber_es_index) {
+            auto callback_es_index = std::bind(&MessageServiceImpl::onESIndexMessage, message_service,
+                                               std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+            _subscriber_es_index->consume(std::move(callback_es_index));
+        }
         LOG_INFO("队列订阅完成，服务全面启动！");
 
         // M3: 启动 PushOutbox reaper（多副本只一个实例真正消费，靠 Redis SET NX EX 选主）
@@ -1314,6 +1359,11 @@ private:
     std::shared_ptr<sw::redis::Redis> _redis;
     SeqGen::ptr _seq_gen;
     PushOutbox::ptr _push_outbox;
+    Publisher::ptr _es_publisher;
+    ESOutbox::ptr  _es_outbox;
+    declare_settings _es_pub_settings;
+    declare_settings _es_index_settings;
+    Subscriber::ptr _subscriber_es_index;
     std::string _reaper_owner;
     MessageServiceImpl *_service_impl {nullptr};  // brpc 拥有，仅观察指针用
 
