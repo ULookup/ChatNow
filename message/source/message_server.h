@@ -794,57 +794,76 @@ public:
     }
 
     ConsumeAction onESMessage(const char *body, size_t sz, bool redelivered) {
-        // 1. 先尝试解析 ESIndexEvent（新路径）
-        ESIndexEvent es_event;
-        if(es_event.ParseFromArray(body, sz)) {
-            if(es_event.message_type() != MessageType::STRING) {
-                LOG_WARN("ES-Consumer: 收到非文本 ESIndexEvent mid={}", es_event.message_id());
-                return ConsumeAction::Ack;
-            }
-            bool ret = _es_client->appendData(
-                es_event.user_id(),
-                static_cast<unsigned long>(es_event.message_id()),
-                es_event.timestamp(),
-                es_event.chat_session_id(),
-                es_event.content()
-            );
-            if(!ret) {
-                if(redelivered) {
-                    LOG_ERROR("ES-Consumer: ESIndexEvent 二次失败转 DLX mid={}", es_event.message_id());
-                    return ConsumeAction::NackDiscard;
-                }
-                LOG_ERROR("ES-Consumer: ESIndexEvent 写入 ES 失败（首次），重投 mid={}", es_event.message_id());
-                return ConsumeAction::NackRequeue;
-            }
-            LOG_DEBUG("ES-Consumer: ESIndexEvent 索引成功 mid={}", es_event.message_id());
+        // 1. 反序列化 Protobuf
+        chatnow::InternalMessage internal_msg;
+        if (!internal_msg.ParseFromArray(body, sz)) {
+            LOG_ERROR("ES-Consumer: 反序列化失败，无法写入索引");
+            return ConsumeAction::NackDiscard;
+        }
+
+        const auto &msg_info = internal_msg.message_info();
+
+        // 2. 过滤：非文本消息不进 ES
+        if (msg_info.message().message_type() != chatnow::MessageType::STRING) {
             return ConsumeAction::Ack;
         }
 
-        // 2. 回退兼容旧路径 InternalMessage（过渡期 FANOUT 残留消息）
-        chatnow::InternalMessage internal_msg;
-        if(!internal_msg.ParseFromArray(body, sz)) {
-            LOG_ERROR("ES-Consumer: 反序列化 ESIndexEvent/InternalMessage 均失败");
-            return ConsumeAction::NackDiscard;
-        }
-        const auto &msg_info = internal_msg.message_info();
-        if(msg_info.message().message_type() != chatnow::MessageType::STRING) {
-            return ConsumeAction::Ack;
-        }
+        // 3. 提取字段
         std::string user_id = msg_info.sender().user_id();
         unsigned long message_id = msg_info.message_id();
         long create_time = msg_info.timestamp();
         std::string session_id = msg_info.chat_session_id();
         std::string content = msg_info.message().string_message().content();
-        bool ret = _es_client->appendData(user_id, message_id, create_time, session_id, content);
-        if(!ret) {
+
+        // 4. 调用你的封装接口写入数据
+        bool ret = _es_client->appendData(
+            user_id,
+            message_id,
+            create_time,
+            session_id,
+            content
+        );
+
+        if (!ret) {
             if(redelivered) {
-                LOG_ERROR("ES-Consumer: InternalMessage 二次失败转 DLX mid={}", message_id);
+                LOG_ERROR("[ES-Consumer] 二次失败转 DLX mid={}", message_id);
                 return ConsumeAction::NackDiscard;
             }
-            LOG_ERROR("ES-Consumer: InternalMessage 写入 ES 失败（首次），重投 mid={}", message_id);
+            LOG_ERROR("[ES-Consumer] 写入 ES 失败（首次），重投: MsgID={}", message_id);
+            return ConsumeAction::NackRequeue;
+        } else {
+            LOG_DEBUG("[ES-Consumer] 索引成功: MsgID={}", message_id);
+            return ConsumeAction::Ack;
+        }
+    }
+
+    /* brief: ES 索引事件消费（新路径：DB commit 后投递 ESIndexEvent） */
+    ConsumeAction onESIndexMessage(const char *body, size_t sz, bool redelivered) {
+        ESIndexEvent es_event;
+        if(!es_event.ParseFromArray(body, sz)) {
+            LOG_ERROR("ES-Index-Consumer: 反序列化 ESIndexEvent 失败");
+            return ConsumeAction::NackDiscard;
+        }
+        if(es_event.message_type() != MessageType::STRING) {
+            LOG_WARN("ES-Index-Consumer: 收到非文本消息 mid={}", es_event.message_id());
+            return ConsumeAction::Ack;
+        }
+        bool ret = _es_client->appendData(
+            es_event.user_id(),
+            static_cast<unsigned long>(es_event.message_id()),
+            es_event.timestamp(),
+            es_event.chat_session_id(),
+            es_event.content()
+        );
+        if(!ret) {
+            if(redelivered) {
+                LOG_ERROR("ES-Index-Consumer: 二次失败转 DLX mid={}", es_event.message_id());
+                return ConsumeAction::NackDiscard;
+            }
+            LOG_ERROR("ES-Index-Consumer: 写入 ES 失败（首次），重投 mid={}", es_event.message_id());
             return ConsumeAction::NackRequeue;
         }
-        LOG_DEBUG("ES-Consumer: InternalMessage(兼容) 索引成功 mid={}", message_id);
+        LOG_DEBUG("ES-Index-Consumer: 索引成功 mid={}", es_event.message_id());
         return ConsumeAction::Ack;
     }
 private:
