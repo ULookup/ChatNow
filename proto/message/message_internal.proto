@@ -1,0 +1,26 @@
+syntax = "proto3";
+package chatnow.message.internal;
+
+import "message/message_types.proto";
+
+message UserSeqPair {
+    string user_id = 1;
+    uint64 user_seq = 2;
+}
+
+message InternalMessage {
+    Message message = 1;
+    repeated string member_id_list = 2;
+    repeated UserSeqPair user_seqs = 3;
+    bool is_large_group = 4;
+}
+
+message ESIndexEvent {
+    int64 message_id = 1;
+    string conversation_id = 2;
+    string sender_id = 3;
+    string content_text = 4;
+    int64 created_at_ms = 5;
+    uint64 seq_id = 6;
+    MessageType message_type = 7;
+}

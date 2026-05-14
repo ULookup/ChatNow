@@ -1,0 +1,130 @@
+syntax = "proto3";
+package chatnow.message;
+
+import "common/types.proto";
+
+enum MessageType {
+    MESSAGE_TYPE_UNSPECIFIED = 0;
+    TEXT = 1;
+    IMAGE = 2;
+    FILE = 3;
+    AUDIO = 4;
+    VIDEO = 5;
+    LOCATION = 6;
+    STICKER = 7;
+    SYSTEM_NOTICE = 8;
+}
+
+enum MessageStatus {
+    MESSAGE_STATUS_NORMAL = 0;
+    MESSAGE_STATUS_RECALLED = 1;
+    MESSAGE_STATUS_DELETED = 2;
+}
+
+message TextContent { string text = 1; }
+
+message ImageContent {
+    string file_id = 1;
+    int32 width = 2;
+    int32 height = 3;
+    string thumbnail_url = 4;
+}
+
+message FileContent {
+    string file_id = 1;
+    string file_name = 2;
+    int64 file_size = 3;
+    string mime_type = 4;
+}
+
+message AudioContent {
+    string file_id = 1;
+    int32 duration_sec = 2;
+}
+
+message VideoContent {
+    string file_id = 1;
+    int32 duration_sec = 2;
+    int32 width = 3;
+    int32 height = 4;
+    string thumbnail_url = 5;
+}
+
+message LocationContent {
+    double latitude = 1;
+    double longitude = 2;
+    string name = 3;
+    string address = 4;
+}
+
+message StickerContent {
+    string sticker_id = 1;
+    string pack_id = 2;
+}
+
+message SystemNoticeContent {
+    string text = 1;
+    string notice_type = 2;
+}
+
+message MessageContent {
+    MessageType type = 1;
+    oneof body {
+        TextContent text = 2;
+        ImageContent image = 3;
+        FileContent file = 4;
+        AudioContent audio = 5;
+        VideoContent video = 6;
+        LocationContent location = 7;
+        StickerContent sticker = 8;
+        SystemNoticeContent notice = 9;
+    }
+}
+
+message Message {
+    int64 message_id = 1;
+    string conversation_id = 2;
+    MessageContent content = 3;
+    string sender_id = 4;
+    int64 created_at_ms = 5;
+    int64 edited_at_ms = 6;
+    uint64 seq_id = 7;
+    uint64 user_seq = 8;
+    string client_msg_id = 9;
+    MessageStatus status = 10;
+    optional ReplyRef reply_to = 11;
+    repeated string mentioned_user_ids = 12;
+    optional ForwardInfo forward_info = 13;
+    repeated ReactionGroup reactions = 14;
+    bool is_pinned = 15;
+}
+
+message ReplyRef {
+    int64 replied_message_id = 1;
+    string replied_sender_id = 2;
+    MessageType replied_message_type = 3;
+    string content_preview = 4;
+    bool is_recalled = 5;
+}
+
+message ReactionGroup {
+    string emoji = 1;
+    int32 count = 2;
+    repeated string recent_user_ids = 3;
+    bool self_reacted = 4;
+}
+
+message ForwardInfo {
+    string forward_from_user_id = 1;
+    int64 forward_at_ms = 2;
+    string source_conversation_id = 3;
+}
+
+message MessagePreview {
+    int64 message_id = 1;
+    string sender_id = 2;
+    MessageType message_type = 3;
+    string content_preview = 4;
+    int64 sent_at_ms = 5;
+    MessageStatus status = 6;
+}

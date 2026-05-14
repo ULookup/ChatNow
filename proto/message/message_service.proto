@@ -1,0 +1,155 @@
+syntax = "proto3";
+package chatnow.message;
+
+import "common/envelope.proto";
+import "message/message_types.proto";
+
+service MessageService {
+    rpc SyncMessages(SyncMessagesReq) returns (SyncMessagesRsp);
+    rpc GetHistory(GetHistoryReq) returns (GetHistoryRsp);
+    rpc GetMessagesById(GetMessagesByIdReq) returns (GetMessagesByIdRsp);
+    rpc SearchMessages(SearchMessagesReq) returns (SearchMessagesRsp);
+    rpc RecallMessage(RecallMessageReq) returns (RecallMessageRsp);
+    rpc AddReaction(AddReactionReq) returns (AddReactionRsp);
+    rpc RemoveReaction(RemoveReactionReq) returns (RemoveReactionRsp);
+    rpc GetReactions(GetReactionsReq) returns (GetReactionsRsp);
+    rpc PinMessage(PinMessageReq) returns (PinMessageRsp);
+    rpc UnpinMessage(UnpinMessageReq) returns (UnpinMessageRsp);
+    rpc ListPinnedMessages(ListPinnedReq) returns (ListPinnedRsp);
+    rpc DeleteMessages(DeleteMessagesReq) returns (DeleteMessagesRsp);
+    rpc ClearConversation(ClearConversationReq) returns (ClearConversationRsp);
+    rpc SelectByClientMsgId(SelectByClientMsgIdReq) returns (SelectByClientMsgIdRsp);
+    rpc UpdateReadAck(UpdateReadAckReq) returns (UpdateReadAckRsp);
+}
+
+message SyncMessagesReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    uint64 after_seq = 3;
+    int32 limit = 4;
+}
+message SyncMessagesRsp {
+    ResponseHeader header = 1;
+    repeated Message messages = 2;
+    bool has_more = 3;
+    uint64 latest_seq = 4;
+}
+
+message GetHistoryReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    uint64 before_seq = 3;
+    int32 limit = 4;
+}
+message GetHistoryRsp {
+    ResponseHeader header = 1;
+    repeated Message messages = 2;
+    bool has_more = 3;
+}
+
+message GetMessagesByIdReq {
+    string request_id = 1;
+    repeated int64 message_ids = 2;
+}
+message GetMessagesByIdRsp {
+    ResponseHeader header = 1;
+    repeated Message messages = 2;
+}
+
+message SearchMessagesReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    string keyword = 3;
+    int32 limit = 4;
+    string cursor = 5;
+}
+message SearchMessagesRsp {
+    ResponseHeader header = 1;
+    repeated Message messages = 2;
+    bool has_more = 3;
+    string next_cursor = 4;
+}
+
+message RecallMessageReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    int64 message_id = 3;
+}
+message RecallMessageRsp { ResponseHeader header = 1; }
+
+message AddReactionReq {
+    string request_id = 1;
+    int64 message_id = 2;
+    string emoji = 3;
+}
+message AddReactionRsp { ResponseHeader header = 1; }
+
+message RemoveReactionReq {
+    string request_id = 1;
+    int64 message_id = 2;
+    string emoji = 3;
+}
+message RemoveReactionRsp { ResponseHeader header = 1; }
+
+message GetReactionsReq {
+    string request_id = 1;
+    int64 message_id = 2;
+}
+message GetReactionsRsp {
+    ResponseHeader header = 1;
+    repeated ReactionGroup reactions = 2;
+}
+
+message PinMessageReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    int64 message_id = 3;
+}
+message PinMessageRsp { ResponseHeader header = 1; }
+
+message UnpinMessageReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    int64 message_id = 3;
+}
+message UnpinMessageRsp { ResponseHeader header = 1; }
+
+message ListPinnedReq {
+    string request_id = 1;
+    string conversation_id = 2;
+}
+message ListPinnedRsp {
+    ResponseHeader header = 1;
+    repeated Message messages = 2;
+}
+
+message DeleteMessagesReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    repeated int64 message_ids = 3;
+}
+message DeleteMessagesRsp { ResponseHeader header = 1; }
+
+message ClearConversationReq {
+    string request_id = 1;
+    string conversation_id = 2;
+}
+message ClearConversationRsp { ResponseHeader header = 1; }
+
+message SelectByClientMsgIdReq {
+    string request_id = 1;
+    string user_id = 2;
+    string client_msg_id = 3;
+}
+message SelectByClientMsgIdRsp {
+    ResponseHeader header = 1;
+    Message message = 2;
+}
+
+message UpdateReadAckReq {
+    string request_id = 1;
+    string user_id = 2;
+    string conversation_id = 3;
+    uint64 seq_id = 4;
+}
+message UpdateReadAckRsp { ResponseHeader header = 1; }
