@@ -793,6 +793,56 @@ public:
         if(_reaper_thread.joinable()) _reaper_thread.join();
     }
 
+    void start_es_outbox_reaper(const std::string &owner) {
+        if(!_es_outbox || !_es_publisher) {
+            LOG_WARN("ES outbox reaper 未启动：es_outbox / es_publisher 未注入");
+            return;
+        }
+        constexpr int kReapIntervalSec = 5;
+        constexpr int kLeaseTtlSec     = 30;
+        constexpr int kBatchLimit      = 50;
+        _es_reaper_running.store(true);
+        _es_reaper_owner = owner;
+        _es_reaper_thread = std::thread([this]() {
+            while(_es_reaper_running.load()) {
+                try {
+                    if(!_es_outbox->try_acquire_reaper_lease(_es_reaper_owner, kLeaseTtlSec)) {
+                        std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+                        continue;
+                    }
+                    auto batch = _es_outbox->peek(kBatchLimit);
+                    if(batch.empty()) {
+                        std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+                        continue;
+                    }
+                    LOG_INFO("ES outbox reaper: 取出 {} 条待重投", batch.size());
+                    for(const auto &payload : batch) _es_outbox->remove(payload);
+                    auto es_outbox = _es_outbox;
+                    for(const auto &payload : batch) {
+                        std::string p = payload;
+                        _es_publisher->publish_confirm(p,
+                            [es_outbox, p](PublishStatus st, const std::string &err) {
+                                if(st == PublishStatus::Acked) return;
+                                LOG_WARN("ES outbox reaper 重投仍失败: {}", err);
+                                if(es_outbox) es_outbox->enqueue(
+                                    p, static_cast<long long>(time(nullptr)));
+                            });
+                    }
+                } catch(std::exception &e) {
+                    LOG_ERROR("ES outbox reaper 异常: {}", e.what());
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+            }
+            if(_es_outbox) _es_outbox->release_reaper_lease(_es_reaper_owner);
+            LOG_INFO("ES outbox reaper 已停止");
+        });
+    }
+
+    void stop_es_outbox_reaper() {
+        _es_reaper_running.store(false);
+        if(_es_reaper_thread.joinable()) _es_reaper_thread.join();
+    }
+
     ConsumeAction onESMessage(const char *body, size_t sz, bool redelivered) {
         // 1. 反序列化 Protobuf
         chatnow::InternalMessage internal_msg;
@@ -971,6 +1021,11 @@ private:
     std::atomic<bool> _reaper_running {false};
     std::thread _reaper_thread;
     std::string _reaper_owner;
+
+    // ES outbox reaper 状态
+    std::atomic<bool> _es_reaper_running {false};
+    std::thread _es_reaper_thread;
+    std::string _es_reaper_owner;
 };
 
 class MessageServer
@@ -1002,7 +1057,10 @@ public:
     void start() {
         _rpc_server->RunUntilAskedToQuit();
         // 关停顺序：reaper → MQ ev 线程 → brpc Join → brpc::Server 析构 delete impl
-        if(_service_impl) _service_impl->stop_outbox_reaper();
+        if(_service_impl) {
+            _service_impl->stop_outbox_reaper();
+            _service_impl->stop_es_outbox_reaper();
+        }
         _mq_client.reset();
         _rpc_server->Join();
         LOG_INFO("Message 关停完成");
@@ -1186,6 +1244,7 @@ public:
         std::string owner = _reaper_owner.empty()
             ? std::to_string(::getpid()) : _reaper_owner;
         message_service->start_outbox_reaper(owner);
+        message_service->start_es_outbox_reaper(owner);
     }
     /* brief: 设置 reaper owner 标识（access_host:pid 等），用于多实例租约辨识 */
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
