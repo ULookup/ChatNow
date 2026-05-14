@@ -1,0 +1,125 @@
+syntax = "proto3";
+package chatnow.identity;
+
+import "common/envelope.proto";
+import "common/types.proto";
+
+service IdentityService {
+    rpc Register(RegisterReq) returns (RegisterRsp);
+    rpc Login(LoginReq) returns (LoginRsp);
+    rpc Logout(LogoutReq) returns (LogoutRsp);
+    rpc SendVerifyCode(SendVerifyCodeReq) returns (SendVerifyCodeRsp);
+    rpc RefreshToken(RefreshTokenReq) returns (RefreshTokenRsp);
+    rpc GetProfile(GetProfileReq) returns (GetProfileRsp);
+    rpc UpdateProfile(UpdateProfileReq) returns (UpdateProfileRsp);
+    rpc SearchUsers(SearchUsersReq) returns (SearchUsersRsp);
+    rpc GetMultiUserInfo(GetMultiUserInfoReq) returns (GetMultiUserInfoRsp);
+}
+
+message UsernamePassword {
+    string username = 1;
+    string password = 2;
+}
+
+message PhoneVerifyCode {
+    string phone = 1;
+    string verify_code_id = 2;
+    string verify_code = 3;
+}
+
+message RegisterReq {
+    string request_id = 1;
+    oneof credential {
+        UsernamePassword username_pwd = 2;
+        PhoneVerifyCode phone_code = 3;
+    }
+    string nickname = 4;
+}
+message RegisterRsp {
+    ResponseHeader header = 1;
+    string user_id = 2;
+}
+
+message LoginReq {
+    string request_id = 1;
+    oneof credential {
+        UsernamePassword username_pwd = 2;
+        PhoneVerifyCode phone_code = 3;
+    }
+    string device_id = 4;
+    string device_name = 5;
+}
+message LoginRsp {
+    ResponseHeader header = 1;
+    string login_session_id = 2;
+    UserInfo user_info = 3;
+}
+
+message LogoutReq {
+    string request_id = 1;
+    string user_id = 2;
+    string session_id = 3;
+}
+message LogoutRsp { ResponseHeader header = 1; }
+
+message SendVerifyCodeReq {
+    string request_id = 1;
+    string phone = 2;
+}
+message SendVerifyCodeRsp {
+    ResponseHeader header = 1;
+    string verify_code_id = 2;
+}
+
+message RefreshTokenReq {
+    string request_id = 1;
+    string session_id = 2;
+}
+message RefreshTokenRsp {
+    ResponseHeader header = 1;
+    string new_session_id = 2;
+}
+
+message GetProfileReq {
+    string request_id = 1;
+    optional string user_id = 2;      // 空=查自己
+    optional string session_id = 3;
+}
+message GetProfileRsp {
+    ResponseHeader header = 1;
+    UserInfo user_info = 2;
+}
+
+message UpdateProfileReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    optional string nickname = 4;
+    optional string bio = 5;
+    optional string avatar_url = 6;
+    optional string phone = 7;
+}
+message UpdateProfileRsp {
+    ResponseHeader header = 1;
+    UserInfo user_info = 2;
+}
+
+message SearchUsersReq {
+    string request_id = 1;
+    string search_key = 2;
+    optional string session_id = 3;
+    optional string user_id = 4;
+}
+message SearchUsersRsp {
+    ResponseHeader header = 1;
+    repeated UserInfo user_info = 2;
+}
+
+message GetMultiUserInfoReq {
+    string request_id = 1;
+    repeated string users_id = 2;
+}
+message GetMultiUserInfoRsp {
+    ResponseHeader header = 1;
+    map<string, UserInfo> users_info = 2;
+}
