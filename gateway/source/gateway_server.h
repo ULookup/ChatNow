@@ -18,7 +18,7 @@
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
-#include "common/presence.pb.h"
+#include "presence/presence_service.pb.h"
 #include "identity/identity_service.pb.h"
 #include "relationship/relationship_service.pb.h"
 #include "conversation/conversation_service.pb.h"

@@ -10,7 +10,7 @@
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
-#include "common/presence.pb.h"
+#include "presence/presence_service.pb.h"
 #include "push/notify.pb.h"
 #include "push/push_service.pb.h"
 #include "message/message_types.pb.h"
