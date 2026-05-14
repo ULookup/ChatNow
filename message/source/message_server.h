@@ -1109,6 +1109,7 @@ public:
             LOG_ERROR("服务启动失败!");
             abort();
         }
+        _backfill_seq_from_db();
         auto callback_db = std::bind(&MessageServiceImpl::onDBMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
         auto callback_es = std::bind(&MessageServiceImpl::onESMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
 
@@ -1124,6 +1125,29 @@ public:
     }
     /* brief: 设置 reaper owner 标识（access_host:pid 等），用于多实例租约辨识 */
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
+    /* brief: 启动时从 DB 回填 Redis session_seq / user_seq */
+    void _backfill_seq_from_db() {
+        if(!_seq_gen || !_mysql_client) {
+            LOG_WARN("SeqGen / MySQL 未初始化，跳过 seq 回填");
+            return;
+        }
+        LOG_INFO("开始从 DB 回填 seq 到 Redis...");
+
+        auto msg_table = std::make_shared<MessageTable>(_mysql_client);
+        auto timeline_table = std::make_shared<UserTimeLineTable>(_mysql_client);
+
+        auto session_seqs = msg_table->select_max_seq_by_session();
+        for(const auto &[ssid, max_seq] : session_seqs) {
+            if(max_seq > 0) _seq_gen->backfill_session(ssid, max_seq + 1);
+        }
+        LOG_INFO("回填 session_seq 完成: {} 个会话", session_seqs.size());
+
+        auto user_seqs = timeline_table->select_max_user_seq();
+        for(const auto &[uid, max_seq] : user_seqs) {
+            if(max_seq > 0) _seq_gen->backfill_user(uid, max_seq + 1);
+        }
+        LOG_INFO("回填 user_seq 完成: {} 个用户", user_seqs.size());
+    }
     MessageServer::ptr build() {
         if(!_service_discover) {
             LOG_ERROR("还未初始化服务发现模块");
