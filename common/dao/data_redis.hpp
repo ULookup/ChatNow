@@ -48,6 +48,12 @@ namespace key
     inline constexpr const char* kPushOutboxLock = "im:push:outbox:lock";  // M3 reaper 单实例租约 key
     inline constexpr const char* kCrossOutbox     = "im:push:cross_outbox";
     inline constexpr const char* kCrossOutboxLock = "im:push:cross_outbox:lock";
+
+    // --- Presence 域（Push 内模块） ---
+    inline constexpr const char* kPresence        = "im:presence:";         // {uid} → HASH {state,last_active,custom_status}
+    inline constexpr const char* kPresenceDevices = "im:presence:devices:"; // {uid} → SET<device_id>, TTL 120s
+    inline constexpr const char* kPresenceTyping  = "im:presence:typing:";  // {uid} → SET<conversation_id>, TTL 10s
+    inline constexpr const char* kPresenceSub     = "im:presence:sub:";     // {uid} → SET<user_id>
 } // namespace key
 
 /* brief: 默认 TTL 常量 */
@@ -797,6 +803,71 @@ public:
 
 private:
     std::shared_ptr<sw::redis::Redis> _c;
+};
+
+// =============================================================================
+// Presence 状态管理（Push 进程内调用，无 RPC 开销）
+// =============================================================================
+
+class PresenceRedis
+{
+public:
+    using ptr = std::shared_ptr<PresenceRedis>;
+    PresenceRedis(const std::shared_ptr<sw::redis::Redis> &r) : _r(r) {}
+
+    /* 设置状态 */
+    void set_state(const std::string &uid, const std::string &state) {
+        _r->hset(key::kPresence + uid, "state", state);
+    }
+
+    /* 获取状态 */
+    std::string get_state(const std::string &uid) {
+        auto v = _r->hget(key::kPresence + uid, "state");
+        return v ? *v : "offline";
+    }
+
+    /* 更新最后活跃时间 */
+    void touch_active(const std::string &uid, int64_t ts_ms) {
+        _r->hset(key::kPresence + uid, "last_active", std::to_string(ts_ms));
+    }
+
+    /* 设置自定义状态 */
+    void set_custom_status(const std::string &uid, const std::string &text) {
+        _r->hset(key::kPresence + uid, "custom_status", text);
+    }
+
+    /* 添加在线设备（心跳续期） */
+    void add_device(const std::string &uid, const std::string &device_id) {
+        auto k = key::kPresenceDevices + uid;
+        _r->sadd(k, device_id);
+        _r->expire(k, std::chrono::seconds(120));
+    }
+
+    /* 获取在线设备列表 */
+    std::vector<std::string> get_devices(const std::string &uid) {
+        std::vector<std::string> out;
+        _r->smembers(key::kPresenceDevices + uid, std::back_inserter(out));
+        return out;
+    }
+
+    /* 输入中指示 */
+    void set_typing(const std::string &uid, const std::string &conv_id) {
+        auto k = key::kPresenceTyping + uid;
+        _r->sadd(k, conv_id);
+        _r->expire(k, std::chrono::seconds(10));
+    }
+
+    /* 订阅状态 */
+    void subscribe(const std::string &uid, const std::string &target_uid) {
+        _r->sadd(key::kPresenceSub + uid, target_uid);
+    }
+
+    void unsubscribe(const std::string &uid, const std::string &target_uid) {
+        _r->srem(key::kPresenceSub + uid, target_uid);
+    }
+
+private:
+    std::shared_ptr<sw::redis::Redis> _r;
 };
 
 } // namespace chatnow

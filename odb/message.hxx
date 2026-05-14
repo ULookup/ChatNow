@@ -71,15 +71,15 @@ namespace chatnow
 {
 
 enum class MessageType : unsigned char {
-    UNKNOWN  = 0,
-    TEXT     = 1,
-    IMAGE    = 2,
-    FILE     = 3,
-    SPEECH   = 4,
-    VIDEO    = 5,    // 预留
-    LOCATION = 6,    // 预留
-    CARD     = 7,    // 预留
-    SYSTEM   = 99    // 系统注入消息（"X 加入了群"）
+    UNKNOWN       = 0,
+    TEXT          = 1,
+    IMAGE         = 2,
+    FILE          = 3,
+    AUDIO         = 4,   // 原名 SPEECH，值不变，兼容历史数据
+    VIDEO         = 5,
+    LOCATION      = 6,
+    STICKER       = 7,   // 原名 CARD，值 7 不变
+    SYSTEM_NOTICE = 8    // 原名 SYSTEM=99 迁移至此
 };
 
 enum class MessageStatus : unsigned char {
