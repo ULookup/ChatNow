@@ -1,0 +1,282 @@
+syntax = "proto3";
+package chatnow.conversation;
+
+import "common/envelope.proto";
+import "common/types.proto";
+import "message/message_types.proto";
+
+enum ConversationType {
+    CONVERSATION_TYPE_UNSPECIFIED = 0;
+    PRIVATE = 1;
+    GROUP = 2;
+    CHANNEL = 3;
+}
+
+enum ConversationStatus {
+    CONVERSATION_NORMAL = 0;
+    CONVERSATION_ARCHIVED = 1;
+    CONVERSATION_DISMISSED = 2;
+}
+
+enum MemberRole {
+    MEMBER = 0;
+    ADMIN = 1;
+    OWNER = 2;
+}
+
+message Conversation {
+    string conversation_id = 1;
+    ConversationType type = 2;
+    string name = 3;
+    string avatar_url = 4;
+    optional string description = 5;
+    int64 created_at_ms = 6;
+    int32 member_count = 7;
+    repeated string top_member_ids = 8;
+    ConversationStatus status = 9;
+    optional MessagePreview last_message = 10;
+    optional SelfMemberInfo self = 11;
+}
+
+message SelfMemberInfo {
+    MemberRole role = 1;
+    int64 joined_at_ms = 2;
+    bool is_muted = 3;
+    bool is_pinned = 4;
+    int64 pin_time_ms = 5;
+    bool is_visible = 6;
+    uint64 last_read_seq = 7;
+    uint64 unread_count = 8;
+    optional string draft = 9;
+}
+
+message MemberItem {
+    UserInfo user_info = 1;
+    MemberRole role = 2;
+    int64 join_time_ms = 3;
+}
+
+service ConversationService {
+    rpc ListConversations(ListConversationsReq) returns (ListConversationsRsp);
+    rpc GetConversation(GetConversationReq) returns (GetConversationRsp);
+    rpc CreateConversation(CreateConversationReq) returns (CreateConversationRsp);
+    rpc UpdateConversation(UpdateConversationReq) returns (UpdateConversationRsp);
+    rpc DismissConversation(DismissConversationReq) returns (DismissConversationRsp);
+    rpc AddMembers(AddMembersReq) returns (AddMembersRsp);
+    rpc RemoveMembers(RemoveMembersReq) returns (RemoveMembersRsp);
+    rpc TransferOwner(TransferOwnerReq) returns (TransferOwnerRsp);
+    rpc ChangeMemberRole(ChangeMemberRoleReq) returns (ChangeMemberRoleRsp);
+    rpc ListMembers(ListMembersReq) returns (ListMembersRsp);
+    rpc SetMute(SetMuteReq) returns (SetMuteRsp);
+    rpc SetPin(SetPinReq) returns (SetPinRsp);
+    rpc SetVisible(SetVisibleReq) returns (SetVisibleRsp);
+    rpc QuitConversation(QuitConversationReq) returns (QuitConversationRsp);
+    rpc MarkRead(MarkReadReq) returns (MarkReadRsp);
+    rpc SaveDraft(SaveDraftReq) returns (SaveDraftRsp);
+    rpc SearchConversations(SearchConversationsReq) returns (SearchConversationsRsp);
+    rpc GetMemberIds(GetMemberIdsReq) returns (GetMemberIdsRsp);
+}
+
+message ListConversationsReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    PageRequest page = 4;
+}
+message ListConversationsRsp {
+    ResponseHeader header = 1;
+    repeated Conversation conversations = 2;
+    PageResponse page = 3;
+}
+
+message GetConversationReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+}
+message GetConversationRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message CreateConversationReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string name = 4;
+    repeated string member_id_list = 5;
+}
+message CreateConversationRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message UpdateConversationReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    optional string name = 5;
+    optional string avatar_url = 6;
+    optional string description = 7;
+}
+message UpdateConversationRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message DismissConversationReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+}
+message DismissConversationRsp { ResponseHeader header = 1; }
+
+message AddMembersReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    repeated string member_id_list = 5;
+}
+message AddMembersRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message RemoveMembersReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    repeated string member_id_list = 5;
+}
+message RemoveMembersRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message TransferOwnerReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    string new_owner_id = 5;
+}
+message TransferOwnerRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message ChangeMemberRoleReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    string changed_user_id = 5;
+    MemberRole role = 6;
+}
+message ChangeMemberRoleRsp {
+    ResponseHeader header = 1;
+    Conversation conversation = 2;
+}
+
+message ListMembersReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    PageRequest page = 5;
+}
+message ListMembersRsp {
+    ResponseHeader header = 1;
+    repeated MemberItem members = 2;
+    PageResponse page = 3;
+}
+
+message SetMuteReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    bool is_muted = 5;
+}
+message SetMuteRsp {
+    ResponseHeader header = 1;
+    SelfMemberInfo self = 2;
+}
+
+message SetPinReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    bool is_pinned = 5;
+}
+message SetPinRsp {
+    ResponseHeader header = 1;
+    SelfMemberInfo self = 2;
+}
+
+message SetVisibleReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    bool is_visible = 5;
+}
+message SetVisibleRsp {
+    ResponseHeader header = 1;
+    SelfMemberInfo self = 2;
+}
+
+message QuitConversationReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+}
+message QuitConversationRsp { ResponseHeader header = 1; }
+
+message MarkReadReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    uint64 seq_id = 5;
+}
+message MarkReadRsp { ResponseHeader header = 1; }
+
+message SaveDraftReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+    string draft = 5;
+}
+message SaveDraftRsp { ResponseHeader header = 1; }
+
+message SearchConversationsReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string search_key = 4;
+    optional ConversationType type = 5;
+}
+message SearchConversationsRsp {
+    ResponseHeader header = 1;
+    repeated Conversation conversations = 2;
+}
+
+message GetMemberIdsReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string conversation_id = 4;
+}
+message GetMemberIdsRsp {
+    ResponseHeader header = 1;
+    repeated string member_id_list = 2;
+}
