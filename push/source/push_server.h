@@ -58,6 +58,7 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
+    ~PushServiceImpl() { stop_cross_outbox_reaper(); }
 
     // brpc: 单用户推送（其它服务调用）
     void PushToUser(google::protobuf::RpcController* controller,
