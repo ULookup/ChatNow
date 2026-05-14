@@ -4,6 +4,9 @@
 #include "dao/mysql.hpp"
 #include "message.hxx"
 #include "message-odb.hxx"
+#include <odb/mysql/database.hxx>
+#include <odb/mysql/connection.hxx>
+#include <odb/mysql/statement.hxx>
 
 #include <memory>
 #include <string>
@@ -266,6 +269,29 @@ public:
             return false;
         }
         return true;
+    }
+
+    /* brief: 获取所有会话的最大 seq（用于启动回填 Redis seq）
+     *  - 直接走 MySQL 原生连接执行 GROUP BY 聚合
+     *  - 返回 (session_id, max_seq_id) 列表
+     */
+    std::vector<std::pair<std::string, unsigned long>> select_max_seq_by_session() {
+        std::vector<std::pair<std::string, unsigned long>> res;
+        try {
+            auto &mysql_db = dynamic_cast<odb::mysql::database&>(*_db);
+            auto conn = mysql_db.connection();
+            std::unique_ptr<odb::mysql::statement> stmt(
+                conn->create_statement());
+            stmt->execute(
+                "SELECT session_id, MAX(seq_id) AS max_seq FROM message GROUP BY session_id");
+            auto r = stmt->result_set();
+            while(r.next()) {
+                res.emplace_back(r.get_string(1), r.get_unsigned_long(2));
+            }
+        } catch(std::exception &e) {
+            LOG_ERROR("select_max_seq_by_session 失败: {}", e.what());
+        }
+        return res;
     }
 
 private:
