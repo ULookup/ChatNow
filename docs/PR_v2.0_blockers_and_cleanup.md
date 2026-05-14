@@ -29,10 +29,10 @@
 
 **修法 (选项 A)**：
 
-- `code/server/proto/base.proto` —— `MessageInfo` 新增 `optional uint64 user_seq = 8`
-- `code/client/proto/base.proto` —— 客户端镜像同步
-- `code/client/proto/notify.proto` —— 顺手把 `NotifyMsgPushAck.message_id` 由 `string` 改回 `int64`，与服务端 wire type 对齐（N6 顺手修）
-- `code/server/push/source/push_server.h`：
+- `proto/base.proto` —— `MessageInfo` 新增 `optional uint64 user_seq = 8`
+- `proto/base.proto` —— 客户端镜像同步
+- `proto/notify.proto` —— 顺手把 `NotifyMsgPushAck.message_id` 由 `string` 改回 `int64`，与服务端 wire type 对齐（N6 顺手修）
+- `push/source/push_server.h`：
   - `onPushMessage` 引入 `notify_template`（不带 user_seq，给跨实例 PushBatch 转发用）+ `build_payload_for(uid)` lambda（per-uid 重新序列化时填 user_seq）
   - `PushToUser` / `PushBatch` 收到带 `user_seq` 的请求时，深拷贝 NotifyMessage 后 `set_user_seq` 再序列化下发
   - `onClientNotify` 收到 ACK 时新增防御：`user_seq==0` 或 `user_id/chat_session_id` 空直接丢弃，避免大群读扩散场景污染 last_ack_seq
@@ -49,13 +49,13 @@
 
 **修法**：
 
-- `code/server/conf/transmite_server.conf` —— `mq_msg_exchange=chat_msg_exchange`，`mq_msg_queue` / `mq_msg_binding_key` 留空
-- `code/server/transmite/source/transmite_server.h::make_mq_object`：
+- `conf/transmite_server.conf` —— `mq_msg_exchange=chat_msg_exchange`，`mq_msg_queue` / `mq_msg_binding_key` 留空
+- `transmite/source/transmite_server.h::make_mq_object`：
   - exchange 空 → abort
   - 非空 queue/binding → WARN 并强制清空（防 transmite 误声明孤儿队列）
   - publisher-only 模式：FANOUT 路由忽略 routing_key
-- `code/server/message/source/message_server.h::make_mq_object`：exchange / queue 空都 abort，启动期 INFO 日志打配置
-- `code/server/common/rabbitmq.hpp`：
+- `message/source/message_server.h::make_mq_object`：exchange / queue 空都 abort，启动期 INFO 日志打配置
+- `common/rabbitmq.hpp`：
   - `MQClient::declare()` 当 `settings.queue.empty()` 时只声明 exchange（新增 `_declare_exchange_only` 私有方法），避免孤儿队列
   - `~MQClient` 把 `close + ev_break` 串成同一个 task，避免 quit watcher 抢在 close 前跑导致 broker 看到 abrupt disconnect
 
@@ -71,16 +71,16 @@
 
 **修法**：
 
-- `code/server/gateway/source/gateway_server.h`：
+- `gateway/source/gateway_server.h`：
   - 移除 `connection.hpp` include；删 `_connections` / `_ws_server` / `onOpen` / `onClose` / `onMessage` / `keepAlive`
   - 构造函数去掉 `websocket_port`；只保留 HTTP 路由
   - `start()` 改为阻塞 `_http_server.listen(...)`；listen 返回 false 时 LOG_ERROR + abort（避免静默 exit 0）
   - 顺手删死字段 `_redis_status`
-- `code/server/gateway/source/gateway_server.cc`：
+- `gateway/source/gateway_server.cc`：
   - 保留 `DEFINE_int32(websocket_listen_port, ...)` 作 deprecated 占位（兼容旧 conf；gflags 默认 fail-on-unknown 会让旧部署起不来）
   - main 检测到 != 0 时 LOG_WARN
-- `code/server/conf/gateway_server.conf`：`-websocket_listen_port=0`
-- `code/server/gateway/source/gateway_server.h::_pushNotify`（顺手修预存 UAF）：
+- `conf/gateway_server.conf`：`-websocket_listen_port=0`
+- `gateway/source/gateway_server.h::_pushNotify`（顺手修预存 UAF）：
   - 旧实现是栈上 `brpc::Controller cntl/req/rsp` + `brpc::DoNothing` 异步回调，回调访问已析构对象 → 改用 `SelfDeleteRpcClosure<PushToUserReq, PushToUserRsp>`
 
 **反复推敲点**：
@@ -94,15 +94,15 @@
 
 **修法**：
 
-- `code/server/common/mysql_chat_session_member.hpp`：
+- `common/mysql_chat_session_member.hpp`：
   - 重构 `update_last_ack_seq` / `update_last_read_seq`，共用助手 `_atomic_advance_seq(column, ssid, uid, new_seq)`
   - 单条原子 SQL：`UPDATE chat_session_member SET <col> = GREATEST(<col>, n) WHERE session_id=? AND user_id=?`
   - DB 层强保证单调；不会被 chatsession 端的全行 UPDATE 覆盖回退
   - `column` 走代码内常量白名单，无注入面；`ssid/uid` 走 `_escape_id` 防御性转义
-- `code/server/message/source/message_server.h::UpdateAckSeq`：
+- `message/source/message_server.h::UpdateAckSeq`：
   - 删假降级 `if(!_mysql_member_table)`
   - 入参非法（user_id / chat_session_id 空 / user_seq=0）→ 直接返回 errmsg
-- `code/server/push/source/push_server.h::onClientNotify` MSG_PUSH_ACK 分支：
+- `push/source/push_server.h::onClientNotify` MSG_PUSH_ACK 分支：
   - 用 `SelfDeleteRpcClosure<UpdateAckSeqReq, UpdateAckSeqRsp>` 替代 `brpc::DoNothing`
   - 失败时 LOG_WARN 包含 uid + seq + 错误信息
 
@@ -120,7 +120,7 @@
 
 **修法**：
 
-- `code/server/push/source/push_server.h::PushServer`：
+- `push/source/push_server.h::PushServer`：
   - 构造函数新增 `MQClient::ptr` / `Subscriber::ptr` 参数
   - `start()` 退出顺序：`RunUntilAskedToQuit` → `_push_subscriber.reset()` → `_mq_client.reset()` → `_ws_server->stop()` → `_ws_thread.join()` → `_rpc_server->Join()` → 析构时 delete impl
   - 借助 `~MQClient()` 内 `_async_thread.join()` 的强保证：MQClient 析构返回时 ev 线程已退出，`onMessage` 不再 fire
@@ -138,9 +138,9 @@
 
 **修法**：
 
-- `code/server/push/source/connection.hpp::Client` 新增 `std::shared_ptr<std::mutex> send_mu`（默认初始化）
+- `push/source/connection.hpp::Client` 新增 `std::shared_ptr<std::mutex> send_mu`（默认初始化）
 - `Connection::send_mutex(conn)` 接口：返回 conn 关联的 send 锁；连接已不存在返回 nullptr
-- `code/server/push/source/push_server.h::_local_send`：
+- `push/source/push_server.h::_local_send`：
   - `auto mu = _connections->send_mutex(c); if(!mu) continue;`
   - `std::lock_guard<std::mutex> lock(*mu);` 后再 send
 
@@ -157,16 +157,16 @@
 
 **修法**：
 
-- `code/server/common/data_redis.hpp::PushOutbox`：
+- `common/data_redis.hpp::PushOutbox`：
   - `try_acquire_reaper_lease(owner, ttl)` 用 Lua 原子化（`SET NX EX OR (GET==owner THEN EXPIRE)`）；防止 GET+EXPIRE 两步式的 TOCTOU race 导致两实例同时持锁
   - `release_reaper_lease(owner)` Lua CAS：`IF GET==owner THEN DEL`
-- `code/server/message/source/message_server.h::MessageServiceImpl`：
+- `message/source/message_server.h::MessageServiceImpl`：
   - `start_outbox_reaper(owner)` 启动独立线程
   - 主循环：拿不到锁 sleep；拿到锁 peek(50)；**peek-then-zrem**（先把这一批从 ZSET 移走，避免异步 ack 滞后导致同批反复重投）；publish_confirm 失败回调里 enqueue 回去，score 重新取 `now_ts`（挤到队尾留退避空间）
   - 三个参数（reap_interval=5、lease_ttl=30、batch_limit=50）收成函数内 constexpr
   - `catch(std::exception)` 与 `catch(...)` 双兜底，防未知异常杀死 reaper 让租约空挂 30s
   - 退出前主动 `release_reaper_lease`
-- `code/server/message/source/message_server.h::MessageServer::start()` 关停顺序：
+- `message/source/message_server.h::MessageServer::start()` 关停顺序：
   - `RunUntilAskedToQuit` → `stop_outbox_reaper()` → `_mq_client.reset()` → `_rpc_server->Join()` → impl 析构
   - `Builder::build()` 同样把强引用 `std::move` 到 server
 
@@ -183,7 +183,7 @@
 
 **修法**：
 
-- `code/server/transmite/source/transmite_server.h::TransmiteServer`：
+- `transmite/source/transmite_server.h::TransmiteServer`：
   - 构造函数新增 `WorkerIdAllocator::ptr` 可选参数
   - `start()` 启动 watchdog 线程：每 1s 轮询 `lease_lost()`
   - 触发时：`unregister()` 让 etcd 立即摘流 → **`std::abort()`**
@@ -201,20 +201,20 @@
 
 **修法**：
 
-- `code/server/common/data_redis.hpp::UnackedPush`：
+- `common/data_redis.hpp::UnackedPush`：
   - `peek_due` 替代 drain（仅查询，不删）
   - `bump_score(uid, seqs)` 用 `ZADD XX` 仅更新已存在项 score；同时 `expire(k, ttl)` 续 7 天
-- `code/server/push/source/push_server.h::_on_heartbeat_resend`：
+- `push/source/push_server.h::_on_heartbeat_resend`：
   - peek_due → 解析 user_seq 数值进 `unordered_set<uint64_t>` → 计算 `last_user_seq = min - 1`
   - **异步** `stub.GetOfflineMsg(...)`（用 `SelfDeleteRpcClosure`），不阻塞 WS asio 单线程
   - 回调里按 `mi.user_seq` 查 set 命中即重发；最后 bump_score
-- `code/server/message/source/message_server.h::GetOfflineMsg`：
+- `message/source/message_server.h::GetOfflineMsg`：
   - 建 `message_id → user_seq` map
   - 响应 `MessageInfo.user_seq` 填入；**不依赖列表下标**（`select_by_ids` 内部按 seq_id ASC 排序，与 timeline 的 user_seq 顺序不一致，按下标配对会跨会话错配）
-- `code/server/push/source/push_server.cc`:
+- `push/source/push_server.cc`:
   - 新增 gflags `resend_batch=50` / `resend_max_age_sec=5`
   - `psb.set_resend_params(...)` 传给 PushServiceImpl
-- `code/server/conf/push_server.conf` 写入默认值
+- `conf/push_server.conf` 写入默认值
 
 **反复推敲点**：
 1. 第一轮 cpp-reviewer 抓到 4 个必修：配对 by 下标错 / WS 阻塞同步 RPC / bump_score 不续 TTL / 参数未接 gflags → 全部修
@@ -228,7 +228,7 @@
 
 **理由**：push 端走 `UPDATE GREATEST(last_ack_seq, n)` 原子单语句，永远以 DB 现值取最大；chatsession 全行 update 即使瞬时覆盖回旧值，下一条 ACK GREATEST 立即纠正。FOR UPDATE 这层是双重保险，性能代价（每次群属性修改都要拿行锁）大于收益。
 
-**改动**：`code/server/common/mysql_chat_session_member.hpp::update(csm)` 恢复为最简单的单语句 update。
+**改动**：`common/mysql_chat_session_member.hpp::update(csm)` 恢复为最简单的单语句 update。
 
 ---
 
@@ -246,7 +246,7 @@
 
 **理由**：原 drain 改成 peek_due 后，drain 保留为别名 — 但全代码已无调用方。无谓的兼容层。
 
-**改动**：`code/server/common/data_redis.hpp` 删 drain。
+**改动**：`common/data_redis.hpp` 删 drain。
 
 ---
 
@@ -273,7 +273,7 @@
 
 **理由**：M1/B4 在 push_server.h 顶部加了 8 行模板类，被 PushBatch / UpdateAckSeq / GetOfflineMsg 三处复用。gateway `_pushNotify` 也需要它修栈对象 UAF。该类是通用 utility，应放在 common 下。
 
-**改动**：新建 `code/server/common/brpc_closure.hpp`，push_server.h / gateway_server.h 改 include。
+**改动**：新建 `common/brpc_closure.hpp`，push_server.h / gateway_server.h 改 include。
 
 ---
 
@@ -281,7 +281,7 @@
 
 **理由**：cpp-reviewer 在 B3 顺手提到的预存 UAF：栈上 `brpc::Controller cntl / req / rsp` + `brpc::DoNothing` 异步回调访问已析构对象。
 
-**改动**：`code/server/gateway/source/gateway_server.h::_pushNotify` 改用 `SelfDeleteRpcClosure<PushToUserReq, PushToUserRsp>`，on_done 失败时 LOG_WARN。
+**改动**：`gateway/source/gateway_server.h::_pushNotify` 改用 `SelfDeleteRpcClosure<PushToUserReq, PushToUserRsp>`，on_done 失败时 LOG_WARN。
 
 ---
 
@@ -299,7 +299,7 @@
 
 **问题**：DAO 没有接收 `std::initializer_list` / `std::vector` 的 `update` 重载，仅有单参版本。该行无法编译通过。
 
-**改动**：`code/server/common/mysql_chat_session_member.hpp` 新增 `update(const std::vector<std::shared_ptr<ChatSessionMember>> &items)` 重载，同事务内对多行 `_db->update(*csm)`，保持转让群主原子性。任一失败抛异常 → trans 析构自动 rollback。
+**改动**：`common/mysql_chat_session_member.hpp` 新增 `update(const std::vector<std::shared_ptr<ChatSessionMember>> &items)` 重载，同事务内对多行 `_db->update(*csm)`，保持转让群主原子性。任一失败抛异常 → trans 析构自动 rollback。
 
 ---
 
@@ -349,26 +349,26 @@ if (ret == false) {
 
 | 文件 | 行变化 | 关键改动 |
 |---|---|---|
-| `code/client/proto/base.proto` | +2 | B1 新增 `MessageInfo.user_seq` |
-| `code/client/proto/notify.proto` | +3 -1 | B1 N6 `NotifyMsgPushAck.message_id` 改 int64 |
-| `code/server/proto/base.proto` | +3 | B1 新增 `MessageInfo.user_seq` |
-| `code/server/conf/transmite_server.conf` | +3 -3 | B2 exchange 对齐 |
-| `code/server/conf/gateway_server.conf` | +2 -1 | B3 ws port 注释化 |
-| `code/server/conf/push_server.conf` | +3 | M5 重发参数 |
-| `code/server/common/brpc_closure.hpp` | +35 | 新文件 |
-| `code/server/common/data_redis.hpp` | +75 -6 | M3 reaper 租约 / M5 peek_due+bump_score |
-| `code/server/common/mysql_chat_session_member.hpp` | +66 -20 | B4 GREATEST 原子 / 4.2 vector 重载 |
-| `code/server/common/rabbitmq.hpp` | +21 -7 | B2 publisher-only declare / M1 ~MQClient 顺序 |
-| `code/server/gateway/source/gateway_server.cc` | +7 -3 | B3 ws flag 兼容化 |
-| `code/server/gateway/source/gateway_server.h` | +30 -108 | B3 删 WS / 4.1 死字段 / _pushNotify UAF 修复 |
-| `code/server/message/source/message_server.cc` | +1 | M3 reaper owner |
-| `code/server/message/source/message_server.h` | +166 -7 | B4 / M3 / M5 |
-| `code/server/push/source/connection.hpp` | +12 | M2 send_mutex |
-| `code/server/push/source/push_server.cc` | +5 | M5 gflags |
-| `code/server/push/source/push_server.h` | +257 -32 | B1 / B4 / M1 / M2 / M5 |
-| `code/server/transmite/source/transmite_server.cc` | +5 -2 | B2 注释强调 |
-| `code/server/transmite/source/transmite_server.h` | +66 -8 | B2 / M4 |
-| `code/server/chatsession/source/chatsession_server.h` | +18 -15 | 4.3 / 4.4 / 4.5 |
+| `proto/base.proto` | +2 | B1 新增 `MessageInfo.user_seq` |
+| `proto/notify.proto` | +3 -1 | B1 N6 `NotifyMsgPushAck.message_id` 改 int64 |
+| `proto/base.proto` | +3 | B1 新增 `MessageInfo.user_seq` |
+| `conf/transmite_server.conf` | +3 -3 | B2 exchange 对齐 |
+| `conf/gateway_server.conf` | +2 -1 | B3 ws port 注释化 |
+| `conf/push_server.conf` | +3 | M5 重发参数 |
+| `common/brpc_closure.hpp` | +35 | 新文件 |
+| `common/data_redis.hpp` | +75 -6 | M3 reaper 租约 / M5 peek_due+bump_score |
+| `common/mysql_chat_session_member.hpp` | +66 -20 | B4 GREATEST 原子 / 4.2 vector 重载 |
+| `common/rabbitmq.hpp` | +21 -7 | B2 publisher-only declare / M1 ~MQClient 顺序 |
+| `gateway/source/gateway_server.cc` | +7 -3 | B3 ws flag 兼容化 |
+| `gateway/source/gateway_server.h` | +30 -108 | B3 删 WS / 4.1 死字段 / _pushNotify UAF 修复 |
+| `message/source/message_server.cc` | +1 | M3 reaper owner |
+| `message/source/message_server.h` | +166 -7 | B4 / M3 / M5 |
+| `push/source/connection.hpp` | +12 | M2 send_mutex |
+| `push/source/push_server.cc` | +5 | M5 gflags |
+| `push/source/push_server.h` | +257 -32 | B1 / B4 / M1 / M2 / M5 |
+| `transmite/source/transmite_server.cc` | +5 -2 | B2 注释强调 |
+| `transmite/source/transmite_server.h` | +66 -8 | B2 / M4 |
+| `chatsession/source/chatsession_server.h` | +18 -15 | 4.3 / 4.4 / 4.5 |
 
 ---
 

@@ -29,8 +29,8 @@ MINOR/NIT →  cleanup 类，可与 v2.1 合并
 ### B1. ACK 链路在协议层断了：客户端无法生成合法 MSG_PUSH_ACK
 
 - **现象**：
-  - `NotifyMsgPushAck.user_seq` 是 ACK 所依赖的关键字段（`code/server/proto/notify.proto:31`）
-  - 但下行 `CHAT_MESSAGE_NOTIFY` 携带的 `MessageInfo`（`code/server/proto/base.proto:131-145`）只包含 `seq_id`（会话级），**没有任何 `user_seq` 字段**
+  - `NotifyMsgPushAck.user_seq` 是 ACK 所依赖的关键字段（`proto/notify.proto:31`）
+  - 但下行 `CHAT_MESSAGE_NOTIFY` 携带的 `MessageInfo`（`proto/base.proto:131-145`）只包含 `seq_id`（会话级），**没有任何 `user_seq` 字段**
 - **影响**：
   - 服务端 `PushServiceImpl::PushToUser` 把 `user_seq` 写进 `UnackedPush`（`push_server.h:64-68`），却从不告诉客户端 `user_seq` 是多少
   - → 客户端没法正确填 ACK
@@ -193,8 +193,8 @@ MINOR/NIT →  cleanup 类，可与 v2.1 合并
 
 ### N6. NotifyMsgPushAck.message_id 类型不一致
 
-- `code/client/proto/notify.proto:30`: `string`
-- `code/server/proto/notify.proto:30`: `int64`
+- `proto/notify.proto:30`: `string`
+- `proto/notify.proto:30`: `int64`
 - 同一字段编号、不同类型，protobuf wire format 解析会出错
 - int64 是 varint，string 是 length-delimited，wire type 完全不同 → **反序列化失败**
 
@@ -247,20 +247,20 @@ MINOR/NIT →  cleanup 类，可与 v2.1 合并
 ## 6. 涉及文件
 
 ```
-code/server/proto/base.proto
-code/server/proto/notify.proto
-code/server/conf/transmite_server.conf
-code/server/conf/message_server.conf
-code/server/conf/gateway_server.conf
-code/server/conf/push_server.conf
-code/server/gateway/source/gateway_server.h
-code/server/push/source/push_server.h
-code/server/push/source/connection.hpp
-code/server/transmite/source/transmite_server.h
-code/server/message/source/message_server.h
-code/server/common/worker_id.hpp
-code/server/common/data_redis.hpp
-code/client/proto/notify.proto
+proto/base.proto
+proto/notify.proto
+conf/transmite_server.conf
+conf/message_server.conf
+conf/gateway_server.conf
+conf/push_server.conf
+gateway/source/gateway_server.h
+push/source/push_server.h
+push/source/connection.hpp
+transmite/source/transmite_server.h
+message/source/message_server.h
+common/worker_id.hpp
+common/data_redis.hpp
+proto/notify.proto
 ```
 
 ---

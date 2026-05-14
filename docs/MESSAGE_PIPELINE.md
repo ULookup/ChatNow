@@ -34,11 +34,11 @@ Gateway                                                                ├─ ms
 
 | 模块 | 位置 |
 |---|---|
-| HTTP 入口 | `code/server/gateway/source/gateway_server.h:1342` `NewMessage` |
-| 转发服务  | `code/server/transmite/source/transmite_server.h:37` `GetTransmitTarget` |
-| DB 消费者 | `code/server/message/source/message_server.h:467` `onDBMessage` |
-| ES 消费者 | `code/server/message/source/message_server.h:548` `onESMessage` |
-| 离线同步  | `code/server/message/source/message_server.h:303` `GetOfflineMsg` |
+| HTTP 入口 | `gateway/source/gateway_server.h:1342` `NewMessage` |
+| 转发服务  | `transmite/source/transmite_server.h:37` `GetTransmitTarget` |
+| DB 消费者 | `message/source/message_server.h:467` `onDBMessage` |
+| ES 消费者 | `message/source/message_server.h:548` `onESMessage` |
+| 离线同步  | `message/source/message_server.h:303` `GetOfflineMsg` |
 
 ---
 

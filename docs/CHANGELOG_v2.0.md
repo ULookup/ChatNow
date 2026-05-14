@@ -230,7 +230,7 @@ main(0c51f2d)
 
 #### 6.2.3 Push 独立服务
 
-- 新建 `code/server/push/` 服务：WS 终结、订阅 `msg_push_queue`、跨实例 `PushBatch` 异步并发
+- 新建 `push/` 服务：WS 终结、订阅 `msg_push_queue`、跨实例 `PushBatch` 异步并发
 - 文件类型消息要求客户端前置上传 file_id；`onDBMessage` 不再调 PutFile
 - ACK 收敛 + UnackedPush 重传缓冲（按 score 过滤成熟项）
 
