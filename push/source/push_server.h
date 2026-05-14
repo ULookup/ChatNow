@@ -39,6 +39,7 @@ public:
                     const Status::ptr &redis_status,
                     const OnlineRoute::ptr &online_route,
                     const UnackedPush::ptr &unacked,
+                    const CrossInstanceOutbox::ptr &cross_outbox,
                     const std::string &instance_id,
                     const std::string &message_service_name,
                     const ServiceManager::ptr &channels)
@@ -47,6 +48,7 @@ public:
           _redis_status(redis_status),
           _online_route(online_route),
           _unacked(unacked),
+          _cross_outbox(cross_outbox),
           _instance_id(instance_id),
           _message_service_name(message_service_name),
           _mm_channels(channels) {}
@@ -202,8 +204,13 @@ public:
             const auto &uids = kv.second;
             auto channel = _mm_channels->choose(peer);
             if(!channel) {
-                LOG_WARN("Push-Consumer: 对端 {} 不可达，{} 个用户消息丢失（依赖 unacked 重传）",
-                         peer, uids.size());
+                LOG_WARN("Push-Consumer: 对端 {} 不可达，{} 个用户入 CrossInstanceOutbox", peer, uids.size());
+                for(const auto &u : uids)
+                    if(_online_route) _online_route->unbind(u, peer);
+                if(_cross_outbox) {
+                    std::string b64 = _utils_base64_encode(internal_msg.SerializeAsString());
+                    _cross_outbox->enqueue(b64, uids, peer, now_ts);
+                }
                 continue;
             }
             PushService_Stub stub(channel.get());
@@ -220,9 +227,18 @@ public:
                 p->set_user_seq(it->second);
             }
             std::string peer_id = peer;
-            closure->on_done = [peer_id](brpc::Controller *c, const PushBatchRsp &) {
+            std::string payload_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
+            closure->on_done = [peer_id, uids, outbox = _cross_outbox, online = _online_route,
+                                payload_b64, now_ts]
+                (brpc::Controller *c, const PushBatchRsp &) {
                 if(c->Failed()) {
-                    LOG_WARN("PushBatch 跨实例失败 peer={}: {}", peer_id, c->ErrorText());
+                    LOG_WARN("PushBatch 跨实例失败 peer={}: {}，入 CrossInstanceOutbox",
+                             peer_id, c->ErrorText());
+                    for(const auto &u : uids)
+                        if(online) online->unbind(u, peer_id);
+                    if(outbox) {
+                        outbox->enqueue(payload_b64, uids, peer_id, now_ts);
+                    }
                 }
             };
             stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
@@ -370,11 +386,48 @@ private:
         return sent;
     }
 
+    static std::string _utils_base64_encode(const std::string &in) {
+        static const char kTbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        out.reserve(((in.size() + 2) / 3) * 4);
+        for(size_t i = 0; i < in.size(); i += 3) {
+            unsigned long val = (unsigned char)in[i] << 16;
+            if(i + 1 < in.size()) val |= (unsigned char)in[i + 1] << 8;
+            if(i + 2 < in.size()) val |= (unsigned char)in[i + 2];
+            out += kTbl[(val >> 18) & 0x3F];
+            out += kTbl[(val >> 12) & 0x3F];
+            out += (i + 1 < in.size()) ? kTbl[(val >> 6) & 0x3F] : '=';
+            out += (i + 2 < in.size()) ? kTbl[val & 0x3F] : '=';
+        }
+        return out;
+    }
+    static std::string _utils_base64_decode(const std::string &in) {
+        static const unsigned char kDec[128] = {
+            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
+            64,64,64,64,64,64,64,64,64,64,64,62,64,64,64,63,52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
+            64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,64,
+            64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64
+        };
+        std::string out;
+        out.reserve((in.size() / 4) * 3);
+        for(size_t i = 0; i < in.size(); i += 4) {
+            unsigned long val = 0;
+            for(int j = 0; j < 4; ++j) {
+                if(in[i+j] != '=') val = (val << 6) | kDec[(unsigned char)in[i+j]];
+            }
+            out += (char)((val >> 16) & 0xFF);
+            if(in[i+2] != '=') out += (char)((val >> 8) & 0xFF);
+            if(in[i+3] != '=') out += (char)(val & 0xFF);
+        }
+        return out;
+    }
+
     Connection::ptr _connections;
     Session::ptr _redis_session;
     Status::ptr _redis_status;
     OnlineRoute::ptr _online_route;
     UnackedPush::ptr _unacked;
+    CrossInstanceOutbox::ptr _cross_outbox;
     std::string _instance_id;
     std::string _message_service_name;
     ServiceManager::ptr _mm_channels;
