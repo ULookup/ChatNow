@@ -445,6 +445,7 @@ public:
         _redis_status  = std::make_shared<Status>(_redis);
         _online_route  = std::make_shared<OnlineRoute>(_redis);
         _unacked       = std::make_shared<UnackedPush>(_redis);
+        _cross_outbox  = std::make_shared<CrossInstanceOutbox>(_redis);
     }
 
     void make_discovery_object(const std::string &reg_host,
@@ -587,7 +588,7 @@ public:
         _rpc_server = std::make_shared<brpc::Server>();
         _push_service = new PushServiceImpl(
             _connections, _redis_session, _redis_status,
-            _online_route, _unacked, _instance_id,
+            _online_route, _unacked, _cross_outbox, _instance_id,
             _message_service_name, _mm_channels);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
@@ -635,6 +636,7 @@ private:
     Status::ptr _redis_status;
     OnlineRoute::ptr _online_route;
     UnackedPush::ptr _unacked;
+    CrossInstanceOutbox::ptr _cross_outbox;
 
     std::string _message_service_name;
     std::string _push_service_name;
