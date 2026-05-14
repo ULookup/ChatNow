@@ -6,6 +6,8 @@
 #include "user_timeline-odb.hxx"
 #include <odb/database.hxx>
 #include <odb/mysql/database.hxx>
+#include <odb/mysql/connection.hxx>
+#include <odb/mysql/statement.hxx>
 
 #include <memory>
 #include <string>
@@ -278,6 +280,25 @@ public:
             return false;
         }
         return true;
+    }
+
+    /* brief: 获取所有用户的最大 user_seq（用于启动回填） */
+    std::vector<std::pair<std::string, unsigned long>> select_max_user_seq() {
+        std::vector<std::pair<std::string, unsigned long>> res;
+        try {
+            auto &mysql_db = dynamic_cast<odb::mysql::database&>(*_db);
+            auto conn = mysql_db.connection();
+            std::unique_ptr<odb::mysql::statement> stmt(conn->create_statement());
+            stmt->execute(
+                "SELECT user_id, MAX(user_seq) AS max_seq FROM user_timeline GROUP BY user_id");
+            auto r = stmt->result_set();
+            while(r.next()) {
+                res.emplace_back(r.get_string(1), r.get_unsigned_long(2));
+            }
+        } catch(std::exception &e) {
+            LOG_ERROR("获取所有用户最大user_seq失败: {}", e.what());
+        }
+        return res;
     }
 
 private:
