@@ -166,6 +166,18 @@ message InternalMessage {
     bool is_large_group = 4;
 }
 
+// ES 索引事件（DB consumer 落库成功后投递）
+// 只含 ES 写入需要的字段，不含成员列表、文件二进制、user_seq 等
+message ESIndexEvent {
+    int64 message_id = 1;
+    string chat_session_id = 2;
+    string user_id = 3;
+    string content = 4;
+    int64 timestamp = 5;
+    uint64 seq_id = 6;
+    MessageType message_type = 7;
+}
+
 message FileDownloadData { 
     string file_id = 1; 
     bytes file_content = 2; 
