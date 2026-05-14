@@ -38,6 +38,10 @@ DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送队列的交换机�
 DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列名称");
 DEFINE_string(mq_push_binding_key, "push", "推送队列绑定键");
 
+DEFINE_string(mq_es_exchange, "es_index_exchange", "ES 索引事件的交换机名称（DIRECT）");
+DEFINE_string(mq_es_queue, "msg_queue_es_index", "ES 索引事件队列名称（新路径）");
+DEFINE_string(mq_es_binding_key, "msg_queue_es_index", "ES 索引事件绑定键");
+
 DEFINE_string(es_host, "http://127.0.0.1:9200/", "ES搜索引擎服务器URL");
 
 DEFINE_string(redis_host, "127.0.0.1", "Redis 服务器访问地址");
@@ -57,6 +61,8 @@ int main(int argc, char *argv[])
     msb.set_reaper_owner(FLAGS_access_host + ":" + std::to_string(::getpid()));
     msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue_db, FLAGS_mq_msg_queue_es, FLAGS_mq_db_binding_key, FLAGS_mq_es_binding_key);
     msb.make_push_publisher(FLAGS_mq_push_exchange, FLAGS_mq_push_queue, FLAGS_mq_push_binding_key);
+    msb.make_es_publisher(FLAGS_mq_es_exchange, FLAGS_mq_es_queue, FLAGS_mq_es_binding_key);
+    msb.make_es_index_subscriber(FLAGS_mq_es_exchange, FLAGS_mq_es_queue, FLAGS_mq_es_binding_key);
     msb.make_es_object({FLAGS_es_host});
     msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service, FLAGS_chatsession_service);
