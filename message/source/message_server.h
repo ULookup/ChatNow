@@ -42,7 +42,9 @@ public:
                         const declare_settings &es_settings,
                         const SeqGen::ptr &seq_gen,
                         const Publisher::ptr &push_publisher = nullptr,
-                        const PushOutbox::ptr &push_outbox = nullptr)
+                        const PushOutbox::ptr &push_outbox = nullptr,
+                        const Publisher::ptr &es_publisher = nullptr,
+                        const ESOutbox::ptr &es_outbox = nullptr)
                         : _file_service_name(file_service_name),
                         _user_service_name(user_service_name),
                         _chatsession_service_name(chatsession_service_name),
@@ -58,12 +60,15 @@ public:
                         _es_settings(es_settings),
                         _seq_gen(seq_gen),
                         _push_publisher(push_publisher),
-                        _push_outbox(push_outbox)
+                        _push_outbox(push_outbox),
+                        _es_publisher(es_publisher),
+                        _es_outbox(es_outbox)
     {
         _es_client->createIndex();
     }
     ~MessageServiceImpl() {
         stop_outbox_reaper();
+        stop_es_outbox_reaper();
     }
     virtual void GetHistoryMsg(google::protobuf::RpcController* controller,
                        const ::chatnow::GetHistoryMsgReq* request,
@@ -902,6 +907,8 @@ private:
     SeqGen::ptr _seq_gen;            // 启动时回填 / 推送链路重传
     Publisher::ptr _push_publisher;  // 写完 timeline 后向 push_queue 投递
     PushOutbox::ptr _push_outbox;    // push_queue 投递失败兜底
+    Publisher::ptr _es_publisher;  // DB commit 后向 es_index_exchange 投递 ESIndexEvent
+    ESOutbox::ptr  _es_outbox;     // ES 索引投递失败兜底
 
     // M3: outbox reaper 状态
     std::atomic<bool> _reaper_running {false};
