@@ -182,8 +182,28 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for(const auto &uid : internal_msg.member_id_list()) {
-            int n = _local_send(uid, build_payload_for(uid));
+            std::string payload = build_payload_for(uid);
+            int n = _local_send(uid, payload);
             if(n == 0) remote_uids.push_back(uid);
+            else {
+                auto it = uid2seq.find(uid);
+                if(it != uid2seq.end()) {
+                    std::string cache_key = uid + ":" + std::to_string(it->second);
+                    std::lock_guard<std::mutex> lock(_msg_cache_mu);
+                    auto cache_it = _msg_cache.find(cache_key);
+                    if(cache_it != _msg_cache.end()) {
+                        (*cache_it->second)->payload = std::move(payload);
+                    } else {
+                        _msg_evict_list.push_back({cache_key, std::move(payload)});
+                        auto new_it = std::prev(_msg_evict_list.end());
+                        _msg_cache[cache_key] = new_it;
+                        if(_msg_evict_list.size() > _msg_cache_max_entries) {
+                            _msg_cache.erase(_msg_evict_list.front().key);
+                            _msg_evict_list.pop_front();
+                        }
+                    }
+                }
+            }
         }
         if(remote_uids.empty()) return ConsumeAction::Ack;
 
@@ -572,6 +592,15 @@ private:
     std::atomic<bool> _cross_reaper_running {false};
     std::thread _cross_reaper_thread;
     std::string _cross_reaper_owner;
+    // 本地消息缓存（心跳重传优先命中）
+    struct MsgCacheEntry {
+        std::string key;
+        std::string payload;
+    };
+    std::deque<MsgCacheEntry> _msg_evict_list;
+    std::unordered_map<std::string, decltype(_msg_evict_list)::iterator> _msg_cache;
+    std::mutex _msg_cache_mu;
+    size_t _msg_cache_max_entries = 5000;
 };
 
 class PushServer
