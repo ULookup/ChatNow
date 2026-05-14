@@ -289,7 +289,7 @@ public:
                 res.emplace_back(r.get_string(1), r.get_unsigned_long(2));
             }
         } catch(std::exception &e) {
-            LOG_ERROR("select_max_seq_by_session 失败: {}", e.what());
+            LOG_ERROR("获取所有会话最大seq失败: {}", e.what());
         }
         return res;
     }
