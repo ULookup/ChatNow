@@ -1,0 +1,25 @@
+syntax = "proto3";
+package chatnow.common;
+
+message ResponseHeader {
+    string request_id = 1;
+    bool success = 2;
+    int32 error_code = 3;
+    string error_message = 4;
+}
+
+message PageRequest {
+    int32 limit = 1;
+    string cursor = 2;
+}
+
+message PageResponse {
+    bool has_more = 1;
+    string next_cursor = 2;
+    int32 total_count = 3;
+}
+
+message TimeRange {
+    int64 start_time_ms = 1;
+    int64 end_time_ms = 2;
+}
