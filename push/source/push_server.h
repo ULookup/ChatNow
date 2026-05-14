@@ -363,7 +363,141 @@ public:
         stub.GetOfflineMsg(&closure->cntl, &closure->req, &closure->rsp, closure);
     }
 
+    void start_cross_outbox_reaper(const std::string &owner) {
+        if(!_cross_outbox || !_mm_channels) {
+            LOG_WARN("CrossInstanceOutbox reaper 未启动：outbox / channels 未注入");
+            return;
+        }
+        constexpr int kReapIntervalSec = 5;
+        constexpr int kLeaseTtlSec     = 30;
+        constexpr int kBatchLimit      = 50;
+        _cross_reaper_running.store(true);
+        _cross_reaper_owner = owner;
+        _cross_reaper_thread = std::thread([this, kReapIntervalSec, kLeaseTtlSec, kBatchLimit]() {
+            while(_cross_reaper_running.load()) {
+                try {
+                    if(!_cross_outbox->try_acquire_reaper_lease(_cross_reaper_owner, kLeaseTtlSec)) {
+                        std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+                        continue;
+                    }
+                    auto batch = _cross_outbox->peek(kBatchLimit);
+                    if(batch.empty()) {
+                        std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+                        continue;
+                    }
+                    LOG_INFO("CrossInstanceOutbox reaper: 取出 {} 条待重试", batch.size());
+                    for(const auto &member : batch) _cross_outbox->remove(member);
+                    for(const auto &member : batch) {
+                        std::string b64, peer;
+                        std::vector<std::string> uids;
+                        _parse_outbox_member(member, b64, uids, peer);
+                        std::string payload = _utils_base64_decode(b64);
+
+                        InternalMessage internal_msg;
+                        if(!internal_msg.ParseFromString(payload)) {
+                            LOG_ERROR("CrossInstanceOutbox: 反序列化失败，丢弃");
+                            continue;
+                        }
+
+                        std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
+                        for(const auto &uid : uids) {
+                            auto instances = _online_route ? _online_route->instances(uid)
+                                                           : std::vector<std::string>{};
+                            for(const auto &inst : instances) {
+                                if(inst == _instance_id) continue;
+                                peer_to_uids[inst].push_back(uid);
+                                break;
+                            }
+                        }
+
+                        NotifyMessage notify_template;
+                        notify_template.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
+                        notify_template.mutable_new_message_info()
+                            ->mutable_message_info()->CopyFrom(internal_msg.message_info());
+
+                        for(auto &kv : peer_to_uids) {
+                            const std::string &p = kv.first;
+                            auto channel = _mm_channels->choose(p);
+                            if(!channel) {
+                                _cross_outbox->enqueue_raw(member,
+                                    static_cast<long long>(time(nullptr)) + 5);
+                                continue;
+                            }
+                            PushService_Stub stub(channel.get());
+                            auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
+                            closure->req.set_request_id(
+                                internal_msg.message_info().client_msg_id());
+                            for(const auto &u : kv.second)
+                                closure->req.add_user_id_list(u);
+                            closure->req.mutable_notify()->CopyFrom(notify_template);
+                            for(const auto &up : internal_msg.user_seqs()) {
+                                if(std::find(kv.second.begin(), kv.second.end(),
+                                             up.user_id()) != kv.second.end()) {
+                                    auto *seq = closure->req.add_user_seqs();
+                                    seq->set_user_id(up.user_id());
+                                    seq->set_user_seq(up.user_seq());
+                                }
+                            }
+                            std::string peer_id = p;
+                            std::string member_copy = member;
+                            auto outbox_ref = _cross_outbox;
+                            closure->on_done = [peer_id, member_copy, outbox_ref](
+                                brpc::Controller *c, const PushBatchRsp &) {
+                                if(c->Failed()) {
+                                    LOG_WARN("CrossInstanceOutbox reaper 重试失败 peer={}: {}",
+                                             peer_id, c->ErrorText());
+                                    if(outbox_ref) outbox_ref->enqueue_raw(member_copy,
+                                        static_cast<long long>(time(nullptr)) + 5);
+                                }
+                            };
+                            stub.PushBatch(&closure->cntl, &closure->req,
+                                           &closure->rsp, closure);
+                        }
+                    }
+                } catch(std::exception &e) {
+                    LOG_ERROR("CrossInstanceOutbox reaper 异常: {}", e.what());
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
+            }
+            if(_cross_outbox) _cross_outbox->release_reaper_lease(_cross_reaper_owner);
+            LOG_INFO("CrossInstanceOutbox reaper 已停止");
+        });
+    }
+
+    void stop_cross_outbox_reaper() {
+        _cross_reaper_running.store(false);
+        if(_cross_reaper_thread.joinable()) _cross_reaper_thread.join();
+    }
+
 private:
+    void _parse_outbox_member(const std::string &member,
+                               std::string &b64,
+                               std::vector<std::string> &uids,
+                               std::string &peer) {
+        auto pos_k = member.find("\"k\":\"");
+        auto pos_u = member.find("\"u\":[");
+        auto pos_p = member.find("\"p\":\"");
+        if(pos_k != std::string::npos && pos_u != std::string::npos) {
+            b64 = member.substr(pos_k + 5, pos_u - pos_k - 8);
+        }
+        if(pos_p != std::string::npos) {
+            peer = member.substr(pos_p + 5, member.size() - pos_p - 7);
+        }
+        if(pos_u != std::string::npos) {
+            size_t arr_end = member.find(']', pos_u);
+            if(arr_end != std::string::npos) {
+                std::string arr = member.substr(pos_u + 5, arr_end - pos_u - 5);
+                size_t start = 0;
+                while((start = arr.find('"', start)) != std::string::npos) {
+                    size_t end = arr.find('"', start + 1);
+                    if(end == std::string::npos) break;
+                    uids.push_back(arr.substr(start + 1, end - start - 1));
+                    start = end + 1;
+                }
+            }
+        }
+    }
+
     /* brief: 本实例直接通过 WS 下发；返回送达的连接数
      * M2: per-conn send 串行化 — 取连接关联的 send_mutex 后再 send，
      *     防止 MQ 消费线程 / brpc IO 线程 / WS asio 线程并发 send 同一 conn 撕帧 / crash。
@@ -434,6 +568,10 @@ private:
     // M5: 心跳触发重发的可调参数（gflag 注入；默认值在 conf 缺省时使用）
     long _resend_batch        {50};
     long _resend_max_age_sec  {5};
+    // CrossInstanceOutbox reaper 状态
+    std::atomic<bool> _cross_reaper_running {false};
+    std::thread _cross_reaper_thread;
+    std::string _cross_reaper_owner;
 };
 
 class PushServer
@@ -633,6 +771,7 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
+    void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
 
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if(!_redis) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
@@ -666,6 +805,10 @@ public:
                                   std::placeholders::_1, std::placeholders::_2,
                                   std::placeholders::_3);
         _push_subscriber->consume(std::move(callback));
+        // 启动 CrossInstanceOutbox reaper
+        std::string owner = _reaper_owner.empty()
+            ? std::to_string(::getpid()) : _reaper_owner;
+        _push_service->start_cross_outbox_reaper(owner);
         LOG_INFO("Push 服务启动: rpc_port={} ws_port={}", port, ws_port);
     }
 
@@ -705,6 +848,7 @@ private:
     // M5: 心跳重发参数
     int _resend_batch       {50};
     int _resend_max_age_sec {5};
+    std::string _reaper_owner;
 
     Connection::ptr _connections;
     server_t _ws_server;
