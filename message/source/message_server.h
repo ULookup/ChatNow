@@ -820,16 +820,24 @@ public:
                     auto es_outbox = _es_outbox;
                     for(const auto &payload : batch) {
                         std::string p = payload;
-                        _es_publisher->publish_confirm(p,
-                            [es_outbox, p](PublishStatus st, const std::string &err) {
-                                if(st == PublishStatus::Acked) return;
-                                LOG_WARN("ES outbox reaper 重投仍失败: {}", err);
-                                if(es_outbox) es_outbox->enqueue(
-                                    p, static_cast<long long>(time(nullptr)));
-                            });
+                        try {
+                            _es_publisher->publish_confirm(p,
+                                [es_outbox, p](PublishStatus st, const std::string &err) {
+                                    if(st == PublishStatus::Acked) return;
+                                    LOG_WARN("ES outbox reaper 重投仍失败: {}", err);
+                                    if(es_outbox) es_outbox->enqueue(
+                                        p, static_cast<long long>(time(nullptr)));
+                                });
+                        } catch(std::exception &e) {
+                            LOG_WARN("ES outbox reaper publish_confirm 同步异常: {}", e.what());
+                            if(es_outbox) es_outbox->enqueue(
+                                p, static_cast<long long>(time(nullptr)));
+                        }
                     }
                 } catch(std::exception &e) {
                     LOG_ERROR("ES outbox reaper 异常: {}", e.what());
+                } catch(...) {
+                    LOG_ERROR("ES outbox reaper 未知异常");
                 }
                 std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
             }
