@@ -1,0 +1,115 @@
+syntax = "proto3";
+package chatnow.relationship;
+
+import "common/envelope.proto";
+import "common/types.proto";
+
+service RelationshipService {
+    rpc ListFriends(ListFriendsReq) returns (ListFriendsRsp);
+    rpc SendFriendRequest(SendFriendReq) returns (SendFriendRsp);
+    rpc HandleFriendRequest(HandleFriendReq) returns (HandleFriendRsp);
+    rpc RemoveFriend(RemoveFriendReq) returns (RemoveFriendRsp);
+    rpc SearchFriends(SearchFriendsReq) returns (SearchFriendsRsp);
+    rpc BlockUser(BlockUserReq) returns (BlockUserRsp);
+    rpc UnblockUser(UnblockUserReq) returns (UnblockUserRsp);
+    rpc ListBlockedUsers(ListBlockedReq) returns (ListBlockedRsp);
+    rpc ListPendingRequests(ListPendingReq) returns (ListPendingRsp);
+}
+
+message ListFriendsReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    PageRequest page = 4;
+}
+message ListFriendsRsp {
+    ResponseHeader header = 1;
+    repeated UserInfo friend_list = 2;
+    PageResponse page = 3;
+}
+
+message SendFriendReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+    string respondent_id = 4;
+}
+message SendFriendRsp {
+    ResponseHeader header = 1;
+    optional string notify_event_id = 2;
+}
+
+message HandleFriendReq {
+    string request_id = 1;
+    string notify_event_id = 2;
+    bool agree = 3;
+    string apply_user_id = 4;
+    optional string session_id = 5;
+    optional string user_id = 6;
+}
+message HandleFriendRsp {
+    ResponseHeader header = 1;
+    optional string new_conversation_id = 2;
+}
+
+message RemoveFriendReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string peer_id = 4;
+}
+message RemoveFriendRsp { ResponseHeader header = 1; }
+
+message SearchFriendsReq {
+    string request_id = 1;
+    string search_key = 2;
+    optional string session_id = 3;
+    optional string user_id = 4;
+}
+message SearchFriendsRsp {
+    ResponseHeader header = 1;
+    repeated UserInfo user_info = 2;
+}
+
+message BlockUserReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string peer_id = 4;
+}
+message BlockUserRsp { ResponseHeader header = 1; }
+
+message UnblockUserReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string peer_id = 4;
+}
+message UnblockUserRsp { ResponseHeader header = 1; }
+
+message ListBlockedReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    PageRequest page = 4;
+}
+message ListBlockedRsp {
+    ResponseHeader header = 1;
+    repeated UserInfo blocked_list = 2;
+    PageResponse page = 3;
+}
+
+message ListPendingReq {
+    string request_id = 1;
+    optional string session_id = 2;
+    optional string user_id = 3;
+}
+message ListPendingRsp {
+    ResponseHeader header = 1;
+    repeated FriendEvent event = 2;
+}
+
+message FriendEvent {
+    optional string event_id = 1;
+    UserInfo sender = 2;
+}
