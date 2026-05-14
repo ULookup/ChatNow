@@ -46,6 +46,8 @@ namespace key
     inline constexpr const char* kUnacked    = "im:unack:";         // uid        -> Sorted Set<msg_id, ts>
     inline constexpr const char* kPushOutbox     = "im:push:outbox";       // 全局 Sorted Set<serialized_payload, ts> 投递失败兜底
     inline constexpr const char* kPushOutboxLock = "im:push:outbox:lock";  // M3 reaper 单实例租约 key
+    inline constexpr const char* kCrossOutbox     = "im:push:cross_outbox";
+    inline constexpr const char* kCrossOutboxLock = "im:push:cross_outbox:lock";
 } // namespace key
 
 /* brief: 默认 TTL 常量 */
@@ -568,6 +570,87 @@ public:
             LOG_ERROR("PushOutbox.release_reaper_lease 失败: {}", e.what());
         }
     }
+private:
+    std::shared_ptr<sw::redis::Redis> _c;
+};
+
+// =============================================================================
+// 跨实例推送投递 outbox 兜底（PushBatch 跨实例失败时持久化，由 reaper 重试）
+// =============================================================================
+
+class CrossInstanceOutbox
+{
+public:
+    using ptr = std::shared_ptr<CrossInstanceOutbox>;
+    CrossInstanceOutbox(const std::shared_ptr<sw::redis::Redis> &c) : _c(c) {}
+
+    void enqueue(const std::string &payload_b64,
+                 const std::vector<std::string> &failed_uids,
+                 const std::string &peer_instance,
+                 long long score_ts)
+    {
+        std::string member = R"({"k":")" + payload_b64 + R"(","u":[)";
+        for(size_t i = 0; i < failed_uids.size(); ++i) {
+            if(i > 0) member += ",";
+            member += R"(")" + failed_uids[i] + R"(")";
+        }
+        member += R"(],"p":")" + peer_instance + R"("})";
+        enqueue_raw(member, score_ts);
+    }
+
+    void enqueue_raw(const std::string &member, long long score_ts) {
+        try { _c->zadd(key::kCrossOutbox, member, static_cast<double>(score_ts)); }
+        catch(std::exception &e) { LOG_ERROR("CrossInstanceOutbox.enqueue 失败: {}", e.what()); }
+    }
+
+    std::vector<std::string> peek(long limit = 50) {
+        std::vector<std::string> res;
+        try {
+            _c->zrange(key::kCrossOutbox, 0, limit - 1, std::back_inserter(res));
+        } catch(std::exception &e) { LOG_ERROR("CrossInstanceOutbox.peek 失败: {}", e.what()); }
+        return res;
+    }
+
+    void remove(const std::string &member) {
+        try { _c->zrem(key::kCrossOutbox, member); }
+        catch(std::exception &e) { LOG_ERROR("CrossInstanceOutbox.remove 失败: {}", e.what()); }
+    }
+
+    bool try_acquire_reaper_lease(const std::string &owner, int ttl_sec) {
+        static const char *kAcquireLua =
+            "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    redis.call('EXPIRE', KEYS[1], ARGV[2]); return 1 "
+            "end "
+            "return 0";
+        try {
+            std::vector<std::string> keys = {key::kCrossOutboxLock};
+            std::vector<std::string> args = {owner, std::to_string(ttl_sec)};
+            auto ret = _c->eval<long long>(kAcquireLua, keys.begin(), keys.end(),
+                                           args.begin(), args.end());
+            return ret == 1;
+        } catch(std::exception &e) {
+            LOG_ERROR("CrossInstanceOutbox.try_acquire_reaper_lease 失败: {}", e.what());
+            return false;
+        }
+    }
+
+    void release_reaper_lease(const std::string &owner) {
+        static const char *kReleaseLua =
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    return redis.call('DEL', KEYS[1]) "
+            "end "
+            "return 0";
+        try {
+            std::vector<std::string> keys = {key::kCrossOutboxLock};
+            std::vector<std::string> args = {owner};
+            _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        } catch(std::exception &e) {
+            LOG_ERROR("CrossInstanceOutbox.release_reaper_lease 失败: {}", e.what());
+        }
+    }
+
 private:
     std::shared_ptr<sw::redis::Redis> _c;
 };
