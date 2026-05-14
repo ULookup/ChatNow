@@ -1,0 +1,74 @@
+syntax = "proto3";
+package chatnow.push;
+
+import "common/types.proto";
+import "message/message_types.proto";
+
+enum NotifyType {
+    FRIEND_ADD_APPLY_NOTIFY = 0;
+    FRIEND_ADD_PROCESS_NOTIFY = 1;
+    CONVERSATION_CREATE_NOTIFY = 2;
+    CHAT_MESSAGE_NOTIFY = 3;
+    FRIEND_REMOVE_NOTIFY = 4;
+    MESSAGE_RECALLED_NOTIFY = 5;
+    PRESENCE_CHANGE_NOTIFY = 6;
+    TYPING_NOTIFY = 7;
+    CLIENT_AUTH = 49;
+    MSG_PUSH_ACK = 50;
+    CLIENT_HEARTBEAT = 51;
+}
+
+message NotifyClientAuth {
+    string session_id = 1;
+    string device_id = 2;
+    optional uint64 last_user_seq = 3;
+}
+
+message NotifyMsgPushAck {
+    string user_id = 1;
+    int64 message_id = 2;
+    uint64 user_seq = 3;
+    string conversation_id = 4;
+}
+
+message NotifyHeartbeat {
+    string user_id = 1;
+    uint64 last_user_seq = 2;
+}
+
+message NotifyFriendAddApply { UserInfo user_info = 1; }
+message NotifyFriendAddProcess { bool agree = 1; UserInfo user_info = 2; }
+message NotifyFriendRemove { string user_id = 1; }
+message NotifyNewConversation { bytes conversation_payload = 1; }
+message NotifyNewMessage { Message message_info = 1; }
+message NotifyMessageRecalled {
+    string conversation_id = 1;
+    int64 message_id = 2;
+}
+message NotifyPresenceChange {
+    string user_id = 1;
+    string state = 2;
+}
+message NotifyTyping {
+    string user_id = 1;
+    string conversation_id = 2;
+    bool is_typing = 3;
+}
+
+message NotifyMessage {
+    optional string notify_event_id = 1;
+    NotifyType notify_type = 2;
+    oneof notify_remarks {
+        NotifyFriendAddApply friend_add_apply = 3;
+        NotifyFriendAddProcess friend_process_result = 4;
+        NotifyFriendRemove friend_remove = 7;
+        NotifyNewConversation new_conversation_info = 5;
+        NotifyNewMessage new_message_info = 6;
+        NotifyMsgPushAck msg_push_ack = 8;
+        NotifyHeartbeat heartbeat = 9;
+        NotifyClientAuth client_auth = 10;
+        NotifyMessageRecalled message_recalled = 11;
+        NotifyPresenceChange presence_change = 12;
+        NotifyTyping typing = 13;
+    }
+}

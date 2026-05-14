@@ -1,0 +1,72 @@
+syntax = "proto3";
+package chatnow.media;
+
+import "common/envelope.proto";
+
+message FileDownloadData {
+    string file_id = 1;
+    bytes file_content = 2;
+}
+
+message FileUploadData {
+    string file_name = 1;
+    int64 file_size = 2;
+    bytes file_content = 3;
+}
+
+message FileInfo {
+    string file_id = 1;
+    string file_name = 2;
+    int64 file_size = 3;
+}
+
+service MediaService {
+    rpc UploadFile(UploadFileReq) returns (UploadFileRsp);
+    rpc DownloadFile(DownloadFileReq) returns (DownloadFileRsp);
+    rpc GetFileInfo(GetFileInfoReq) returns (GetFileInfoRsp);
+    rpc SpeechRecognition(SpeechRecognitionReq) returns (SpeechRecognitionRsp);
+}
+
+message UploadFileReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    FileUploadData file_data = 4;
+}
+message UploadFileRsp {
+    ResponseHeader header = 1;
+    FileInfo file_info = 2;
+}
+
+message DownloadFileReq {
+    string request_id = 1;
+    string file_id = 2;
+    optional string user_id = 3;
+    optional string session_id = 4;
+}
+message DownloadFileRsp {
+    ResponseHeader header = 1;
+    FileDownloadData file_data = 2;
+}
+
+message GetFileInfoReq {
+    string request_id = 1;
+    string file_id = 2;
+    optional string user_id = 3;
+    optional string session_id = 4;
+}
+message GetFileInfoRsp {
+    ResponseHeader header = 1;
+    FileInfo file_info = 2;
+}
+
+message SpeechRecognitionReq {
+    string request_id = 1;
+    bytes speech_content = 2;
+    optional string user_id = 3;
+    optional string session_id = 4;
+}
+message SpeechRecognitionRsp {
+    ResponseHeader header = 1;
+    string recognition_result = 2;
+}

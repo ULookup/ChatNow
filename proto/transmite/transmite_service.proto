@@ -1,0 +1,29 @@
+syntax = "proto3";
+package chatnow.transmite;
+
+import "common/envelope.proto";
+import "message/message_types.proto";
+
+message NewMessageReq {
+    string request_id = 1;
+    optional string user_id = 2;
+    optional string session_id = 3;
+    string conversation_id = 4;
+    MessageContent content = 5;
+    string client_msg_id = 6;
+}
+message NewMessageRsp {
+    ResponseHeader header = 1;
+    int64 message_id = 2;
+    uint64 seq_id = 3;
+}
+
+message GetTransmitTargetRsp {
+    ResponseHeader header = 1;
+    Message message = 2;
+    repeated string target_id_list = 3;
+}
+
+service MsgTransmitService {
+    rpc GetTransmitTarget(NewMessageReq) returns (GetTransmitTargetRsp);
+}

@@ -1,0 +1,36 @@
+syntax = "proto3";
+package chatnow.push;
+
+import "common/envelope.proto";
+
+message PushToUserReq {
+    string request_id = 1;
+    string user_id = 2;
+    bytes notify_payload = 3;
+    optional uint64 user_seq = 4;
+}
+message PushToUserRsp {
+    ResponseHeader header = 1;
+    int32 online_device_count = 2;
+}
+
+message PushBatchReq {
+    string request_id = 1;
+    repeated string user_id_list = 2;
+    bytes notify_payload = 3;
+    repeated UserSeqPair user_seqs = 4;
+}
+message PushBatchRsp {
+    ResponseHeader header = 1;
+    int32 online_count = 2;
+}
+
+message UserSeqPair {
+    string user_id = 1;
+    uint64 user_seq = 2;
+}
+
+service PushService {
+    rpc PushToUser(PushToUserReq) returns (PushToUserRsp);
+    rpc PushBatch(PushBatchReq) returns (PushBatchRsp);
+}
