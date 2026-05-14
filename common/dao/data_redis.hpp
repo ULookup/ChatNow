@@ -234,38 +234,31 @@ public:
     }
     /* brief: 启动回填 / Redis 数据丢失修复用：把当前 seq 拉到至少 base（Lua 原子操作，消除多实例并发 race） */
     void backfill_session(const std::string &ssid, unsigned long base) {
-        static const char *kLua =
-            "local cur = redis.call('GET', KEYS[1]) "
-            "if not cur or tonumber(cur) < tonumber(ARGV[1]) then "
-            "    redis.call('SET', KEYS[1], ARGV[1]) "
-            "    return 1 "
-            "end "
-            "return 0";
         try {
             std::vector<std::string> keys = {key::kSeqSession + ssid};
             std::vector<std::string> args = {std::to_string(base)};
-            _c->eval<long long>(kLua, keys.begin(), keys.end(), args.begin(), args.end());
+            _c->eval<long long>(kBackfillLua, keys.begin(), keys.end(), args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("SeqGen.backfill_session 失败 {} base={}: {}", ssid, base, e.what());
         }
     }
     void backfill_user(const std::string &uid, unsigned long base) {
-        static const char *kLua =
-            "local cur = redis.call('GET', KEYS[1]) "
-            "if not cur or tonumber(cur) < tonumber(ARGV[1]) then "
-            "    redis.call('SET', KEYS[1], ARGV[1]) "
-            "    return 1 "
-            "end "
-            "return 0";
         try {
             std::vector<std::string> keys = {key::kSeqUser + uid};
             std::vector<std::string> args = {std::to_string(base)};
-            _c->eval<long long>(kLua, keys.begin(), keys.end(), args.begin(), args.end());
+            _c->eval<long long>(kBackfillLua, keys.begin(), keys.end(), args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("SeqGen.backfill_user 失败 {} base={}: {}", uid, base, e.what());
         }
     }
 private:
+    static constexpr const char *kBackfillLua =
+        "local cur = redis.call('GET', KEYS[1]) "
+        "if not cur or tonumber(cur) < tonumber(ARGV[1]) then "
+        "    redis.call('SET', KEYS[1], ARGV[1]) "
+        "    return 1 "
+        "end "
+        "return 0";
     std::shared_ptr<sw::redis::Redis> _c;
 };
 
