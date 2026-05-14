@@ -1,0 +1,77 @@
+<h2>Presence 域（修订）：Push 内模块，proto 独立</h2>
+<p class="subtitle">Presence 不单独部署——和 Push 同进程，共享心跳。proto 文件独立，方便未来拆分。</p>
+
+<div class="split">
+  <div class="mockup" style="flex:1.3;">
+    <div class="mockup-header">运行时架构</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.55;">
+<pre style="margin:0;">┌──── Push 进程 ──────────────────────────────┐
+│                                               │
+│  WS 长连接层                                   │
+│  ├─ 连接管理                                  │
+│  ├─ 心跳处理 ─────────┐                       │
+│  ├─ 消息推送          │                       │
+│  └─ ACK/重传          │  共享心跳，无 RPC     │
+│                        ▼                       │
+│  Presence 模块（同进程）                       │
+│  ├─ 在线状态管理 (ONLINE/AWAY/BUSY/...)   │
+│  ├─ 输入中指示                                │
+│  ├─ 状态变化推送 (Subscribe 模式)             │
+│  └─ 最后在线时间                              │
+│                                               │
+│  Redis: im:online:{uid} (路由，Push 管)        │
+│  Redis: im:presence:{uid} (状态，Presence 管)  │
+│                                               │
+└───────────────────────────────────────────────┘
+
+客户端                     Push 服务
+  │                          │
+  │── WS CLIENT_HEARTBEAT ──>│
+  │                          │── 本地更新 im:online:{uid} + im:presence:{uid}
+  │                          │   （一次心跳完成，无 RPC 开销）
+  │                          │
+  │── TypingIndicator WS ───>│── 本地 Presence.setTyping()
+  │                          │── 推送给会话其他在线成员
+  │                          │
+  │<── PresenceChange NOTIFY ─│── Subscribe 事件触发
+</pre>
+    </div>
+  </div>
+
+  <div class="mockup" style="flex:0.7;">
+    <div class="mockup-header">独立 vs 模块对比</div>
+    <div class="mockup-body" style="font-size:0.72rem;">
+      <table style="width:100%;border-collapse:collapse;">
+        <tr style="color:#888;"><th></th><th>独立服务</th><th style="color:#27ae60;">Push 内模块</th></tr>
+        <tr><td>心跳 RPC</td><td style="color:#e74c3c;">有</td><td style="color:#27ae60;">无（本地调用）</td></tr>
+        <tr><td>运维成本</td><td style="color:#e74c3c;">+1 进程</td><td style="color:#27ae60;">0</td></tr>
+        <tr><td>proto 独立</td><td>是</td><td style="color:#27ae60;">是</td></tr>
+        <tr><td>将来拆分</td><td>—</td><td style="color:#27ae60;">proto 不变，抽代码即可</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+
+<h3>调整后的 Presence Service（proto 独立，不独立部署）</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">// presence/presence_service.proto — proto 文件独立，运行时在 Push 进程内
+service PresenceService {
+  // === 客户端直接调用的 RPC ===
+  rpc SetPresence(SetPresenceReq) returns (SetPresenceRsp);
+  rpc GetPresence(GetPresenceReq) returns (GetPresenceRsp);
+  rpc BatchGetPresence(BatchGetPresenceReq) returns (BatchGetPresenceRsp);
+
+  // === 订阅（客户端通过 WS 订阅好友状态变化） ===
+  rpc SubscribePresence(SubscribeReq) returns (SubscribeRsp);
+  rpc UnsubscribePresence(UnsubscribeReq) returns (UnsubscribeRsp);
+
+  // === 输入中指示 ===
+  rpc SendTyping(TypingReq) returns (TypingRsp);
+
+  // 注意：无 Heartbeat RPC——心跳在 Push 进程内本地处理
+  //       Push 收到 WS 心跳 → 直接更新 Presence 内存 + Redis
+}
+
+// 这些 RPC 通过 Push 服务的 brpc server 暴露
+</pre>
+</div></div>

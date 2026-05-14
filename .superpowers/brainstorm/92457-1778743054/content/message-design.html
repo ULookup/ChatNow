@@ -1,0 +1,149 @@
+<h2>消息域设计：MessageInfo 重构 + 新特性</h2>
+<p class="subtitle">以微信/飞书/Discord 的消息模型为参照，补齐现代 IM 必需的消息能力</p>
+
+<div class="split">
+  <div class="mockup" style="flex:0.8;">
+    <div class="mockup-header">当前 MessageInfo（8 字段）</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.55;">
+<pre style="margin:0;">message MessageInfo {
+  int64 message_id = 1;
+  string chat_session_id = 2;
+  int64 timestamp = 3;
+  UserInfo sender = 4;        ← 内嵌全量用户信息
+  MessageContent message = 5;
+  uint64 seq_id = 6;
+  string client_msg_id = 7;
+  optional uint64 user_seq = 8;
+}
+</pre>
+<div style="margin-top:12px;color:#e74c3c;font-size:0.75rem;">
+问题：sender 嵌入 UserInfo → 每条消息都冗余传输头像/昵称；无回复引用、无撤回、无 reactions
+</div>
+    </div>
+  </div>
+
+  <div class="mockup" style="flex:1.2;">
+    <div class="mockup-header">新设计：message/message_types.proto</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.5;">
+<pre style="margin:0;">message Message {
+  // === 标识 ===
+  int64 message_id = 1;
+  string conversation_id = 2;        // 改名
+
+  // === 内容 ===
+  MessageContent content = 3;
+
+  // === 发送者 ===
+  string sender_id = 4;              // 仅传 ID，客户端缓存解析
+
+  // === 时间 ===
+  int64 created_at_ms = 5;           // 毫秒时间戳
+  int64 edited_at_ms = 6;            // 0=未编辑
+
+  // === 同步序号 ===
+  uint64 seq_id = 7;                 // 会话内序号
+  uint64 user_seq = 8;               // 用户全局序号（推送用）
+  string client_msg_id = 9;          // 客户端幂等 key
+
+  // === 状态 ===
+  MessageStatus status = 10;         // NORMAL | RECALLED | DELETED
+
+  // === 回复引用 ===
+  optional ReplyRef reply_to = 11;
+
+  // === @提及 ===
+  repeated string mentioned_user_ids = 12;
+
+  // === 转发 ===
+  optional ForwardInfo forward_info = 13;
+
+  // === Reactions ===
+  repeated ReactionGroup reactions = 14;
+
+  // === Pin ===
+  bool is_pinned = 15;
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<h3>消息类型扩充</h3>
+<div class="split">
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">当前（4 种）</div>
+    <div class="mockup-body" style="font-size:0.75rem;">
+      STRING = 0<br>IMAGE = 1<br>FILE = 2<br>SPEECH = 3
+    </div>
+  </div>
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">新设计（8 种）</div>
+    <div class="mockup-body" style="font-size:0.75rem;">
+      TEXT = 0<br>IMAGE = 1<br>FILE = 2<br>AUDIO = 3 <span style="color:#888;">← 原名 SPEECH</span><br>
+      <span style="color:#27ae60;">VIDEO = 4</span><br>
+      <span style="color:#27ae60;">LOCATION = 5</span><br>
+      <span style="color:#27ae60;">STICKER = 6</span><br>
+      <span style="color:#27ae60;">SYSTEM_NOTICE = 7</span><br>
+    </div>
+  </div>
+</div>
+
+<h3>新特性设计</h3>
+
+<div class="section">
+<h4>ReplyRef — 引用回复</h4>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">message ReplyRef {
+  int64 replied_message_id = 1;
+  string replied_sender_id = 2;
+  MessageType replied_message_type = 3;
+  string content_preview = 4;        // 前 50 字预览，被撤回则显示"消息已撤回"
+  bool is_recalled = 5;              // 引用的原消息是否已被撤回
+}
+</pre>
+</div></div>
+</div>
+
+<div class="section">
+<h4>ReactionGroup — 消息回应</h4>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">message ReactionGroup {
+  string emoji = 1;                  // unicode emoji 或自定义表情 ID
+  int32 count = 2;                   // 使用该表情的人数
+  repeated string recent_user_ids = 3; // 最近使用的 3 人（用于 UI 展示）
+  bool self_reacted = 4;             // 当前用户是否使用过
+}
+// 每条消息最多 20 组 reaction，每组最多显示最近 3 人
+</pre>
+</div></div>
+</div>
+
+<div class="section">
+<h4>ForwardInfo — 转发信息</h4>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">message ForwardInfo {
+  string forward_from_user_id = 1;   // 谁转发的
+  int64 forward_at_ms = 2;           // 转发时间
+  string source_conversation_id = 3; // 来源会话（可选）
+}
+</pre>
+</div></div>
+</div>
+
+<h3>关键决策：sender_id vs sender UserInfo</h3>
+<div class="pros-cons">
+  <div class="pros" style="flex:1.5;"><h4>推荐：仅传 sender_id</h4>
+    <ul>
+      <li>每条消息节省 ~200 bytes（头像二进制常为 100+ bytes）</li>
+      <li>客户端已有用户信息缓存，按 ID 本地查询</li>
+      <li>头像/昵称变更不需更新所有历史消息</li>
+      <li>与微信、Telegram、Discord 一致</li>
+    </ul>
+  </div>
+  <div class="cons" style="flex:1;"><h4>代价</h4>
+    <ul>
+      <li>客户端首次加载需批量拉取用户信息</li>
+      <li>Push 推送首条消息时需附带 sender 信息</li>
+    </ul>
+  </div>
+</div>

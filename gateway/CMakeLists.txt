@@ -7,7 +7,7 @@ set(target "gateway_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files base.proto speech.proto file.proto user.proto transmite.proto message.proto friend.proto gateway.proto notify.proto chatsession.proto push.proto)
+set(proto_files common/types.proto common/error.proto common/envelope.proto identity/identity_service.proto relationship/relationship_service.proto conversation/conversation_service.proto message/message_types.proto message/message_service.proto media/media_service.proto presence/presence_service.proto push/push_service.proto push/notify.proto transmite/transmite_service.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})

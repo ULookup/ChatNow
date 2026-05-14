@@ -1,0 +1,12 @@
+{"type":"server-started","port":60661,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:60661","screen_dir":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content","state_dir":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/state"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/proto-structure.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/envelope-errors.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/message-design.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/conversation-design.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/identity-relationship.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/presence-design.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/presence-v2.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/message-service.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/waiting.html"}
+{"type":"screen-added","file":"/Users/yanghaoyang/repo/ChatNow/.superpowers/brainstorm/92457-1778743054/content/db-redis-changes.html"}
+{"type":"server-stopped","reason":"idle timeout"}

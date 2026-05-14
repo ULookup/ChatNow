@@ -1,0 +1,108 @@
+<h2>身份认证域 & 关系域</h2>
+<p class="subtitle">identity/ 合并 user.proto 的 auth+profile，relationship/ 在 friend.proto 基础上增加黑名单</p>
+
+<div class="split">
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">identity/identity_service.proto</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.5;">
+<pre style="margin:0;">service IdentityService {
+  // === 认证 ===
+  rpc Register(RegisterReq)
+    returns (RegisterRsp);
+  rpc Login(LoginReq)
+    returns (LoginRsp);
+  rpc Logout(LogoutReq)
+    returns (LogoutRsp);
+  rpc SendVerifyCode(SendVerifyCodeReq)
+    returns (SendVerifyCodeRsp);
+  rpc RefreshToken(RefreshTokenReq)
+    returns (RefreshTokenRsp);         ← 新增
+
+  // === 个人资料 ===
+  rpc GetProfile(GetProfileReq)
+    returns (GetProfileRsp);
+  rpc UpdateProfile(UpdateProfileReq)
+    returns (UpdateProfileRsp);        ← 合并昵称/头像/签名
+
+  // === 用户搜索 ===
+  rpc SearchUsers(SearchUsersReq)
+    returns (SearchUsersRsp);
+
+  // === 内部接口 ===
+  rpc GetMultiUserInfo(GetMultiUserInfoReq)
+    returns (GetMultiUserInfoRsp);
+}
+</pre>
+<div style="margin-top:8px;font-size:0.7rem;color:#27ae60;">
+变化：Register 合并 username + mail 两种方式为单一 RPC，Login 同理。UpdateProfile 一次改多个字段，替代三个独立 RPC。新增 RefreshToken。
+</div>
+    </div>
+  </div>
+
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">relationship/relationship_service.proto</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.5;">
+<pre style="margin:0;">service RelationshipService {
+  // === 好友 ===
+  rpc ListFriends(ListFriendsReq)
+    returns (ListFriendsRsp);          ← 分页
+  rpc SendFriendRequest(SendFriendReq)
+    returns (SendFriendRsp);
+  rpc HandleFriendRequest(HandleFriendReq)
+    returns (HandleFriendRsp);
+  rpc RemoveFriend(RemoveFriendReq)
+    returns (RemoveFriendRsp);
+  rpc SearchFriends(SearchFriendsReq)
+    returns (SearchFriendsRsp);
+
+  // === 黑名单 ===                     ← 全新
+  rpc BlockUser(BlockUserReq)
+    returns (BlockUserRsp);
+  rpc UnblockUser(UnblockUserReq)
+    returns (UnblockUserRsp);
+  rpc ListBlockedUsers(ListBlockedReq)
+    returns (ListBlockedRsp);
+
+  // === 待处理请求 ===
+  rpc ListPendingRequests(ListPendingReq)
+    returns (ListPendingRsp);
+}
+</pre>
+<div style="margin-top:8px;font-size:0.7rem;color:#27ae60;">
+变化：好友列表加游标分页。HandleFriendRequest 统一接受/拒绝。新增 BlockUser / UnblockUser / ListBlockedUsers。
+</div>
+    </div>
+  </div>
+</div>
+
+<h3>结构体精简</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">// common/types.proto — UserInfo 保持不变但瘦身
+message UserInfo {
+  string user_id = 1;
+  string nickname = 2;
+  string bio = 3;           // 原名 description，与行业对齐
+  string phone = 4;         // 原名 mail（mail_number 确实存手机号）
+  string avatar_url = 5;    // 原名 bytes avatar → 改为 URL
+}
+
+// 请求示例：统一模式
+message RegisterReq {
+  string request_id = 1;
+  oneof credential {               // 二选一
+    UsernamePassword username_pwd = 2;
+    PhoneVerifyCode phone_code = 3;
+  }
+  string nickname = 4;             // 首次注册必填
+}
+message LoginReq {
+  string request_id = 1;
+  oneof credential {
+    UsernamePassword username_pwd = 2;
+    PhoneVerifyCode phone_code = 3;
+  }
+  string device_id = 4;            // 多端登录标识
+  string device_name = 5;          // 设备名称（"iPhone 15"等）
+}
+</pre>
+</div></div>

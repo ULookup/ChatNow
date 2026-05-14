@@ -1,0 +1,87 @@
+<h2>Proto 重构 → DB 表 & Redis 缓存变更</h2>
+<p class="subtitle">交叉对照 proto 新增字段 → 哪些表要改、哪些 key 要加</p>
+
+<h3>需要变更的表（5 张）</h3>
+<table style="width:100%;border-collapse:collapse;font-size:0.78rem;">
+<tr style="color:#888;"><th style="text-align:left;padding:4px 8px;">表</th><th style="text-align:left;padding:4px 8px;">操作</th><th style="text-align:left;padding:4px 8px;">变更内容</th><th style="text-align:left;padding:4px 8px;">触发 proto 字段</th></tr>
+
+<tr><td style="padding:6px 8px;color:#27ae60;">message_reaction</td><td style="padding:6px 8px;color:#27ae60;">新增表</td><td style="padding:6px 8px;">message_id + user_id + emoji + create_time<br>uk(msg_id, user_id, emoji)</td><td style="padding:6px 8px;">Message.reactions</td></tr>
+
+<tr><td style="padding:6px 8px;color:#27ae60;">message_pin</td><td style="padding:6px 8px;color:#27ae60;">新增表</td><td style="padding:6px 8px;">conversation_id + message_id + pinned_by + pinned_at<br>uk(conv_id, msg_id)</td><td style="padding:6px 8px;">Message.is_pinned</td></tr>
+
+<tr><td style="padding:6px 8px;color:#f39c12;">message</td><td style="padding:6px 8px;color:#f39c12;">加列</td><td style="padding:6px 8px;">+ edit_time (DATETIME(3))<br>+ forward_from_uid (varchar(32))<br>+ forward_at (DATETIME(3))<br>MessageType 枚举补充 STICKER=7</td><td style="padding:6px 8px;">edited_at_ms<br>forward_info</td></tr>
+
+<tr><td style="padding:6px 8px;color:#f39c12;">chat_session_member</td><td style="padding:6px 8px;color:#f39c12;">加列</td><td style="padding:6px 8px;">+ draft (text, nullable)</td><td style="padding:6px 8px;">SelfMemberInfo.draft</td></tr>
+
+<tr><td style="padding:6px 8px;color:#f39c12;">chat_session</td><td style="padding:6px 8px;color:#f39c12;">枚举扩展</td><td style="padding:6px 8px;">ChatSessionType 加 CHANNEL=3</td><td style="padding:6px 8px;">ConversationType.CHANNEL</td></tr>
+</table>
+
+<h3>无需变更的表（7 张）</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.75rem;">
+<table style="width:100%;border-collapse:collapse;">
+<tr><td style="padding:4px 8px;">user</td><td style="padding:4px 8px;">已有 bio(description)、phone(mail)、avatar_url(avatar_id)，仅 proto 层面改名</td></tr>
+<tr><td style="padding:4px 8px;">user_timeline</td><td style="padding:4px 8px;">seq/status 字段已齐全，reactions/pin 不影射 timeline</td></tr>
+<tr><td style="padding:4px 8px;">relation</td><td style="padding:4px 8px;">RelationStatus 已含 BLOCKED（黑名单先于 proto 存在）</td></tr>
+<tr><td style="padding:4px 8px;">friend_apply</td><td style="padding:4px 8px;">Pb 未新增申请相关字段</td></tr>
+<tr><td style="padding:4px 8px;">message_attachment</td><td style="padding:4px 8px;">已含 IMAGE/VIDEO/AUDIO/STICKER，无需变更</td></tr>
+<tr><td style="padding:4px 8px;">message_read</td><td style="padding:4px 8px;">message_read 表与 proto 无新增映射</td></tr>
+<tr><td style="padding:4px 8px;">message_mention</td><td style="padding:4px 8px;">Message.mentioned_user_ids 已由该表承载，无需变更</td></tr>
+<tr><td style="padding:4px 8px;">user_device</td><td style="padding:4px 8px;">已有 online_status + last_active_time，Presence 实时态走 Redis</td></tr>
+</table>
+</div></div>
+
+<h3>Redis 缓存变更</h3>
+<div class="split">
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">新增 Key（Presence 域）</div>
+    <div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">im:presence:{uid}        HASH
+  state / last_active / custom_status
+
+im:presence:devices:{uid} SET<device_id>
+  TTL 120s（心跳续期）
+
+im:presence:typing:{uid}  SET<conversation_id>
+  TTL 10s
+
+im:presence:sub:{uid}     SET<user_id>
+  我订阅了谁的状态变化
+</pre>
+    </div>
+  </div>
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">建议改名（可选，向后兼容）</div>
+    <div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">im:seq:ssid:  → im:seq:conv:
+  (session → conversation)
+
+im:last:      → im:last:msg:
+  (更明确含义)
+
+im:rl:ssid:   → im:rl:conv:
+  (session → conversation)
+</pre>
+<div style="margin-top:8px;color:#888;font-size:0.7rem;">
+注：改名不是必须的，旧 key 继续工作。在新 DAO 中使用新 key，旧 key 在过渡期双写。
+</div>
+    </div>
+  </div>
+</div>
+
+<h3>关键设计决策</h3>
+<div class="pros-cons">
+  <div class="pros"><h4>不做的</h4>
+    <ul>
+      <li><strong>不重命名 DB 列</strong>：session_id、user_id 等沿用现有列名，仅在 DAO→proto 映射层做转换。避免大规模 DB migration 风险。</li>
+      <li><strong>is_pinned 不走 message 表列</strong>：独立 message_pin 表。pin 是低频操作，不应在主表加低基数列。且独立表可记录谁 pin 的。</li>
+      <li><strong>reactions 独立表</strong>：同一条消息可能有几十种 emoji × 几百人，写在一行会撑爆。独立表支持高效分页。</li>
+    </ul>
+  </div>
+  <div class="cons"><h4>注意</h4>
+    <ul>
+      <li>message 表加 3 列：每列都是 nullable，不影响现有写入路径</li>
+      <li>message_reaction 高写入：热门消息可能 QPS 很高，需要 Redis 前置缓冲后批量刷库</li>
+      <li>draft 存 DB 而非 Redis：草稿不是实时同步场景，DB 即可，避免 Redis 内存膨胀</li>
+    </ul>
+  </div>
+</div>

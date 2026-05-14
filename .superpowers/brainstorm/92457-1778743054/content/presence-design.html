@@ -1,0 +1,112 @@
+<h2>Presence 域：在线状态 + 输入中指示 + 最后在线时间</h2>
+<p class="subtitle">全新服务。当前在线状态散落在 Push（im:online:{uid} SET），没有面向客户端的状态 API</p>
+
+<div class="section">
+<h3>Presence 状态机</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">enum PresenceState {
+  PRESENCE_UNSPECIFIED = 0;
+  ONLINE = 1;       // 在线（心跳活跃）
+  AWAY = 2;         // 离开（心跳超时，尚未离线）
+  BUSY = 3;         // 请勿打扰
+  OFFLINE = 4;      // 离线
+  INVISIBLE = 5;    // 隐身（对他人显示离线，自己正常收发）
+}
+
+message Presence {
+  string user_id = 1;
+  PresenceState state = 2;
+  int64 last_active_at_ms = 3;         // 最后活跃时间
+  repeated string active_device_types = 4; // ["mobile","desktop"]
+  optional string custom_status = 5;  // 自定义状态文字
+}
+</pre>
+</div></div>
+</div>
+
+<div class="split">
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">presence/presence_service.proto</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.5;">
+<pre style="margin:0;">service PresenceService {
+  // === 状态管理 ===
+  rpc SetPresence(SetPresenceReq)
+    returns (SetPresenceRsp);
+  rpc GetPresence(GetPresenceReq)
+    returns (GetPresenceRsp);
+  rpc BatchGetPresence(BatchGetPresenceReq)
+    returns (BatchGetPresenceRsp);     // 好友列表批量查询
+
+  // === 订阅推送 ===
+  // 客户端订阅好友上线/下线变化
+  rpc SubscribePresence(SubscribeReq)
+    returns (SubscribeRsp);
+  rpc UnsubscribePresence(UnsubscribeReq)
+    returns (UnsubscribeRsp);
+
+  // === 输入中指示 ===
+  rpc SendTypingIndicator(TypingReq)
+    returns (TypingRsp);
+
+  // === 内部接口 ===
+  // Push 服务心跳续期时调用
+  rpc Heartbeat(HeartbeatReq)
+    returns (HeartbeatRsp);
+}
+</pre>
+    </div>
+  </div>
+
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">Typing 和 Heartbeat 结构</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.5;">
+<pre style="margin:0;">// 输入中指示（客户端→Push→Presence）
+message TypingReq {
+  string request_id = 1;
+  string user_id = 2;
+  string conversation_id = 3;
+  bool is_typing = 4;  // true=开始输入, false=停止
+}
+// 服务端收到后推送给会话其他成员
+
+// 心跳（Push→Presence，内部接口）
+message HeartbeatReq {
+  string request_id = 1;
+  string user_id = 2;
+  string device_id = 3;
+  string device_type = 4;    // mobile/desktop/web
+  bool is_connected = 5;     // ws connected
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<h3>与其他服务的交互</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">
+客户端                     Push 服务                  Presence 服务
+  │                          │                           │
+  │── WS CLIENT_HEARTBEAT ──>│                           │
+  │                          │── Heartbeat RPC ─────────>│  (每 60s)
+  │                          │                           │  redis SADD im:online:{uid} device_id
+  │                          │                           │  ZADD im:lastseen:{uid} timestamp
+  │                          │                           │
+  │── SetPresence RPC ─────────────────────────────────>│  (用户切 BUSY/INVISIBLE)
+  │                          │                           │
+  │── TypingIndicator ──────>│── Typing RPC ────────────>│
+  │                          │                           │  → 推送给会话其他在线成员
+  │<── PresenceChange NOTIFY ─│<── Subscribe 事件 ──────│
+</pre>
+</div></div>
+
+<h3>存储设计</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<table style="width:100%;border-collapse:collapse;">
+<tr style="color:#888;"><th style="text-align:left;padding:4px 8px;">Key</th><th style="text-align:left;padding:4px 8px;">类型</th><th style="text-align:left;padding:4px 8px;">TTL</th><th style="text-align:left;padding:4px 8px;">说明</th></tr>
+<tr><td style="padding:4px 8px;">im:presence:{uid}</td><td style="padding:4px 8px;">HASH</td><td style="padding:4px 8px;">—</td><td style="padding:4px 8px;">state, custom_status, last_active</td></tr>
+<tr><td style="padding:4px 8px;">im:presence:devices:{uid}</td><td style="padding:4px 8px;">SET</td><td style="padding:4px 8px;">120s</td><td style="padding:4px 8px;">活跃设备列表（心跳续期）</td></tr>
+<tr><td style="padding:4px 8px;">im:presence:typing:{uid}</td><td style="padding:4px 8px;">SET</td><td style="padding:4px 8px;">10s</td><td style="padding:4px 8px;">正在输入的会话 ID 集合</td></tr>
+<tr><td style="padding:4px 8px;">im:presence:sub:{uid}</td><td style="padding:4px 8px;">SET</td><td style="padding:4px 8px;">—</td><td style="padding:4px 8px;">"我订阅了谁的上线通知"</td></tr>
+</table>
+</div></div>

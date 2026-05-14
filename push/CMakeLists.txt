@@ -4,7 +4,7 @@ project(push_server)
 set(target "push_server")
 # 1. proto
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files base.proto notify.proto push.proto message.proto)
+set(proto_files common/types.proto common/error.proto common/envelope.proto message/message_types.proto push/push_service.proto push/notify.proto presence/presence_service.proto)
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
     string(REPLACE ".proto" ".pb.cc" proto_cc ${proto_file})

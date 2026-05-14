@@ -1,0 +1,86 @@
+<h2>Current vs Proposed Proto Structure</h2>
+<p class="subtitle">Domain-driven reorganization with clear internal/external boundaries</p>
+
+<div class="split">
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">Current (11 files, god base.proto)</div>
+    <div class="mockup-body" style="font-size:0.8rem;line-height:1.6;">
+      <strong>base.proto</strong> <span style="color:#e74c3c;">← god file (190 lines)</span><br>
+      ├ UserInfo, MessageInfo, ChatSessionInfo<br>
+      ├ InternalMessage, ESIndexEvent<br>
+      ├ FileUploadData, FileDownloadData<br>
+      ├ 4 enums, UserSeqPair<br>
+      <br>
+      <strong>gateway.proto</strong> — HTTP paths<br>
+      <strong>user.proto</strong> — Auth + Profile (mixed)<br>
+      <strong>friend.proto</strong> — Friend CRUD<br>
+      <strong>chatsession.proto</strong> — Session + Group<br>
+      <strong>transmite.proto</strong> — Message ingest<br>
+      <strong>message.proto</strong> — Storage + Search<br>
+      <strong>push.proto</strong> — Push RPC<br>
+      <strong>notify.proto</strong> — Client notify types<br>
+      <strong>file.proto</strong> — File up/download<br>
+      <strong>speech.proto</strong> — Speech recognition<br>
+    </div>
+  </div>
+
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">Proposed (12 files, domain-driven)</div>
+    <div class="mockup-body" style="font-size:0.8rem;line-height:1.6;">
+      <strong>common/</strong><br>
+      ├ <strong>types.proto</strong> — shared primitives<br>
+      ├ <strong>error.proto</strong> — unified error codes<br>
+      └ <strong>envelope.proto</strong> — pagination, envelope<br>
+      <br>
+      <strong>identity/</strong><br>
+      └ <strong>identity_service.proto</strong> — Auth + Profile<br>
+      <br>
+      <strong>relationship/</strong><br>
+      └ <strong>relationship_service.proto</strong> — Friends + Blocks<br>
+      <br>
+      <strong>conversation/</strong><br>
+      └ <strong>conversation_service.proto</strong> — Sessions + Groups<br>
+      <br>
+      <strong>message/</strong><br>
+      ├ <strong>message_types.proto</strong> — domain types<br>
+      ├ <strong>message_service.proto</strong> — client RPCs<br>
+      └ <strong>message_internal.proto</strong> — MQ/internal<br>
+      <br>
+      <strong>presence/</strong> <span style="color:#27ae60;">← NEW</span><br>
+      └ <strong>presence_service.proto</strong><br>
+      <br>
+      <strong>push/</strong><br>
+      ├ <strong>push_service.proto</strong> — internal RPC<br>
+      └ <strong>notify.proto</strong> — client events<br>
+      <br>
+      <strong>media/</strong><br>
+      └ <strong>media_service.proto</strong> — File + Speech<br>
+    </div>
+  </div>
+</div>
+
+<h3>Key Design Decisions</h3>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>What improves</h4>
+    <ul>
+      <li>base.proto split → common/types.proto stays under 80 lines</li>
+      <li>Internal messages isolated in message_internal.proto</li>
+      <li>Each domain imports only what it needs from common/</li>
+      <li>Presence domain extracted from push — now a first-class service</li>
+      <li>Media consolidates file + speech (both are "attachment" concerns)</li>
+      <li>Identity separates auth logic from profile logic within one file</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>Migration cost</h4>
+    <ul>
+      <li>proto reorganization → all import paths change</li>
+      <li>Generated code paths shift → CMakeLists.txt updates</li>
+      <li>user → identity rename touches gateway routing</li>
+      <li>file + speech → media merges two small services</li>
+      <li>Recommend: new imports, deprecate old, then remove</li>
+    </ul>
+  </div>
+</div>

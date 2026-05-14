@@ -1,0 +1,138 @@
+<h2>会话域设计：ChatSession → Conversation</h2>
+<p class="subtitle">精简字段、分离"会话元信息"与"我在此会话的状态"、补齐草稿和未读游标</p>
+
+<div class="split">
+  <div class="mockup" style="flex:0.9;">
+    <div class="mockup-header">当前问题</div>
+    <div class="mockup-body" style="font-size:0.72rem;line-height:1.6;">
+      <span style="color:#e74c3c;">1.</span> <code>single_chat_friend_id</code> 语义不清——单聊直接用成员列表推导即可<br>
+      <span style="color:#e74c3c;">2.</span> <code>prev_message</code> 内嵌完整 MessageInfo → 带宽浪费<br>
+      <span style="color:#e74c3c;">3.</span> <code>oneof member_info</code> 用 brief/detail 区分场景——聪明但容易误用<br>
+      <span style="color:#e74c3c;">4.</span> <code>last_read_seq</code> 和 draft 不存在——会话服务无法独立计算未读<br>
+      <span style="color:#e74c3c;">5.</span> <code>chat_session_type</code> 是 uint32 而非 enum
+    </div>
+  </div>
+  <div class="mockup" style="flex:1.1;">
+    <div class="mockup-header">新设计：conversation/conversation_service.proto</div>
+    <div class="mockup-body" style="font-size:0.7rem;line-height:1.45;">
+<pre style="margin:0;">enum ConversationType {
+  CONVERSATION_TYPE_UNSPECIFIED = 0;
+  PRIVATE = 1;             // 单聊
+  GROUP = 2;               // 群聊
+  CHANNEL = 3;             // 频道/广播（未来）
+}
+enum ConversationStatus {
+  CONVERSATION_NORMAL = 0;
+  CONVERSATION_ARCHIVED = 1;
+  CONVERSATION_DISMISSED = 2;
+}
+enum MemberRole {
+  MEMBER = 0;
+  ADMIN = 1;
+  OWNER = 2;
+}
+
+message Conversation {
+  string conversation_id = 1;
+  ConversationType type = 2;
+
+  // 基本信息
+  string name = 3;
+  string avatar_url = 4;
+  optional string description = 5;  // 群公告
+  int64 created_at_ms = 6;
+
+  // 成员概况
+  int32 member_count = 7;
+  repeated string top_member_ids = 8; // 前5人（列表头像展示）
+
+  // 状态
+  ConversationStatus status = 9;
+
+  // 最后消息预览（独立结构，不含完整 sender）
+  optional MessagePreview last_message = 10;
+
+  // "我"在此会话的状态（列表场景填充）
+  optional SelfMemberInfo self = 11;
+}
+
+message MessagePreview {
+  int64 message_id = 1;
+  string sender_id = 2;
+  MessageType message_type = 3;
+  string content_preview = 4;      // 前 50 字
+  int64 sent_at_ms = 5;
+  MessageStatus status = 6;        // 若被撤回 → "对方撤回了一条消息"
+}
+
+message SelfMemberInfo {
+  MemberRole role = 1;
+  int64 joined_at_ms = 2;
+  bool is_muted = 3;
+  bool is_pinned = 4;
+  int64 pin_time_ms = 5;
+  bool is_visible = 6;             // ← 改名：更语义化
+  uint64 last_read_seq = 7;        // ← 新增：未读计算游标
+  uint64 unread_count = 8;         // ← 新增：未读数（服务端计算）
+  optional string draft = 9;       // ← 新增：草稿同步
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<h3>Conversation Service RPCs</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">service ConversationService {
+  // 列表（带分页 + 过滤）
+  rpc ListConversations(ListConversationsReq) returns (ListConversationsRsp);
+
+  // 单个会话详情
+  rpc GetConversation(GetConversationReq) returns (GetConversationRsp);
+
+  // 创建（单聊首次发消息时自动创建，群聊手动创建）
+  rpc CreateConversation(CreateConversationReq) returns (CreateConversationRsp);
+
+  // 群管理
+  rpc UpdateConversation(UpdateConversationReq) returns (UpdateConversationRsp);
+  rpc DismissConversation(DismissConversationReq) returns (DismissConversationRsp);
+  rpc AddMembers(AddMembersReq) returns (AddMembersRsp);
+  rpc RemoveMembers(RemoveMembersReq) returns (RemoveMembersRsp);
+  rpc TransferOwner(TransferOwnerReq) returns (TransferOwnerRsp);
+  rpc ChangeMemberRole(ChangeMemberRoleReq) returns (ChangeMemberRoleRsp);
+
+  // 成员列表（分页）
+  rpc ListMembers(ListMembersReq) returns (ListMembersRsp);
+
+  // 个人设置
+  rpc SetMute(SetMuteReq) returns (SetMuteRsp);
+  rpc SetPin(SetPinReq) returns (SetPinRsp);
+  rpc SetVisible(SetVisibleReq) returns (SetVisibleRsp);
+  rpc QuitConversation(QuitConversationReq) returns (QuitConversationRsp);
+
+  // 已读上报（客户端看到消息时调用）
+  rpc MarkRead(MarkReadReq) returns (MarkReadRsp);
+
+  // 草稿同步
+  rpc SaveDraft(SaveDraftReq) returns (SaveDraftRsp);
+
+  // 搜索
+  rpc SearchConversations(SearchConversationsReq) returns (SearchConversationsRsp);
+
+  // 内部接口
+  rpc GetMemberIds(GetMemberIdsReq) returns (GetMemberIdsRsp);
+}
+</pre>
+</div></div>
+
+<h3>命名对齐</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<table style="width:100%;border-collapse:collapse;">
+<tr style="color:#888;"><th style="text-align:left;padding:4px 8px;">旧名</th><th style="text-align:left;padding:4px 8px;">新名</th><th style="text-align:left;padding:4px 8px;">理由</th></tr>
+<tr><td style="padding:4px 8px;">chat_session_id</td><td style="padding:4px 8px;color:#27ae60;">conversation_id</td><td style="padding:4px 8px;">行业通用术语</td></tr>
+<tr><td style="padding:4px 8px;">chat_session_type</td><td style="padding:4px 8px;color:#27ae60;">ConversationType</td><td style="padding:4px 8px;">enum 安全</td></tr>
+<tr><td style="padding:4px 8px;">ChatSessionMemberRole</td><td style="padding:4px 8px;color:#27ae60;">MemberRole</td><td style="padding:4px 8px;">在 conversation 上下文中冗余</td></tr>
+<tr><td style="padding:4px 8px;">is_visible</td><td style="padding:4px 8px;color:#27ae60;">is_visible</td><td style="padding:4px 8px;">保持不变，已合理</td></tr>
+<tr><td style="padding:4px 8px;">pin_time</td><td style="padding:4px 8px;color:#27ae60;">is_pinned + pin_time_ms</td><td style="padding:4px 8px;">显式 bool + 时间戳</td></tr>
+</table>
+</div></div>

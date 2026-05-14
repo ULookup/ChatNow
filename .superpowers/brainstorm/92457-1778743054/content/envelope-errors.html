@@ -1,0 +1,122 @@
+<h2>Standard Response Envelope & Error Codes</h2>
+<p class="subtitle">Every response shares the same structure; every error has a code client can switch on</p>
+
+<h3>Problem Today</h3>
+<div class="mockup">
+  <div class="mockup-body" style="font-size:0.8rem;">
+    <span style="color:#e74c3c;">Inconsistent:</span> Some Rsp have `success + errmsg`, some don't. Error is always a string — client can't branch on it.<br>
+    <span style="color:#e74c3c;">No pagination standard:</span> GetHistory uses `start_time/over_time`, GetRecent uses `msg_count`, GetOffline uses `last_message_id + msg_count` — three different patterns for essentially "give me N items after cursor".
+  </div>
+</div>
+
+<div class="split">
+  <div class="mockup" style="flex:1.5;">
+    <div class="mockup-header">common/envelope.proto</div>
+    <div class="mockup-body" style="font-size:0.75rem;line-height:1.5;">
+<pre style="margin:0;white-space:pre-wrap;">syntax = "proto3";
+package chatnow.common;
+
+// Every response embeds this as field 1
+message ResponseHeader {
+  string request_id = 1;   // echo back
+  bool success = 2;        // false → check error_code
+  int32 error_code = 3;    // 0 = OK, see error.proto
+  string error_message = 4;// human-readable, debug only
+}
+
+// Forward pagination: "give me N items after cursor"
+message PageRequest {
+  int32 limit = 1;         // max 100, default 20
+  string cursor = 2;       // opaque cursor from last response
+}
+
+message PageResponse {
+  bool has_more = 1;       // true → more items available
+  string next_cursor = 2;  // pass to next PageRequest
+  int32 total_count = 3;   // optional, may be approximate
+}
+
+// Time-range pagination (legacy / analytics)
+message TimeRange {
+  int64 start_time_ms = 1;
+  int64 end_time_ms = 2;
+}
+</pre>
+    </div>
+  </div>
+  </div>
+
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">common/error.proto</div>
+    <div class="mockup-body" style="font-size:0.75rem;line-height:1.55;">
+<pre style="margin:0;white-space:pre-wrap;">enum ErrorCode {
+  OK = 0;
+
+  // 1000-1999: Auth / Identity
+  AUTH_INVALID_CREDENTIALS = 1001;
+  AUTH_TOKEN_EXPIRED = 1002;
+  AUTH_TOKEN_INVALID = 1003;
+  AUTH_USER_NOT_FOUND = 1004;
+  AUTH_USER_ALREADY_EXISTS = 1005;
+  AUTH_VERIFY_CODE_INVALID = 1006;
+  AUTH_VERIFY_CODE_EXPIRED = 1007;
+
+  // 2000-2999: Relationship
+  RELATIONSHIP_ALREADY_FRIENDS = 2001;
+  RELATIONSHIP_NOT_FRIENDS = 2002;
+  RELATIONSHIP_BLOCKED = 2003;
+  RELATIONSHIP_REQUEST_PENDING = 2004;
+
+  // 3000-3999: Conversation
+  CONVERSATION_NOT_FOUND = 3001;
+  CONVERSATION_NOT_MEMBER = 3002;
+  CONVERSATION_NO_PERMISSION = 3003;
+  CONVERSATION_MEMBER_LIMIT = 3004;
+
+  // 4000-4999: Message
+  MESSAGE_NOT_FOUND = 4001;
+  MESSAGE_RECALL_TIMEOUT = 4002;
+  MESSAGE_ALREADY_RECALLED = 4003;
+  MESSAGE_CONTENT_INVALID = 4004;
+
+  // 5000-5999: Media
+  MEDIA_FILE_TOO_LARGE = 5001;
+  MEDIA_UNSUPPORTED_FORMAT = 5002;
+  MEDIA_UPLOAD_FAILED = 5003;
+
+  // 6000-6999: Presence
+  PRESENCE_USER_OFFLINE = 6001;
+
+  // 8000-8999: Rate Limit
+  RATE_LIMIT_EXCEEDED = 8001;
+
+  // 9000-9999: System
+  SYSTEM_INTERNAL_ERROR = 9001;
+  SYSTEM_UNAVAILABLE = 9002;
+  SYSTEM_TIMEOUT = 9003;
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<h3>Usage Example</h3>
+<div class="mockup">
+  <div class="mockup-body" style="font-size:0.75rem;">
+<pre style="margin:0;white-space:pre-wrap;">// BEFORE (current pattern — every Rsp is different)
+message GetFriendListRsp {
+  string request_id = 1;
+  bool success = 2;
+  string errmsg = 3;                     // "Friend not found" — string, unswitchable
+  repeated UserInfo friend_list = 4;     // no pagination — all at once
+}
+
+// AFTER (standard pattern)
+message GetFriendListRsp {
+  ResponseHeader header = 1;             // always field 1
+  PageResponse page = 2;                 // always field 2 when paginated
+  repeated FriendItem items = 3;         // domain data starts at field 3+
+}
+</pre>
+  </div>
+</div>

@@ -1,0 +1,153 @@
+<h2>Message Service + 内部消息 + 完整拓扑</h2>
+<p class="subtitle">message/ 域三个文件：message_types.proto + message_service.proto + message_internal.proto</p>
+
+<div class="section">
+<h3>message/message_service.proto — 客户端 RPC</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<pre style="margin:0;">service MessageService {
+  // === 核心同步 ===
+  rpc SyncMessages(SyncMessagesReq) returns (SyncMessagesRsp);     // 增量同步（seq 游标）
+  rpc GetHistory(GetHistoryReq) returns (GetHistoryRsp);           // 时间段查询
+
+  // === 批量/单条 ===
+  rpc GetMessagesById(GetMessagesByIdReq) returns (GetMessagesByIdRsp);
+
+  // === 搜索 ===
+  rpc SearchMessages(SearchMessagesReq) returns (SearchMessagesRsp);
+
+  // === 撤回 ===                                              ← 全新
+  rpc RecallMessage(RecallMessageReq) returns (RecallMessageRsp);
+
+  // === Reactions ===                                         ← 全新
+  rpc AddReaction(AddReactionReq) returns (AddReactionRsp);
+  rpc RemoveReaction(RemoveReactionReq) returns (RemoveReactionRsp);
+  rpc GetReactions(GetReactionsReq) returns (GetReactionsRsp);
+
+  // === Pin ===                                               ← 全新
+  rpc PinMessage(PinMessageReq) returns (PinMessageRsp);
+  rpc UnpinMessage(UnpinMessageReq) returns (UnpinMessageRsp);
+  rpc ListPinnedMessages(ListPinnedReq) returns (ListPinnedRsp);
+
+  // === 管理 ===
+  rpc DeleteMessages(DeleteMessagesReq) returns (DeleteMessagesRsp);   // 从 timeline 删除
+  rpc ClearConversation(ClearConversationReq) returns (ClearConversationRsp); // 清空
+
+  // === 内部接口 ===
+  rpc SelectByClientMsgId(SelectByClientMsgIdReq) returns (SelectByClientMsgIdRsp); // 幂等去重
+  rpc UpdateReadAck(UpdateReadAckReq) returns (UpdateReadAckRsp);       // Push 上报 ACK
+}
+</pre>
+</div></div>
+</div>
+
+<div class="split">
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">关键 RPC 说明</div>
+    <div class="mockup-body" style="font-size:0.71rem;line-height:1.5;">
+<pre style="margin:0;">// 增量同步 — 替代 GetOfflineMsg
+message SyncMessagesReq {
+  string request_id = 1;
+  string conversation_id = 2;
+  uint64 after_seq = 3;     // 客户端本地最大 seq
+  int32 limit = 4;          // 默认 50，最大 200
+}
+message SyncMessagesRsp {
+  ResponseHeader header = 1;
+  repeated Message messages = 2;
+  bool has_more = 3;
+  uint64 latest_seq = 4;    // 服务端最新 seq
+}
+
+// 撤回 — 2 分钟内有效
+message RecallMessageReq {
+  string request_id = 1;
+  string conversation_id = 2;
+  int64 message_id = 3;
+}
+// 服务端执行：UPDATE status=RECALLED
+//           → 推送 NotifyMessageRecalled 给全体成员
+</pre>
+    </div>
+  </div>
+
+  <div class="mockup" style="flex:1;">
+    <div class="mockup-header">message/message_internal.proto</div>
+    <div class="mockup-body" style="font-size:0.71rem;line-height:1.5;">
+<pre style="margin:0;">// MQ 投递的胖消息（DB 落库用）
+message InternalMessage {
+  Message message = 1;
+  repeated string member_id_list = 2;
+  repeated UserSeqPair user_seqs = 3;  // uid→seq
+  bool is_large_group = 4;             // >200 人走读扩散
+}
+
+// ES 索引事件（DB commit 后投递）
+message ESIndexEvent {
+  int64 message_id = 1;
+  string conversation_id = 2;
+  string sender_id = 3;
+  string content_text = 4;            // 纯文本内容
+  int64 created_at_ms = 5;
+  uint64 seq_id = 6;
+  MessageType message_type = 7;
+}
+
+// 透传给 Push 的通知包装
+message PushNotify {
+  InternalMessage internal_msg = 1;
+  string push_to_instance = 2;        // 目标 Push 实例
+}
+</pre>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+<h3>完整服务拓扑</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.7rem;line-height:1.5;">
+<pre style="margin:0;">
+                        ┌──────────┐
+                        │  Gateway  │  HTTP + WS 入口
+                        └────┬─────┘
+                             │
+          ┌──────────────────┼──────────────────┐
+          │                  │                  │
+    ┌─────▼─────┐    ┌──────▼──────┐    ┌──────▼──────┐
+    │ Transmite │    │ Conversation │    │  Identity    │
+    │ 消息入口   │    │   会话管理   │    │  认证+资料   │
+    └─────┬─────┘    └──────┬──────┘    └──────┬──────┘
+          │                 │                  │
+          │ MQ              │ brpc             │ brpc
+          ▼                 ▼                  ▼
+    ┌──────────┐    ┌──────────────┐    ┌──────────────┐
+    │ Message  │    │ Relationship │    │    Media      │
+    │ 存储+搜索 │    │   好友+黑名单 │    │  文件+语音    │
+    └────┬─────┘    └──────────────┘    └──────────────┘
+         │ MQ
+         ▼
+    ┌──────────┐
+    │   Push   │  WS 长连接 + 在线路由 + Presence 模块
+    └──────────┘
+
+    7 个服务（Transmite / Message / Push / Conversation / Identity / Relationship / Media）
+    12 个 proto 文件（7 个 service + 3 个 common + 2 个 message 内部）
+</pre>
+</div></div>
+</div>
+
+<h3>文件清单：变更概览</h3>
+<div class="mockup"><div class="mockup-body" style="font-size:0.72rem;">
+<table style="width:100%;border-collapse:collapse;">
+<tr style="color:#888;"><th style="text-align:left;padding:4px 8px;">操作</th><th style="text-align:left;padding:4px 8px;">文件</th></tr>
+<tr><td style="padding:4px 8px;color:#27ae60;">新增</td><td style="padding:4px 8px;">proto/common/types.proto, error.proto, envelope.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#27ae60;">新增</td><td style="padding:4px 8px;">proto/message/message_types.proto, message_service.proto, message_internal.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#27ae60;">新增</td><td style="padding:4px 8px;">proto/presence/presence_service.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#f39c12;">重构</td><td style="padding:4px 8px;">proto/identity/identity_service.proto ← 原 user.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#f39c12;">重构</td><td style="padding:4px 8px;">proto/relationship/relationship_service.proto ← 原 friend.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#f39c12;">重构</td><td style="padding:4px 8px;">proto/conversation/conversation_service.proto ← 原 chatsession.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#f39c12;">重构</td><td style="padding:4px 8px;">proto/media/media_service.proto ← 原 file.proto + speech.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#f39c12;">重构</td><td style="padding:4px 8px;">proto/push/push_service.proto + notify.proto ← 原 push.proto + notify.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#f39c12;">重构</td><td style="padding:4px 8px;">proto/transmite/* ← 原 transmite.proto</td></tr>
+<tr><td style="padding:4px 8px;color:#e74c3c;">删除</td><td style="padding:4px 8px;">proto/base.proto, user.proto, friend.proto, chatsession.proto, file.proto, speech.proto, gateway.proto</td></tr>
+</table>
+</div></div>
