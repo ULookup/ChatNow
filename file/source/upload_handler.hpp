@@ -195,7 +195,72 @@ public:
                  user_id, file_id, req.file_size(), req.mime_type(), bucket, req.content_hash());
     }
 
-    // complete() 在 Task 15 追加
+    /* brief: CompleteUpload —— HEAD 比对 + ref_count++ + quota++ */
+    void complete(const std::string& user_id,
+                  const ::chatnow::media::CompleteUploadReq& req,
+                  ::chatnow::media::CompleteUploadRsp* rsp) {
+        auto file = _files->select_by_file_id(req.file_id());
+        if (!file) {
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "file not found");
+        }
+        if (file->owner_id() != user_id) {
+            // 不暴露具体错因，统一报 NOT_FOUND
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "owner mismatch");
+        }
+        // 幂等：已 committed → 直接回填 FileInfo
+        if (file->status() == MediaFileStatus::COMMITTED) {
+            fill_info(*file, rsp->mutable_file_info());
+            return;
+        }
+        if (file->status() != MediaFileStatus::PENDING) {
+            throw ServiceError(::chatnow::error::kMediaUploadFailed, "bad status");
+        }
+
+        // 1) HEAD 校验：对象存在且 size 与声明一致
+        S3Client::HeadResult head;
+        try {
+            head = _s3->head_object(file->bucket(), file->object_key());
+        } catch (const ServiceError&) {
+            // 找不到对象 → 视为客户端尚未 PUT
+            _files->update_status(file->file_id(), MediaFileStatus::DELETED);
+            throw ServiceError(::chatnow::error::kMediaUploadIncomplete, "object not found in storage");
+        }
+        if (head.content_length != file->file_size()) {
+            try { _s3->delete_object(file->bucket(), file->object_key()); }
+            catch (...) { LOG_WARN("complete_upload: delete after size mismatch failed file={}", file->file_id()); }
+            _files->update_status(file->file_id(), MediaFileStatus::DELETED);
+            throw ServiceError(::chatnow::error::kMediaHashMismatch, "size mismatch");
+        }
+        // 注：单段 PUT 时 ETag 是 md5(body)，client 提供的是 sha256，不强制 etag 比对；
+        //     真实内容指纹比对放在 cleanup magic_sniff（Task 25）异步路径。
+
+        // 2) blob_ref upsert + inc
+        if (!_blobs->select_by_hash(file->content_hash())) {
+            MediaBlobRef br;
+            br.content_hash(file->content_hash());
+            br.bucket(file->bucket());
+            br.object_key(file->object_key());
+            br.ref_count(0);
+            br.total_size(file->file_size());
+            br.last_decremented_at(now_ptime());
+            _blobs->upsert(br);
+        }
+        _blobs->inc_ref(file->content_hash());
+
+        // 3) media_file → committed
+        _files->update_status(file->file_id(), MediaFileStatus::COMMITTED);
+
+        // 4) 配额自增
+        _quota->inc_used(user_id, file->file_size(), now_ptime());
+
+        // 5) 回填 FileInfo（用最新 status 重新查一次也行；这里复用旧行字段+设置 committed）
+        file->status(MediaFileStatus::COMMITTED);
+        fill_info(*file, rsp->mutable_file_info());
+
+        LOG_INFO("complete_upload user={} file={} size={} mime={} hash={}",
+                 user_id, file->file_id(), file->file_size(), file->mime_type(),
+                 file->content_hash());
+    }
 
 protected:
     static void fill_info(const MediaFile& f, ::chatnow::media::FileInfo* info) {
