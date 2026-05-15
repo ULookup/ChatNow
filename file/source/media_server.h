@@ -121,6 +121,36 @@ private:
     std::unique_ptr<SpeechHandler>    _speech;
 };
 
+// ===== MediaServiceImpl RPC override 实现 =====
+// 模式：HANDLE_RPC 宏处理 metadata + ResponseHeader + ServiceError 捕获，
+//       body 内可使用 auth.user_id / auth.device_id / auth.trace_id。
+
+inline void MediaServiceImpl::ApplyUpload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::ApplyUploadReq* req,
+    ::chatnow::media::ApplyUploadRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _upload->apply(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::CompleteUpload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::CompleteUploadReq* req,
+    ::chatnow::media::CompleteUploadRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _upload->complete(auth.user_id, *req, rsp);
+    });
+}
+
 class MediaServer {
 public:
     using ptr = std::shared_ptr<MediaServer>;
