@@ -107,7 +107,30 @@ public:
                  user_id, file_id, upload_id, bucket, req.file_size());
     }
 
-    // apply_part / complete / abort 在 Task 18 / 19 追加
+    /* brief: ApplyPartUpload —— 通过 upload_id 反查行 + 签 part presigned URL */
+    void apply_part(const std::string& user_id,
+                    const ::chatnow::media::ApplyPartReq& req,
+                    ::chatnow::media::ApplyPartRsp* rsp) {
+        if (req.part_number() < 1 || req.part_number() > 10000) {
+            throw ServiceError(::chatnow::error::kSystemInvalidArgument, "part_number out of range");
+        }
+        auto file = _files->select_by_upload_id(req.upload_id());
+        if (!file) {
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "upload not found");
+        }
+        if (file->owner_id() != user_id) {
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "owner mismatch");
+        }
+        if (file->status() != MediaFileStatus::PENDING) {
+            throw ServiceError(::chatnow::error::kMediaUploadFailed, "bad status");
+        }
+        auto url = _s3->presigned_part(file->bucket(), file->object_key(),
+                                       req.upload_id(), req.part_number(), _presign);
+        rsp->set_upload_url(url);
+        rsp->set_expires_in_sec(_presign);
+    }
+
+    // complete / abort 在 Task 19 追加
 
 protected:
     std::shared_ptr<S3Client>            _s3;
