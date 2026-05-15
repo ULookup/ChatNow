@@ -35,6 +35,8 @@ DEFINE_string(mail_paswd, "XKk5zvYwWKeB8xNk", "邮箱验证平台的密码");
 DEFINE_string(mail_host, "smtps://smtp.163.com:465", "邮箱验证平台的URL");
 DEFINE_string(mail_from, "yhaoyang666@163.com", "邮箱验证平台的发送方");
 
+DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
+
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -44,6 +46,7 @@ int main(int argc, char *argv[])
     usb.make_es_object({FLAGS_es_host});
     usb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     usb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
+    usb.make_jwt_object(FLAGS_auth_config);
     usb.make_mail_object(FLAGS_mail_user, FLAGS_mail_paswd, FLAGS_mail_host, FLAGS_mail_from);
     usb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service);
     usb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);

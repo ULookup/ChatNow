@@ -4,6 +4,8 @@ package chatnow.identity;
 import "common/envelope.proto";
 import "common/types.proto";
 
+option cc_generic_services = true;
+
 service IdentityService {
     rpc Register(RegisterReq) returns (RegisterRsp);
     rpc Login(LoginReq) returns (LoginRsp);
@@ -16,103 +18,129 @@ service IdentityService {
     rpc GetMultiUserInfo(GetMultiUserInfoReq) returns (GetMultiUserInfoRsp);
 }
 
+// ========== 通用鉴权产物（横切 spec §2.4） ==========
+
+message AuthTokens {
+    string access_token              = 1;
+    string refresh_token             = 2;
+    int32  access_expires_in_sec     = 3;
+    int32  refresh_expires_in_sec    = 4;
+}
+
+// ========== Credential ==========
+
 message UsernamePassword {
     string username = 1;
     string password = 2;
 }
 
 message PhoneVerifyCode {
-    string phone = 1;
+    string phone          = 1;
     string verify_code_id = 2;
-    string verify_code = 3;
+    string verify_code    = 3;
 }
+
+// ========== Register ==========
 
 message RegisterReq {
     string request_id = 1;
     oneof credential {
         UsernamePassword username_pwd = 2;
-        PhoneVerifyCode phone_code = 3;
+        PhoneVerifyCode  phone_code   = 3;
     }
     string nickname = 4;
 }
 message RegisterRsp {
-    ResponseHeader header = 1;
-    string user_id = 2;
+    chatnow.common.ResponseHeader header = 1;
+    string user_id        = 2;
 }
+
+// ========== Login ==========
 
 message LoginReq {
     string request_id = 1;
     oneof credential {
         UsernamePassword username_pwd = 2;
-        PhoneVerifyCode phone_code = 3;
+        PhoneVerifyCode  phone_code   = 3;
     }
-    string device_id = 4;
+    // device 模型（多端策略 / 撤销）属于 P3。
+    // P2 仅把 device_id 透传进 JWT payload；P3 落地时收紧校验。
+    string device_id   = 4;
     string device_name = 5;
 }
 message LoginRsp {
-    ResponseHeader header = 1;
-    string login_session_id = 2;
-    UserInfo user_info = 3;
+    chatnow.common.ResponseHeader header  = 1;
+    AuthTokens                    tokens  = 2;
+    chatnow.common.UserInfo       user_info = 3;
 }
 
+// ========== Logout ==========
+
+// user_id / device_id 从 brpc metadata 读，不在 body
 message LogoutReq {
     string request_id = 1;
-    string user_id = 2;
-    string session_id = 3;
 }
-message LogoutRsp { ResponseHeader header = 1; }
+message LogoutRsp {
+    chatnow.common.ResponseHeader header = 1;
+}
+
+// ========== SendVerifyCode ==========
 
 message SendVerifyCodeReq {
     string request_id = 1;
-    string phone = 2;
+    string phone      = 2;
 }
 message SendVerifyCodeRsp {
-    ResponseHeader header = 1;
-    string verify_code_id = 2;
+    chatnow.common.ResponseHeader header        = 1;
+    string                        verify_code_id = 2;
 }
 
+// ========== RefreshToken ==========
+
 message RefreshTokenReq {
-    string request_id = 1;
-    string session_id = 2;
+    string request_id    = 1;
+    string refresh_token = 2;
 }
 message RefreshTokenRsp {
-    ResponseHeader header = 1;
-    string new_session_id = 2;
+    chatnow.common.ResponseHeader header = 1;
+    AuthTokens                    tokens = 2;
 }
+
+// ========== Profile / Search（保留；§2.8 字段清理是后续 plan） ==========
 
 message GetProfileReq {
     string request_id = 1;
-    optional string user_id = 2;      // 空=查自己
-    optional string session_id = 3;
+    optional string user_id = 2;     // 空=查自己
+    optional string session_id = 3;  // TODO P7: 删除（横切 §2.8）
 }
 message GetProfileRsp {
-    ResponseHeader header = 1;
-    UserInfo user_info = 2;
+    chatnow.common.ResponseHeader header = 1;
+    chatnow.common.UserInfo       user_info = 2;
 }
 
 message UpdateProfileReq {
     string request_id = 1;
-    optional string user_id = 2;
-    optional string session_id = 3;
-    optional string nickname = 4;
-    optional string bio = 5;
+    optional string user_id = 2;     // TODO P7: 删除（§2.8）
+    optional string session_id = 3;  // TODO P7: 删除（§2.8）
+    optional string nickname   = 4;
+    optional string bio        = 5;
     optional string avatar_url = 6;
-    optional string phone = 7;
+    optional string phone      = 7;
 }
 message UpdateProfileRsp {
-    ResponseHeader header = 1;
-    UserInfo user_info = 2;
+    chatnow.common.ResponseHeader header = 1;
+    chatnow.common.UserInfo       user_info = 2;
 }
 
 message SearchUsersReq {
     string request_id = 1;
     string search_key = 2;
-    optional string session_id = 3;
-    optional string user_id = 4;
+    optional string session_id = 3;  // TODO P7: 删除（§2.8）
+    optional string user_id    = 4;  // TODO P7: 删除（§2.8）
 }
 message SearchUsersRsp {
-    ResponseHeader header = 1;
-    repeated UserInfo user_info = 2;
+    chatnow.common.ResponseHeader     header = 1;
+    repeated chatnow.common.UserInfo  user_info = 2;
 }
 
 message GetMultiUserInfoReq {
@@ -120,6 +148,6 @@ message GetMultiUserInfoReq {
     repeated string users_id = 2;
 }
 message GetMultiUserInfoRsp {
-    ResponseHeader header = 1;
-    map<string, UserInfo> users_info = 2;
+    chatnow.common.ResponseHeader              header = 1;
+    map<string, chatnow.common.UserInfo>       users_info = 2;
 }

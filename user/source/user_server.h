@@ -14,9 +14,221 @@
 #include "identity/identity_service.pb.h"
 #include "media/media_service.pb.h"
 
+#include "auth/auth_context.hpp"
+#include "auth/jwt_codec.hpp"
+#include "auth/jwt_store.hpp"
+#include "auth/auth_config_loader.hpp"
+#include "error/error_codes.hpp"
+#include "error/service_error.hpp"
+
 
 namespace chatnow
 {
+
+/**
+ * IdentityServiceImpl —— P2 横切 §2.4
+ * Login/Logout/RefreshToken：签发/吊销/滚动 JWT。
+ * Register/SendVerifyCode/Profile/Search 等仍在 P3+ 阶段实现，
+ * 此处只声明 Login/Logout/RefreshToken 三个；其余 RPC 由 brpc 提供
+ * default-implementation（fail with NOT_IMPLEMENTED 错误码），后续 plan 接入。
+ */
+class IdentityServiceImpl : public ::chatnow::identity::IdentityService
+{
+public:
+    IdentityServiceImpl(const std::shared_ptr<odb::core::database> &mysql_client,
+                        const std::shared_ptr<auth::JwtCodec> &jwt_codec,
+                        const std::shared_ptr<auth::JwtStore> &jwt_store)
+        : _mysql_user(std::make_shared<UserTable>(mysql_client)),
+          _jwt_codec(jwt_codec),
+          _jwt_store(jwt_store) {}
+
+    ~IdentityServiceImpl() override = default;
+
+    /* brief: IdentityService.Login —— 用户名密码登录，签发 access+refresh */
+    void Login(::google::protobuf::RpcController* controller,
+               const ::chatnow::identity::LoginReq* request,
+               ::chatnow::identity::LoginRsp* response,
+               ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* header = response->mutable_header();
+        header->set_request_id(request->request_id());
+        try {
+            // 1. 凭据校验（P2 仅支持 username_pwd；phone_code 留 P3）
+            if (!request->has_username_pwd()) {
+                throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                   "phone_code login not supported in P2");
+            }
+            const auto& cred = request->username_pwd();
+            auto user = _mysql_user->select_by_nickname(cred.username());
+            if (!user || user->password() != cred.password()) {
+                throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                   "username or password incorrect");
+            }
+            // 2. device_id 取自请求（P2 不强制校验，P3 收紧）
+            std::string device_id = request->device_id();
+            if (device_id.empty()) device_id = "unknown_device";
+
+            // 3. 签发 access + refresh
+            std::string access_jti  = auth::JwtCodec::random_jti();
+            std::string refresh_jti = auth::JwtCodec::random_jti();
+            std::string access_tok  = _jwt_codec->sign_access(user->user_id(), device_id, access_jti);
+            std::string refresh_tok = _jwt_codec->sign_refresh(user->user_id(), device_id, refresh_jti);
+
+            // 4. 写入 refresh 反查表（用于后续 Logout / Rotate）
+            _jwt_store->put_active_refresh(user->user_id(), device_id,
+                                           refresh_jti, _jwt_codec->refresh_ttl_sec());
+
+            // 5. 返回 AuthTokens + UserInfo
+            auto* tokens = response->mutable_tokens();
+            tokens->set_access_token(access_tok);
+            tokens->set_refresh_token(refresh_tok);
+            tokens->set_access_expires_in_sec(_jwt_codec->access_ttl_sec());
+            tokens->set_refresh_expires_in_sec(_jwt_codec->refresh_ttl_sec());
+
+            auto* uinfo = response->mutable_user_info();
+            uinfo->set_user_id(user->user_id());
+            uinfo->set_nickname(user->nickname());
+
+            header->set_success(true);
+            header->set_error_code(::chatnow::common::OK);
+            LOG_INFO("Login OK rid={} uid={} did={}", request->request_id(),
+                     user->user_id(), device_id);
+        } catch (const ServiceError& e) {
+            header->set_success(false);
+            header->set_error_code(e.code());
+            header->set_error_message(e.message());
+            LOG_WARN("Login 失败 rid={} code={} msg={}",
+                     request->request_id(), e.code(), e.message());
+        } catch (const std::exception& e) {
+            header->set_success(false);
+            header->set_error_code(::chatnow::error::kSystemInternalError);
+            header->set_error_message("internal error");
+            LOG_ERROR("Login 异常 rid={}: {}", request->request_id(), e.what());
+        }
+    }
+
+    /* brief: IdentityService.Logout —— 吊销当前设备的 access + refresh
+     * metadata 必填：x-user-id / x-device-id / x-jwt-jti（P1 extract_auth）
+     */
+    void Logout(::google::protobuf::RpcController* controller,
+                const ::chatnow::identity::LogoutReq* request,
+                ::chatnow::identity::LogoutRsp* response,
+                ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(controller);
+        auto* header = response->mutable_header();
+        header->set_request_id(request->request_id());
+        try {
+            auto ctx = ::chatnow::auth::extract_auth(cntl);
+            // 1. 吊销当前 access token（按剩余寿命 TTL，避免黑名单膨胀）
+            //    精确剩余寿命需要解 token；用 access_ttl_sec 上限保守覆盖
+            if (!ctx.jwt_jti.empty()) {
+                _jwt_store->revoke(ctx.jwt_jti, _jwt_codec->access_ttl_sec());
+            }
+            // 2. 吊销该设备的 refresh
+            std::string rt_jti = _jwt_store->get_active_refresh(ctx.user_id, ctx.device_id);
+            if (!rt_jti.empty()) {
+                _jwt_store->revoke(rt_jti, _jwt_codec->refresh_ttl_sec());
+                _jwt_store->clear_active_refresh(ctx.user_id, ctx.device_id);
+            }
+            header->set_success(true);
+            header->set_error_code(::chatnow::common::OK);
+            LOG_INFO("Logout OK rid={} uid={} did={}", request->request_id(),
+                     ctx.user_id, ctx.device_id);
+        } catch (const ServiceError& e) {
+            header->set_success(false);
+            header->set_error_code(e.code());
+            header->set_error_message(e.message());
+            LOG_WARN("Logout 失败 rid={} code={}", request->request_id(), e.code());
+        } catch (const std::exception& e) {
+            header->set_success(false);
+            header->set_error_code(::chatnow::error::kSystemInternalError);
+            header->set_error_message("internal error");
+            LOG_ERROR("Logout 异常 rid={}: {}", request->request_id(), e.what());
+        }
+    }
+
+    /* brief: IdentityService.RefreshToken —— 滚动刷新 + 重放检测（spec §2.3） */
+    void RefreshToken(::google::protobuf::RpcController* controller,
+                      const ::chatnow::identity::RefreshTokenReq* request,
+                      ::chatnow::identity::RefreshTokenRsp* response,
+                      ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* header = response->mutable_header();
+        header->set_request_id(request->request_id());
+        try {
+            // 1. 验签 refresh token（强制 typ=refresh）
+            auto claims = _jwt_codec->verify(request->refresh_token(),
+                                             /*require_refresh=*/true);
+            // 2. 黑名单检查
+            if (_jwt_store->is_revoked(claims.jti)) {
+                throw ServiceError(::chatnow::error::kAuthTokenInvalid,
+                                   "refresh token revoked");
+            }
+            // 3. 反查表是否还指向这个 refresh_jti
+            std::string active = _jwt_store->get_active_refresh(claims.sub, claims.did);
+            if (active != claims.jti) {
+                _jwt_store->revoke(claims.jti, _jwt_codec->refresh_ttl_sec());
+                _jwt_store->clear_active_refresh(claims.sub, claims.did);
+                throw ServiceError(::chatnow::error::kAuthRefreshTokenReused,
+                                   "refresh token mismatch active");
+            }
+            // 4. 颁发新 access + 新 refresh
+            std::string new_access_jti  = auth::JwtCodec::random_jti();
+            std::string new_refresh_jti = auth::JwtCodec::random_jti();
+            std::string new_access  = _jwt_codec->sign_access(claims.sub, claims.did, new_access_jti);
+            std::string new_refresh = _jwt_codec->sign_refresh(claims.sub, claims.did, new_refresh_jti);
+            // 5. 原子滚动 + 重放链检测
+            auto rot = _jwt_store->rotate_refresh_or_detect_reuse(
+                claims.sub, claims.did, claims.jti, new_refresh_jti,
+                _jwt_codec->refresh_ttl_sec());
+            if (rot == auth::JwtStore::RotateResult::kReuseDetected) {
+                _jwt_store->revoke(claims.jti, _jwt_codec->refresh_ttl_sec());
+                _jwt_store->clear_active_refresh(claims.sub, claims.did);
+                throw ServiceError(::chatnow::error::kAuthRefreshTokenReused,
+                                   "refresh chain reuse detected");
+            }
+            // 6. 旧 refresh 写黑名单（剩余寿命）
+            int64_t now = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            int remain = static_cast<int>(claims.exp_sec - now);
+            if (remain > 0) {
+                _jwt_store->revoke(claims.jti, remain);
+            }
+
+            auto* tokens = response->mutable_tokens();
+            tokens->set_access_token(new_access);
+            tokens->set_refresh_token(new_refresh);
+            tokens->set_access_expires_in_sec(_jwt_codec->access_ttl_sec());
+            tokens->set_refresh_expires_in_sec(_jwt_codec->refresh_ttl_sec());
+
+            header->set_success(true);
+            header->set_error_code(::chatnow::common::OK);
+            LOG_INFO("RefreshToken OK rid={} uid={} did={}", request->request_id(),
+                     claims.sub, claims.did);
+        } catch (const ServiceError& e) {
+            header->set_success(false);
+            header->set_error_code(e.code());
+            header->set_error_message(e.message());
+            LOG_WARN("RefreshToken 失败 rid={} code={}",
+                     request->request_id(), e.code());
+        } catch (const std::exception& e) {
+            header->set_success(false);
+            header->set_error_code(::chatnow::error::kSystemInternalError);
+            header->set_error_message("internal error");
+            LOG_ERROR("RefreshToken 异常 rid={}: {}", request->request_id(), e.what());
+        }
+    }
+
+private:
+    std::shared_ptr<UserTable>          _mysql_user;
+    std::shared_ptr<auth::JwtCodec>     _jwt_codec;
+    std::shared_ptr<auth::JwtStore>     _jwt_store;
+};
+
 
 class UserServiceImpl : public UserService
 {
@@ -690,6 +902,16 @@ public:
     {
         _redis_client = RedisClientFactory::create(host, port, db, keep_alive);
     }
+    /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
+    void make_jwt_object(const std::string &auth_config_path) {
+        if (!_redis_client) {
+            LOG_ERROR("make_jwt_object 必须在 make_redis_object 之后调用");
+            abort();
+        }
+        auto cfg = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
+        _jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(std::move(cfg));
+        _jwt_store = std::make_shared<::chatnow::auth::JwtStore>(_redis_client);
+    }
     /* brief: 构造邮箱验证客户端 */
     void make_mail_object(const std::string &mail_username, 
                         const std::string &mail_password,
@@ -747,11 +969,22 @@ public:
             LOG_ERROR("还未初始化信道管理模块");
             abort();
         }
+        if(!_jwt_codec || !_jwt_store) {
+            LOG_ERROR("还未初始化JWT模块（缺 make_jwt_object）");
+            abort();
+        }
 
         UserServiceImpl *user_service = new UserServiceImpl(_es_client, _mysql_client, _redis_client, _mail_client, _mm_channels, _file_service_name);
         int ret = _rpc_server->AddService(user_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
+            abort();
+        }
+
+        IdentityServiceImpl *identity_service = new IdentityServiceImpl(_mysql_client, _jwt_codec, _jwt_store);
+        ret = _rpc_server->AddService(identity_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
+        if(ret == -1) {
+            LOG_ERROR("添加IdentityService RPC服务失败!");
             abort();
         }
 
@@ -792,6 +1025,9 @@ private:
     std::string _file_service_name;
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discover;
+
+    std::shared_ptr<::chatnow::auth::JwtCodec> _jwt_codec;
+    std::shared_ptr<::chatnow::auth::JwtStore> _jwt_store;
 
     std::shared_ptr<brpc::Server> _rpc_server;
 };

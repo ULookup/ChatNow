@@ -25,6 +25,8 @@ DEFINE_int32(redis_port, 6379, "Redis服务器访问端口");
 DEFINE_int32(redis_db, 0, "Redis默认库号");
 DEFINE_bool(redis_keep_alive, true, "Redis长连接保活");
 
+DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
+
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
@@ -32,6 +34,7 @@ int main(int argc, char *argv[])
 
     chatnow::GatewayServerBuilder gsb;
     gsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
+    gsb.make_jwt_object(FLAGS_auth_config);
     gsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_speech_service,
                             FLAGS_file_service, FLAGS_user_service, FLAGS_transmite_service,
                             FLAGS_message_service, FLAGS_friend_service, FLAGS_chatsession_service,

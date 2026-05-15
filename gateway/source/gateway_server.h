@@ -10,6 +10,12 @@
 #include "infra/logger.hpp"
 #include "mq/channel.hpp"
 #include "utils/brpc_closure.hpp"
+#include "auth/auth_config_loader.hpp"
+#include "auth/jwt_codec.hpp"
+#include "auth/jwt_store.hpp"
+#include "error/error_codes.hpp"
+#include "error/service_error.hpp"
+#include "gateway_auth.hpp"
 #include "gateway_trace.hpp"
 
 // 注意：B3 — Gateway 已彻底无状态化，WebSocket 终结迁至 push 服务（push_server.h）。
@@ -34,8 +40,10 @@ namespace chatnow
 {
 
 #define GET_MAIL_VERIFY_CODE        "/service/user/get_mail_verify_code"
-#define USERNAME_REGISTER           "/service/user/username_register"                 //用户名密码注册 
-#define USERNAME_LOGIN              "/service/user/username_login"                    //用户名密码登录 
+#define USERNAME_REGISTER           "/service/user/username_register"                 //用户名密码注册
+#define USERNAME_LOGIN              "/service/user/username_login"                    //用户名密码登录
+#define USER_LOGOUT                 "/service/user/logout"                            //登出（吊销当前 access+refresh）
+#define REFRESH_TOKEN_PATH          "/service/user/refresh_token"                     //滚动刷新 access+refresh
 #define MAIL_REGISTER               "/service/user/mail_register"                     //邮箱号码注册 
 #define MAIL_LOGIN                  "/service/user/mail_login"                        //邮箱号码登录 
 #define GET_USER_INFO               "/service/user/get_user_info"                     //获取个人信息 
@@ -90,9 +98,10 @@ public:
     using ptr = std::shared_ptr<GatewayServer>;
 
     GatewayServer(int http_port,
-                const std::shared_ptr<sw::redis::Redis> &redis_client,
                 const ServiceManager::ptr &channels,
                 const Discovery::ptr &service_discoverer,
+                const std::shared_ptr<::chatnow::auth::JwtCodec> &jwt_codec,
+                const std::shared_ptr<::chatnow::auth::JwtStore> &jwt_store,
                 const std::string &speech_service_name,
                 const std::string &file_service_name,
                 const std::string &user_service_name,
@@ -101,7 +110,8 @@ public:
                 const std::string &friend_service_name,
                 const std::string &chatsession_service_name,
                 const std::string &push_service_name = "/service/push_service")
-        : _redis_session(std::make_shared<Session>(redis_client)),
+        : _jwt_codec(jwt_codec),
+        _jwt_store(jwt_store),
         _mm_channels(channels),
         _service_discoverer(service_discoverer),
         _speech_service_name(speech_service_name),
@@ -121,6 +131,8 @@ public:
         _http_server.Post(GET_MAIL_VERIFY_CODE,         (httplib::Server::Handler)std::bind(&GatewayServer::GetMailVerifyCode,         this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(USERNAME_REGISTER,            (httplib::Server::Handler)std::bind(&GatewayServer::UserRegister,              this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(USERNAME_LOGIN,               (httplib::Server::Handler)std::bind(&GatewayServer::UserLogin,                 this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(USER_LOGOUT,                  (httplib::Server::Handler)std::bind(&GatewayServer::UserLogout,                this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(REFRESH_TOKEN_PATH,           (httplib::Server::Handler)std::bind(&GatewayServer::RefreshToken,              this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(MAIL_REGISTER,                (httplib::Server::Handler)std::bind(&GatewayServer::MailRegister,              this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(MAIL_LOGIN,                   (httplib::Server::Handler)std::bind(&GatewayServer::MailLogin,                 this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_USER_INFO,                (httplib::Server::Handler)std::bind(&GatewayServer::GetUserInfo,               this, std::placeholders::_1, std::placeholders::_2));
@@ -230,8 +242,6 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
-        response.set_header("X-Trace-Id", trace_id);
         /* P8: 入口三件套 —— trace_id 解析/生成 + 写 metadata + LogContext::set */
         std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
         response.set_header("X-Trace-Id", trace_id);
@@ -277,39 +287,115 @@ private:
         //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
-    /* brief: 用户登录 */
+    /* brief: 用户名登录 — 走 IdentityService.Login（白名单路径）
+     *  请求体：identity::LoginReq；响应：identity::LoginRsp（含 AuthTokens）
+     */
     void UserLogin(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 取出http请求正文，将正文进行反序列化
-        UserLoginReq req;
-        UserLoginRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::identity::LoginReq req;
+        ::chatnow::identity::LoginRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("用户名登录请求正文反序列化失败");
-            return err_response("用户名登录请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("LoginReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse LoginReq failed");
         }
-        //2. 将请求转发给用户子服务进行业务处理
+        // 白名单路径（无需 JWT），仅生成 trace_id
+        chatnow::gateway::AuthInfo a;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/true, a)) {
+            return;
+        }
         auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的用户子服务节点", req.request_id());
-            return err_response("未找到可提供业务的用户子服务节点");
+            LOG_ERROR("rid={} 未找到可提供业务的用户子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "user service unavailable");
         }
-        UserService_Stub stub(channel.get());
+        ::chatnow::identity::IdentityService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, a);
         response.set_header("X-Trace-Id", trace_id);
-        stub.UserLogin(&cntl, &req, &rsp, nullptr);
+        stub.Login(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("用户子服务调用失败");
+            LOG_ERROR("rid={} IdentityService.Login 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "user service rpc failed");
         }
-        //3. 得到用户子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    /* brief: 登出 — IdentityService.Logout（非白名单：必须带 access token） */
+    void UserLogout(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        ::chatnow::identity::LogoutReq req;
+        ::chatnow::identity::LogoutRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse LogoutReq failed");
+        }
+        chatnow::gateway::AuthInfo a;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, a)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "user service unavailable");
+        }
+        ::chatnow::identity::IdentityService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, a);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.Logout(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("rid={} Logout 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "user service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    /* brief: 滚动刷新 — IdentityService.RefreshToken（白名单：access 可能已过期） */
+    void RefreshToken(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        ::chatnow::identity::RefreshTokenReq req;
+        ::chatnow::identity::RefreshTokenRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse RefreshTokenReq failed");
+        }
+        chatnow::gateway::AuthInfo a;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/true, a)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_user_service_name);
+        if(!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "user service unavailable");
+        }
+        ::chatnow::identity::IdentityService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, a);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.RefreshToken(&cntl, &req, &rsp, nullptr);
+        if(cntl.Failed()) {
+            LOG_ERROR("rid={} RefreshToken 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "user service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void MailRegister(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
@@ -392,14 +478,13 @@ private:
             LOG_ERROR("获取用户信息请求正文反序列化失败");
             return err_response("获取用户信息请求正文反序列化失败");
         }
-        //2. 客户端身份识别与鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;  // 401 已写
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给用户子服务进行业务处理
         auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
@@ -433,14 +518,13 @@ private:
             LOG_ERROR("设置用户头像请求正文反序列化失败");
             return err_response("设置用户头像请求正文反序列化失败");
         }
-        //2. 客户端身份识别与鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;  // 401 已写
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给用户子服务进行业务处理
         auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
@@ -474,14 +558,13 @@ private:
             LOG_ERROR("设置用户昵称请求正文反序列化失败");
             return err_response("设置用户昵称请求正文反序列化失败");
         }
-        //2. 客户端身份识别与鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;  // 401 已写
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给用户子服务进行业务处理
         auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
@@ -515,14 +598,13 @@ private:
             LOG_ERROR("设置用户签名请求正文反序列化失败");
             return err_response("设置用户签名请求正文反序列化失败");
         }
-        //2. 客户端身份识别与鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;  // 401 已写
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给用户子服务进行业务处理
         auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
@@ -556,14 +638,13 @@ private:
             LOG_ERROR("设置用户邮箱请求正文反序列化失败");
             return err_response("设置用户邮箱请求正文反序列化失败");
         }
-        //2. 客户端身份识别与鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;  // 401 已写
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给用户子服务进行业务处理
         auto channel = _mm_channels->choose(_user_service_name);
         if(!channel) {
@@ -597,14 +678,13 @@ private:
             LOG_ERROR("获取好友列表请求正文反序列化失败");
             return err_response("获取好友列表请求正文反序列化失败");
         }
-        //2. 客户端身份识别与鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;  // 401 已写
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -669,14 +749,13 @@ private:
             LOG_ERROR("申请好友请求正文反序列化失败");
             return err_response("申请好友请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -723,14 +802,13 @@ private:
             LOG_ERROR("好友申请处理请求正文反序列化失败");
             return err_response("好友申请处理请求正文反序列化失败");
         }
-        //2. 客户端身份识别鉴权，并获取处理人用户ID
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -809,14 +887,13 @@ private:
             LOG_ERROR("删除好友请求正文反序列化失败");
             return err_response("删除好友请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -857,14 +934,13 @@ private:
             LOG_ERROR("用户搜索请求正文反序列化失败");
             return err_response("用户搜索请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -898,14 +974,13 @@ private:
             LOG_ERROR("获取待处理好友申请请求正文反序列化失败");
             return err_response("获取待处理好友申请请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -939,14 +1014,13 @@ private:
             LOG_ERROR("获取聊天会话列表请求正文反序列化失败");
             return err_response("获取聊天会话列表请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -980,14 +1054,13 @@ private:
             LOG_ERROR("获取聊天会话成员列表请求正文反序列化失败");
             return err_response("获取聊天会话成员列表请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -1021,14 +1094,13 @@ private:
             LOG_ERROR("创建聊天会话请求正文反序列化失败");
             return err_response("创建聊天会话请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
         auto channel = _mm_channels->choose(_friend_service_name);
         if(!channel) {
@@ -1073,14 +1145,13 @@ private:
             LOG_ERROR("获取历史消息请求正文反序列化失败");
             return err_response("获取历史消息请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息存储子服务进行业务处理
         auto channel = _mm_channels->choose(_message_service_name);
         if(!channel) {
@@ -1114,14 +1185,13 @@ private:
             LOG_ERROR("获取最近消息请求正文反序列化失败");
             return err_response("获取最近消息请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息存储子服务进行业务处理
         auto channel = _mm_channels->choose(_message_service_name);
         if(!channel) {
@@ -1155,14 +1225,13 @@ private:
             LOG_ERROR("消息搜索请求正文反序列化失败");
             return err_response("消息搜索请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息存储子服务进行业务处理
         auto channel = _mm_channels->choose(_message_service_name);
         if(!channel) {
@@ -1196,14 +1265,13 @@ private:
             LOG_ERROR("获取单文件请求正文反序列化失败");
             return err_response("获取单文件请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给文件存储子服务进行业务处理
         auto channel = _mm_channels->choose(_file_service_name);
         if(!channel) {
@@ -1237,14 +1305,13 @@ private:
             LOG_ERROR("获取多文件请求正文反序列化失败");
             return err_response("获取多文件请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给文件存储子服务进行业务处理
         auto channel = _mm_channels->choose(_file_service_name);
         if(!channel) {
@@ -1278,14 +1345,13 @@ private:
             LOG_ERROR("上传单文件请求正文反序列化失败");
             return err_response("上传单文件请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给文件存储子服务进行业务处理
         auto channel = _mm_channels->choose(_file_service_name);
         if(!channel) {
@@ -1319,14 +1385,13 @@ private:
             LOG_ERROR("上传多文件请求正文反序列化失败");
             return err_response("上传多文件请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给文件存储子服务进行业务处理
         auto channel = _mm_channels->choose(_file_service_name);
         if(!channel) {
@@ -1360,14 +1425,13 @@ private:
             LOG_ERROR("语音识别请求正文反序列化失败");
             return err_response("语音识别请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给语音识别子服务进行业务处理
         auto channel = _mm_channels->choose(_speech_service_name);
         if(!channel) {
@@ -1402,14 +1466,13 @@ private:
             LOG_ERROR("新消息请求正文反序列化失败");
             return err_response("新消息请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_transmite_service_name);
         if(!channel) {
@@ -1456,14 +1519,13 @@ private:
             LOG_ERROR("获取会话详细信息请求正文反序列化失败");
             return err_response("获取会话详细信息请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1497,14 +1559,13 @@ private:
             LOG_ERROR("设置会话名称请求正文反序列化失败");
             return err_response("设置会话名称请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1538,14 +1599,13 @@ private:
             LOG_ERROR("设置会话头像请求正文反序列化失败");
             return err_response("设置会话头像请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1579,14 +1639,13 @@ private:
             LOG_ERROR("添加会话成员请求正文反序列化失败");
             return err_response("添加会话成员请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1620,14 +1679,13 @@ private:
             LOG_ERROR("移除会话成员请求正文反序列化失败");
             return err_response("移除会话成员请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1661,14 +1719,13 @@ private:
             LOG_ERROR("转让群主请求正文反序列化失败");
             return err_response("转让群主请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1702,14 +1759,13 @@ private:
             LOG_ERROR("编辑会话成员权限请求正文反序列化失败");
             return err_response("编辑会话成员权限请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1743,14 +1799,13 @@ private:
             LOG_ERROR("编辑会话成员权限请求正文反序列化失败");
             return err_response("编辑会话成员权限请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1784,14 +1839,13 @@ private:
             LOG_ERROR("搜索会话请求正文反序列化失败");
             return err_response("搜索会话请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1825,14 +1879,13 @@ private:
             LOG_ERROR("设置会话免打扰请求正文反序列化失败");
             return err_response("设置会话免打扰请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1866,14 +1919,13 @@ private:
             LOG_ERROR("设置会话置顶请求正文反序列化失败");
             return err_response("设置会话置顶请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1907,14 +1959,13 @@ private:
             LOG_ERROR("设置会话隐藏请求正文反序列化失败");
             return err_response("设置会话隐藏请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1948,14 +1999,13 @@ private:
             LOG_ERROR("退出会话请求正文反序列化失败");
             return err_response("退出会话请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -1989,14 +2039,13 @@ private:
             LOG_ERROR("确认最新已读消息正文反序列化失败");
             return err_response("确认最新已读消息正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -2030,14 +2079,13 @@ private:
             LOG_ERROR("获取会话成员ID正文反序列化失败");
             return err_response("获取会话成员ID正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -2071,14 +2119,13 @@ private:
             LOG_ERROR("获取离线消息请求正文反序列化失败");
             return err_response("获取离线消息请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -2112,14 +2159,13 @@ private:
             LOG_ERROR("获取未读消息数请求正文反序列化失败");
             return err_response("获取未读消息数请求正文反序列化失败");
         }
-        //2. 客户端身份识别和鉴权
-        std::string ssid = req.session_id();
-        auto uid = _redis_session->uid(ssid);
-        if(!uid) {
-            LOG_ERROR("请求ID - {} 获取登录会话 {} 关联用户信息失败", req.request_id(), ssid);
-            return err_response("获取登录会话关联用户信息失败");
+        //2. JWT 鉴权（横切 spec §2.5）
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
         }
-        req.set_user_id(*uid);
+        req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
         auto channel = _mm_channels->choose(_chatsession_service_name);
         if(!channel) {
@@ -2139,7 +2185,8 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
 private:
-    Session::ptr _redis_session;
+    std::shared_ptr<::chatnow::auth::JwtCodec> _jwt_codec;
+    std::shared_ptr<::chatnow::auth::JwtStore> _jwt_store;
 
     std::string _speech_service_name;
     std::string _file_service_name;
@@ -2166,6 +2213,16 @@ public:
                         bool keep_alive)
     {
         _redis_client = RedisClientFactory::create(host, port, db, keep_alive);
+    }
+    /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
+    void make_jwt_object(const std::string &auth_config_path) {
+        if (!_redis_client) {
+            LOG_ERROR("make_jwt_object 必须在 make_redis_object 之后调用");
+            abort();
+        }
+        auto cfg = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
+        _jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(std::move(cfg));
+        _jwt_store = std::make_shared<::chatnow::auth::JwtStore>(_redis_client);
     }
     /* brief: 用于构造服务发现&信道管理客户端对象 */
     void make_discovery_object(const std::string &reg_host,
@@ -2221,10 +2278,15 @@ public:
             LOG_ERROR("还未初始化信道管理模块");
             abort();
         }
+        if(!_jwt_codec || !_jwt_store) {
+            LOG_ERROR("还未初始化 JWT 模块（缺 make_jwt_object）");
+            abort();
+        }
         GatewayServer::ptr server = std::make_shared<GatewayServer>(_http_port,
-                                                                _redis_client,
                                                                 _mm_channels,
                                                                 _service_discoverer,
+                                                                _jwt_codec,
+                                                                _jwt_store,
                                                                 _speech_service_name,
                                                                 _file_service_name,
                                                                 _user_service_name,
@@ -2239,6 +2301,8 @@ private:
     int _http_port;
 
     std::shared_ptr<sw::redis::Redis> _redis_client;
+    std::shared_ptr<::chatnow::auth::JwtCodec> _jwt_codec;
+    std::shared_ptr<::chatnow::auth::JwtStore> _jwt_store;
 
     std::string _speech_service_name;
     std::string _file_service_name;
