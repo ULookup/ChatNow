@@ -10,6 +10,7 @@
 #include "infra/logger.hpp"
 #include "utils/utils.hpp"
 #include "mq/channel.hpp"
+#include "mq/trace_headers.hpp"
 #include "mq/rabbitmq.hpp"
 
 #include "message.hxx"
@@ -687,7 +688,9 @@ public:
                 long long now_ts = static_cast<long long>(time(nullptr));
                 auto es_outbox = _es_outbox;
                 try {
-                    _es_publisher->publish_confirm(es_payload,
+                    std::map<std::string, std::string> _hdrs;
+                    ::chatnow::mq::mq_inject_trace_headers(_hdrs);
+                    _es_publisher->publish_confirm(es_payload, _hdrs,
                         [es_payload, es_outbox, mid, now_ts](PublishStatus st, const std::string &err) {
                             if(st != PublishStatus::Acked) {
                                 LOG_WARN("ES-Publisher: 投递 es_index_exchange 失败 mid={} err={}, 入 ES outbox", mid, err);
@@ -707,7 +710,9 @@ public:
                 auto outbox = _push_outbox;  // 拷一份引用进 lambda
                 long long now_ts = static_cast<long long>(time(nullptr));
                 try {
-                    _push_publisher->publish_confirm(payload,
+                    std::map<std::string, std::string> _hdrs;
+                    ::chatnow::mq::mq_inject_trace_headers(_hdrs);
+                    _push_publisher->publish_confirm(payload, _hdrs,
                         [mid, payload, outbox, now_ts](PublishStatus status, const std::string &err) {
                             if(status != PublishStatus::Acked) {
                                 LOG_WARN("Push-Publisher: 投递 push_queue 失败 mid={} err={}, 入 outbox", mid, err);
@@ -1282,15 +1287,37 @@ public:
             abort();
         }
         _backfill_seq_from_db();
-        auto callback_db = std::bind(&MessageServiceImpl::onDBMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-        auto callback_es = std::bind(&MessageServiceImpl::onESMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+        /* P8: 包一层带 headers 的回调，从 MQ headers 提 trace_id 写入 LogContext */
+        auto callback_db_inner = std::bind(&MessageServiceImpl::onDBMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+        auto callback_es_inner = std::bind(&MessageServiceImpl::onESMessage, message_service, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+        chatnow::MessageCallbackWithHeaders callback_db = [callback_db_inner](const char* body, size_t sz, bool redeliv,
+                                                                              const std::map<std::string, std::string>& headers) -> chatnow::ConsumeAction {
+            std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
+            ::chatnow::log::LogContext::set(_trace_id, "", "");
+            struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
+            return callback_db_inner(body, sz, redeliv);
+        };
+        chatnow::MessageCallbackWithHeaders callback_es = [callback_es_inner](const char* body, size_t sz, bool redeliv,
+                                                                              const std::map<std::string, std::string>& headers) -> chatnow::ConsumeAction {
+            std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
+            ::chatnow::log::LogContext::set(_trace_id, "", "");
+            struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
+            return callback_es_inner(body, sz, redeliv);
+        };
 
         LOG_INFO("开始向 Broker 订阅消费者队列...");
         _subscriber_db->consume(std::move(callback_db));
         _subscriber_es->consume(std::move(callback_es));
         if(_subscriber_es_index) {
-            auto callback_es_index = std::bind(&MessageServiceImpl::onESIndexMessage, message_service,
-                                               std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+            auto callback_es_index_inner = std::bind(&MessageServiceImpl::onESIndexMessage, message_service,
+                                                     std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+            chatnow::MessageCallbackWithHeaders callback_es_index = [callback_es_index_inner](const char* body, size_t sz, bool redeliv,
+                                                                                              const std::map<std::string, std::string>& headers) -> chatnow::ConsumeAction {
+                std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
+                ::chatnow::log::LogContext::set(_trace_id, "", "");
+                struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
+                return callback_es_index_inner(body, sz, redeliv);
+            };
             _subscriber_es_index->consume(std::move(callback_es_index));
         }
         LOG_INFO("队列订阅完成，服务全面启动！");

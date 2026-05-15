@@ -5,6 +5,8 @@
 #include "infra/logger.hpp"
 #include "mq/channel.hpp"
 #include "mq/rabbitmq.hpp"
+#include "mq/trace_headers.hpp"
+#include "log/log_context.hpp"
 #include "dao/data_redis.hpp"
 #include "utils/brpc_closure.hpp"
 #include "common/types.pb.h"
@@ -164,6 +166,11 @@ public:
         NotifyMessage notify_template;
         notify_template.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
         notify_template.mutable_new_message_info()->mutable_message_info()->CopyFrom(msg_info);
+        /* P8: 把当前 LogContext 的 trace_id 透传到 NotifyMessage（客户端日志关联） */
+        const auto& _ctx_trace = ::chatnow::log::LogContext::current().trace_id;
+        if (!_ctx_trace.empty()) {
+            notify_template.set_trace_id(_ctx_trace);
+        }
         auto build_payload_for = [&](const std::string &uid) -> std::string {
             NotifyMessage notify = notify_template;
             auto it = uid2seq.find(uid);
@@ -875,9 +882,16 @@ public:
         _ws_server.start_accept();
 
         // 订阅 push_queue
-        auto callback = std::bind(&PushServiceImpl::onPushMessage, _push_service,
+        auto callback_inner = std::bind(&PushServiceImpl::onPushMessage, _push_service,
                                   std::placeholders::_1, std::placeholders::_2,
                                   std::placeholders::_3);
+        chatnow::MessageCallbackWithHeaders callback = [callback_inner](const char* body, size_t sz, bool redeliv,
+                                                                        const std::map<std::string, std::string>& headers) -> chatnow::ConsumeAction {
+            std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
+            ::chatnow::log::LogContext::set(_trace_id, "", "");
+            struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
+            return callback_inner(body, sz, redeliv);
+        };
         _push_subscriber->consume(std::move(callback));
         // 启动 CrossInstanceOutbox reaper
         std::string owner = _reaper_owner.empty()

@@ -2,21 +2,17 @@
 
 /**
  * ===========================================================================
- * 日志封装（基于 spdlog）
+ * 日志封装（基于 spdlog）—— P8 改造为结构化 JSON 输出
  * ---------------------------------------------------------------------------
  * 设计要点：
- *   1. 全局 logger 改为 inline 变量，避免多 TU include 时重复定义链接错误
- *   2. 发布模式启用「异步日志 + rotating_file_sink」：
- *      - 单文件 50MB，轮转保留 10 份；避免单文件无限膨胀
- *      - 异步队列 8192，一个后台线程；日志路径不阻塞业务
- *   3. flush 策略：调试模式 trace 级即刷；发布模式仅 warn 级别以上即刷，
- *      其他级别每 3 秒批量刷盘一次，兼顾性能与故障可见性
- *   4. 日志格式补充毫秒精度时间戳 + 线程 ID + 文件名(去路径)
- *   5. LOG_xxx 宏使用 __builtin_strrchr 抽出 basename，避免日志冗长
- *
- * 使用：
- *   chatnow::init_logger(true, "/im/logs/user.log", spdlog::level::info);
- *   LOG_INFO("user logged in: {}", uid);
+ *   1. spdlog pattern 切为 "%v"：sink 仅打印 message 原文，不再叠加自己的
+ *      时间戳/level/线程 ID。完整 JSON 由 LOG_xxx 宏侧组装。
+ *   2. 宏侧自构 JSON：调用 build_log_line(level, msg, fields)，从 LogContext
+ *      读 trace_id / user_id / device_id；服务名由 set_service_name 全局设
+ *   3. 字段化变体：LOG_INFOF("event", {{"k","v"}}) —— 适合 spec §5.2 推荐用法
+ *      传统宏 LOG_INFO("text {}", arg) 仍然工作，输出 fields 为空对象
+ *   4. flush 策略不变：debug 模式即刷；release 模式 warn 以上即刷，余 3s 刷
+ *   5. async 写盘 + rotating file 不变
  * ===========================================================================
  */
 
@@ -24,35 +20,36 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/async.h>
+#include <spdlog/fmt/fmt.h>
 #include <chrono>
 #include <memory>
 #include <string>
 
+#include "infra/log_json.hpp"   // build_log_line / set_service_name
+
 namespace chatnow
 {
 
-// inline 变量保证 ODR：多个 .cc 包含本头文件不会产生重复定义
 inline std::shared_ptr<spdlog::logger> g_default_logger;
 
-// 发布模式日志文件大小阈值与保留份数
-inline constexpr size_t kMaxFileSize  = 50 * 1024 * 1024;  // 50MB
+inline constexpr size_t kMaxFileSize  = 50 * 1024 * 1024;
 inline constexpr size_t kMaxFileCount = 10;
 inline constexpr size_t kAsyncQueue   = 8192;
 
-/* brief: 初始化全局日志器
- *  @param mode      true=发布模式（文件 + 异步） / false=调试模式（控制台 + 同步）
- *  @param filename  发布模式输出文件
- *  @param level     发布模式日志等级（spdlog level enum 整数）
+/* brief: 设置当前进程的服务名（用于日志 service 字段）
+ *  在 main() 早于 init_logger 调用，例如：
+ *    chatnow::set_service_name("message");
+ *    chatnow::init_logger(release_mode, "/var/log/chatnow/message.log", level);
  */
+using ::chatnow::infra::set_service_name;
+
 inline void init_logger(bool mode, const std::string &filename, int32_t level) {
     if(mode == false) {
-        // 调试模式：彩色控制台输出，最低等级，立即刷盘便于现场调试
         spdlog::drop("console-logger");
         g_default_logger = spdlog::stdout_color_mt("console-logger");
         g_default_logger->set_level(spdlog::level::trace);
         g_default_logger->flush_on(spdlog::level::trace);
     } else {
-        // 发布模式：异步 rotating file，避免单文件膨胀 / 同步 IO 阻塞业务线程
         spdlog::drop("file-logger");
         spdlog::init_thread_pool(kAsyncQueue, 1);
         auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
@@ -64,15 +61,14 @@ inline void init_logger(bool mode, const std::string &filename, int32_t level) {
             spdlog::async_overflow_policy::block);
         spdlog::register_logger(g_default_logger);
         g_default_logger->set_level(static_cast<spdlog::level::level_enum>(level));
-        // warn/error/critical 立即刷；其它级别 3s 批量刷
         g_default_logger->flush_on(spdlog::level::warn);
         spdlog::flush_every(std::chrono::seconds(3));
     }
-    // 模式: [logger名][HH:MM:SS.ms][线程ID][级别] 内容
-    g_default_logger->set_pattern("[%n][%H:%M:%S.%e][%t]%^[%l]%$ %v");
+    /* P8: 把 sink 输出格式改为仅打印 message —— 业务侧已经组装好 JSON */
+    g_default_logger->set_pattern("%v");
 }
 
-/* brief: 抽取文件 basename，避免日志中出现绝对路径噪音 */
+/* brief: 抽 basename，用于把文件名加进 fields（不再放在 msg 里）  */
 constexpr const char* basename_of(const char* path) {
     const char* last = path;
     for(const char* p = path; *p; ++p) {
@@ -81,11 +77,61 @@ constexpr const char* basename_of(const char* path) {
     return last;
 }
 
-#define LOG_TRACE(format, ...) chatnow::g_default_logger->trace   (std::string("[{}:{}] ") + format, chatnow::basename_of(__FILE__), __LINE__, ##__VA_ARGS__)
-#define LOG_DEBUG(format, ...) chatnow::g_default_logger->debug   (std::string("[{}:{}] ") + format, chatnow::basename_of(__FILE__), __LINE__, ##__VA_ARGS__)
-#define LOG_INFO(format, ...)  chatnow::g_default_logger->info    (std::string("[{}:{}] ") + format, chatnow::basename_of(__FILE__), __LINE__, ##__VA_ARGS__)
-#define LOG_WARN(format, ...)  chatnow::g_default_logger->warn    (std::string("[{}:{}] ") + format, chatnow::basename_of(__FILE__), __LINE__, ##__VA_ARGS__)
-#define LOG_ERROR(format, ...) chatnow::g_default_logger->error   (std::string("[{}:{}] ") + format, chatnow::basename_of(__FILE__), __LINE__, ##__VA_ARGS__)
-#define LOG_FATAL(format, ...) chatnow::g_default_logger->critical(std::string("[{}:{}] ") + format, chatnow::basename_of(__FILE__), __LINE__, ##__VA_ARGS__)
+namespace detail {
+/* brief: 把传统 LOG_xxx 的 fmt-style 参数拼成 msg 后交给 build_log_line */
+template <typename... Args>
+inline std::string format_text(const std::string& fmt_str, Args&&... args) {
+    if constexpr (sizeof...(Args) == 0) {
+        return fmt_str;
+    } else {
+        return fmt::format(fmt_str, std::forward<Args>(args)...);
+    }
+}
+}  // namespace detail
 
-} // namespace chatnow
+}  // namespace chatnow
+
+/* ============================================================
+ *  传统宏 —— 输出 JSON，msg 字段为格式化后文本，fields 为空
+ *  注意：原宏在 msg 前缀加 "[file:line] "，P8 改为放进 fields
+ *  仍保留 file/line 作为 fields，便于排障定位
+ * ============================================================ */
+#define _CN_LOG_JSON(level_enum, level_str, format, ...)                       \
+    do {                                                                       \
+        if (!chatnow::g_default_logger) break;                                 \
+        std::string _msg = ::chatnow::detail::format_text(format, ##__VA_ARGS__); \
+        std::string _line = ::chatnow::infra::build_log_line(                  \
+            level_str, _msg,                                                   \
+            {{"file", chatnow::basename_of(__FILE__)},                         \
+             {"line", std::to_string(__LINE__)}});                             \
+        chatnow::g_default_logger->log(level_enum, "{}", _line);               \
+    } while (0)
+
+#define LOG_TRACE(format, ...) _CN_LOG_JSON(spdlog::level::trace,    "trace", format, ##__VA_ARGS__)
+#define LOG_DEBUG(format, ...) _CN_LOG_JSON(spdlog::level::debug,    "debug", format, ##__VA_ARGS__)
+#define LOG_INFO(format, ...)  _CN_LOG_JSON(spdlog::level::info,     "info",  format, ##__VA_ARGS__)
+#define LOG_WARN(format, ...)  _CN_LOG_JSON(spdlog::level::warn,     "warn",  format, ##__VA_ARGS__)
+#define LOG_ERROR(format, ...) _CN_LOG_JSON(spdlog::level::err,      "error", format, ##__VA_ARGS__)
+#define LOG_FATAL(format, ...) _CN_LOG_JSON(spdlog::level::critical, "fatal", format, ##__VA_ARGS__)
+
+/* ============================================================
+ *  字段化变体 —— event 为 msg；fields 由调用方传 initializer_list
+ *  用法： LOG_INFOF("consumed_db_message",
+ *           {{"message_id", std::to_string(id)},
+ *            {"latency_ms", std::to_string(t)}});
+ *  注意：value 必须是 std::string 已字符串化的形态
+ * ============================================================ */
+#define _CN_LOG_JSON_F(level_enum, level_str, event, fields_init)              \
+    do {                                                                       \
+        if (!chatnow::g_default_logger) break;                                 \
+        std::string _line = ::chatnow::infra::build_log_line(                  \
+            level_str, event, fields_init);                                    \
+        chatnow::g_default_logger->log(level_enum, "{}", _line);               \
+    } while (0)
+
+#define LOG_TRACEF(event, fields) _CN_LOG_JSON_F(spdlog::level::trace,    "trace", event, fields)
+#define LOG_DEBUGF(event, fields) _CN_LOG_JSON_F(spdlog::level::debug,    "debug", event, fields)
+#define LOG_INFOF(event,  fields) _CN_LOG_JSON_F(spdlog::level::info,     "info",  event, fields)
+#define LOG_WARNF(event,  fields) _CN_LOG_JSON_F(spdlog::level::warn,     "warn",  event, fields)
+#define LOG_ERRORF(event, fields) _CN_LOG_JSON_F(spdlog::level::err,      "error", event, fields)
+#define LOG_FATALF(event, fields) _CN_LOG_JSON_F(spdlog::level::critical, "fatal", event, fields)
