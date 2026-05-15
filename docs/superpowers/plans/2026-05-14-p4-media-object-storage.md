@@ -2646,3 +2646,91 @@ Client ─┤          ├──────────────────
 
 共 31 个 task，均以独立 commit 收尾；每个 task 平均 1 commit，预期产出 31 个新 commit；总修改/新增文件约 25 个，测试覆盖：单元 5（content_hash/object_key/magic_sniff/mime_whitelist + DAO 集成）+ 集成 2（S3 / DAO）+ smoke 1。
 
+---
+
+## P4 Plan 实际执行偏离记录（Adapter notes）
+
+> 本节为权威落地条款。原 §0–§31 task 文本保持不动作为蓝图；执行时若与下列条目冲突，**以本节为准**。
+> 起因：原 plan 与仓库实际状态在 DAO 模式 / CMake 模板 / 依赖安装方式 / 错误码命名空间 等几处不一致；为遵循"稳"模式，先在本节集中记录偏离，再分 task 实施。
+
+### A. 仓库现状（事实清单）
+
+- 当前 P4 分支基线：`feature/p4-media-object-storage`，HEAD = P2 已合 main 之后的 merge commit。
+- **DAO 风格**：仓库 `common/dao/*.hpp` 全部是 ODB 包装（如 `mysql_user.hpp`），不是 raw SQL。ODB 源文件统一放 `odb/*.hxx`（已存在 `odb/user.hxx`、`odb/message.hxx` 等）。
+- **CMake 模板**：每个服务子目录有自己的 `CMakeLists.txt`，自跑 `protoc` + `odb` + `-l...` 直链；不存在 `proto_lib`、`${BRPC_LIB}`、`${AWSSDK_LINK_LIBRARIES}` 这些聚合 target。
+- **顶层 CMakeLists.txt** 只声明 `add_subdirectory()`，无 `find_package`。
+- **错误码**：`MEDIA_FILE_TOO_LARGE` / `MEDIA_UNSUPPORTED_FORMAT` / `MEDIA_UPLOAD_FAILED` / `MEDIA_QUOTA_EXCEEDED` / `MEDIA_HASH_MISMATCH` / `MEDIA_UPLOAD_INCOMPLETE` (5006) / `MEDIA_PART_NOT_FOUND` (5007) 已在 `proto/common/error.proto` 中存在；C++ 镜像 `common/error/error_codes.hpp` 中**未补 media 段**，本 plan 在执行前要先把 5001–5007 加进去。
+- **ResponseHeader namespace**：proto 中是 `chatnow.common.ResponseHeader`，原 plan §8 漏写 namespace。
+- **HANDLE_RPC 宏签名**：`HANDLE_RPC(cntl, req, rsp, { body })` —— **无 name 参数**；body 内可用 `auth.user_id`。原 plan §16/§21 写法 `HANDLE_RPC(c, req, rsp, "ApplyUpload", [&]{...})` 错。
+- **`extract_auth` 命名空间**：`chatnow::auth::extract_auth(brpc::Controller*)`；HANDLE_RPC 内部已调用，body 直接用 `auth` 引用。
+- **现有 `proto/media/media_service.proto`** 老接口 `UploadFile/DownloadFile`，被 `file/source/file_server.{h,cc}` 实现；**本 plan 整体替换**；老 `file_server.cc` 入口要删（plan §12 漏掉 .cc）。
+- **`sql/`、`docker/` 目录不存在**，本 plan 要新建。
+- **现有 conf 全是 INI / gflags 风格**（`*.conf`），P4 引入 `conf/media.json` 是**新风格**；为最小破坏现状，启动入口同时支持 gflags 命令行 + JSON 文件加载（与 `conf/auth.json` 模式一致）。
+- **依赖管理**：`depends.sh` 是部署期"拷可执行依赖 .so"脚本，不是构建依赖安装脚本。aws-sdk-cpp 安装放新建 `scripts/install_aws_sdk_linux.sh`；mac 当下不能实跑构建（仅写代码），所有最终编译/集成测试在 Linux。
+
+### B. 全局规则（替换原 plan 中相反陈述）
+
+1. **依赖：** 不动 `depends.sh`。新增 `scripts/install_aws_sdk_linux.sh`（plan §1 替换）；CMakeLists 链接用 `-laws-cpp-sdk-s3 -laws-cpp-sdk-core`，不调用 `find_package(AWSSDK)`。
+2. **DAO：** 全部走 ODB。每张新表配 `odb/<table>.hxx`（pragma db 注解）+ `common/dao/mysql_<table>.hpp`（CRUD 包装，仿 `mysql_user.hpp`）。`sql/V4__media.sql` 仍输出，标注「权威 schema 由 ODB `--generate-schema` 生成；本 SQL 仅供无 ODB 工具环境对齐」。
+3. **CMake：** `file/CMakeLists.txt` 重写时仿 `user/CMakeLists.txt`：自跑 protoc+odb，直链 `-l...`。无 `proto_lib`/`AWSSDK_LINK_LIBRARIES`。target 名 `media_server`（保留 plan §12 意图）。
+4. **错误码：** 在 `common/error/error_codes.hpp` 增加 `kMediaFileTooLarge=5001 ... kMediaPartNotFound=5007` 七个常量；handler 抛错统一用这套常量（不直接用 proto enum 值）。
+5. **HANDLE_RPC 用法：**
+    ```cpp
+    void MediaServiceImpl::ApplyUpload(google::protobuf::RpcController* base_cntl,
+                                       const ApplyUploadReq* req, ApplyUploadRsp* rsp,
+                                       google::protobuf::Closure* done) {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            _upload->apply(auth.user_id, *req, rsp);
+        });
+    }
+    ```
+6. **proto 字段类型：** `ResponseHeader header = 1;` → 写作 `chatnow.common.ResponseHeader header = 1;`（plan §8 修正）。
+7. **proto package：** 沿用 `chatnow.media`，不动；老消息（`FileDownloadData/FileUploadData`/`Upload-/Download-/GetFileInfoReq+Rsp`）整体删除，迁移到三步上传契约。
+8. **测试：** 单元测试统一加进 `common/test/`（已有 CMakeLists 用 `file(GLOB test_srcs test_*.cc)`，新增 cc 自动生效）；集成测试加进 `file/test/`，需要在 `file/CMakeLists.txt` 里给 `media_client` target 显式列入新文件。
+
+### C. 逐 Task 偏离条款
+
+| 原 task | 偏离 |
+|---|---|
+| **§1 depends.sh + CMakeLists** | 改为：(a) 新建 `scripts/install_aws_sdk_linux.sh`，内容同原 plan §1.1 但抽出为独立脚本；(b) 顶层 `CMakeLists.txt` 不动；(c) 不需要 `find_package(AWSSDK)`；(d) 增加 commit 步骤：把 5001–5007 写入 `common/error/error_codes.hpp`。 |
+| **§2 content_hash** | 测试加到 `common/test/test_content_hash.cc`（GLOB 自动收）；hpp 路径 `common/utils/content_hash.hpp` 不变。 |
+| **§3 object_key** | 同上；测试加到 `common/test/test_object_key.cc`。 |
+| **§4 magic_sniff** | 同上；测试加到 `common/test/test_magic_sniff.cc`。 |
+| **§5 mime_whitelist** | 同上；测试加到 `common/test/test_mime_whitelist.cc`。注意 `nlohmann::json` 依赖：仓库已通过 `third/include/jsoncpp` 走 jsoncpp，但 `gateway_auth.hpp` 等已使用 `nlohmann/json`（third/include 中存在），保持原计划的 nlohmann::json。 |
+| **§6/§7 s3_client** | 仅头文件 + 测试；`#include "common/error.pb.h"` → 改为 `#include "common/error/error_codes.hpp"`；抛错改为 `throw ServiceError(error::kMediaUploadFailed, ...)`。 |
+| **§8 media_service.proto** | 重写时：(a) 所有 `ResponseHeader` 写全 `chatnow.common.ResponseHeader`；(b) 顶部加 `import "common/types.proto";` 仅在需要时；(c) 移除老消息；(d) 加 `option cc_generic_services = true;`（与 identity 一致）。 |
+| **§9 identity_service.proto** | 现有 UpdateProfileReq 已有 `optional string avatar_url = 6;`；P4 操作：**保留 avatar_url**，**新增 `optional string avatar_file_id = 8;`**（不复用 6 号 tag，避免破坏在途客户端）。文档说明：服务端二选一，优先 file_id；P7 删除 avatar_url。 |
+| **§10 sql/V4__media.sql** | 创建 `sql/` 目录；DDL 与原 plan 一致，但首行加注释「ODB 是权威 schema；本文件仅作部署参考」。 |
+| **§11 DAO** | 整段重写为 ODB 模式：<br/>- `odb/media_file.hxx`（pragma db object）<br/>- `odb/media_blob_ref.hxx`<br/>- `odb/media_user_quota.hxx`<br/>- `common/dao/mysql_media_file.hpp` / `mysql_media_blob_ref.hpp` / `mysql_media_user_quota.hpp`（CRUD 包装，仿 `mysql_user.hpp`）<br/>- 测试 `file/test/test_media_dao_integration.cc` 用 ODBFactory::create + `MediaFileTable::insert()` 等真实 ODB API。<br/>- 字段类型：时间戳列用 `boost::posix_time::ptime`（与 user/message 一致），不用 `int64_t epoch_ms`；handler 内部计算用 epoch_ms 但写库前转 ptime。<br/>- 业务约束（`status IN (...)`、`ref_count >= 0`）放在 DAO 层 C++ 中校验，不依赖 SQL CHECK。 |
+| **§12 file/CMakeLists.txt** | 仿 `user/CMakeLists.txt`：(a) target 名 `media_server`；(b) 引入 odb 编译段：`odb_files = media_file.hxx media_blob_ref.hxx media_user_quota.hxx`；(c) 链接库：`-laws-cpp-sdk-s3 -laws-cpp-sdk-core` 加在原有 `-l...` 列表末尾；(d) 同时 `git rm file/source/file_server.h file/source/file_server.cc`；(e) `media_client` target 用于 `file/test/test_*.cc` 单测。 |
+| **§13 media_main.cc** | 不要 `open_mysql_from`/`open_redis_from`/`Registry`；仿 `user/source/user_server.cc`：手工 ODBFactory::create + 手工构造 `sw::redis::Redis` + `Registry`（已有 `common/infra/etcd.hpp`）。配置加载方式：gflags 命令行 + 单独 `--media_conf=conf/media.json` 加载 mime_whitelist / bucket / s3 字段（参考 `conf/auth.json` 加载方式）。 |
+| **§14 ApplyUpload** | DAO 接口名替换为 ODB 包装：`_dao->find_blob(hash)` → `_blob_ref_table->select_by_hash(hash)`；handler 内部 `now_ms()` 保留；写 ptime 用 `boost::posix_time::microsec_clock::universal_time()`。错误码用 `error::kMedia*` 常量。 |
+| **§15 CompleteUpload** | 同上；HEAD size 校验后失败路径中"删除 MinIO 对象"步骤用 try/catch 吞异常并记 WARN。 |
+| **§16 MediaServiceImpl Apply/Complete** | HANDLE_RPC 用法按规则 B.5；删除原 plan 的 `"ApplyUpload"` 字符串参数；删除 `[&]{...}` lambda 写法。 |
+| **§17–§19 multipart** | 同 §14/15 调整。`find_file_by_upload_id` 加到 ODB 包装。 |
+| **§20 ApplyDownload + GetFileInfo** | 同上。SpeechHandler 占位保留；P4 不接 ASR；rsp 设空字符串。 |
+| **§21 接 multipart/download/speech** | HANDLE_RPC 用法按规则 B.5；inline 实现写到 `media_server.h` 中。 |
+| **§22 cleanup_worker 框架** | Redis 直接用 `std::shared_ptr<sw::redis::Redis>`（即 `data_redis.hpp` 内的同款 client）；MediaDao/QuotaDao 改为 ODB 包装类型。 |
+| **§23–§25 cleanup tasks** | 同上；ODB 查询用 `odb::query`（参见 `mysql_user.hpp` 中的写法）。 |
+| **§26 speech proto include** | 现有 `speech/source/speech_server.h` 实际 include 已是 `media/media_service.pb.h`（已对）。本 task 真正要做的是：移除老 RPC `SpeechRecognition` 字段中的 `user_id/session_id`（P4 §8 重写时一起处理）+ 编译验证 speech_server target 在新 proto 下仍能编。 |
+| **§27 avatar_url 工具 + 契约** | 与 §9 偏离协同：`UpdateProfile` 同时支持 `avatar_url` 和 `avatar_file_id`，二选一。`avatar_url::of(prefix, file_id)` 工具不变。 |
+| **§28 docker-compose** | 创建 `docker/` 目录；docker-compose.yml 仅放 minio + minio-init 两个服务（不重新声明 mysql/redis/etcd——本仓暂未提供 compose，以后可再扩）。 |
+| **§29 minio-init 脚本** | 不变。 |
+| **§30 conf/media.json** | server 段去掉（端口走 gflags），保留：`s3 / media（双 bucket / public_url_prefix / presign_seconds / asr_endpoint / mime_whitelist）`；mysql/redis/etcd 走 gflags，不重复在 JSON 里。 |
+| **§31 smoke runbook** | 路径改 Linux；`grpcurl` 调用 service 全名 `chatnow.media.MediaService/...` 不变；`mysql -h ... -p` 改成实际配置。 |
+
+### D. Out of scope（本 P4 不做）
+
+- 所有 §11 中提到的 SQL 业务规则用 SQL CHECK 实现（改用 C++ 校验）。
+- aws-sdk-cpp 在 mac 上编译（mac 仅写代码 + clangd 静态检查；最终 Linux 上构建/跑测）。
+- `chatnow::open_mysql_from / open_redis_from / Registry` helper（当前仓库无；plan §13 改用现成 ODBFactory + sw::redis::Redis + Registry）。
+- ODB schema 注解 `#pragma db check(...)` 自动 emit SQL CHECK（odb 老版本不稳定）。
+
+### E. 提交节奏调整
+
+- 第 0 步：提交本节修订（plan 文件本身）。
+- 第 0.5 步：提交 `common/error/error_codes.hpp` 增 5001–5007，独立 commit。
+- §1–§31：按原顺序，commit 信息中如有偏离要在 body 里引用本节具体条款（"see Adapter notes §C 第 N 行"）。
+
