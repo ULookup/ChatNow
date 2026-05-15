@@ -8,17 +8,18 @@
 using namespace chatnow::auth;
 
 namespace {
-brpc::Controller make_cntl(std::initializer_list<std::pair<std::string, std::string>> headers) {
-    brpc::Controller cntl;
+// brpc::Controller 不可拷贝/移动，因此用 in-place 填充而非返回值
+void fill_cntl(brpc::Controller& cntl,
+               std::initializer_list<std::pair<std::string, std::string>> headers) {
     for (const auto& kv : headers) {
         cntl.http_request().SetHeader(kv.first, kv.second);
     }
-    return cntl;
 }
 }
 
 TEST(ExtractAuth, AllFieldsPresent) {
-    auto cntl = make_cntl({
+    brpc::Controller cntl;
+    fill_cntl(cntl, {
         {kMetaUserId,   "u_1"},
         {kMetaDeviceId, "d_1"},
         {kMetaTraceId,  "t_1"},
@@ -32,7 +33,8 @@ TEST(ExtractAuth, AllFieldsPresent) {
 }
 
 TEST(ExtractAuth, TraceIdOptional) {
-    auto cntl = make_cntl({
+    brpc::Controller cntl;
+    fill_cntl(cntl, {
         {kMetaUserId,   "u_1"},
         {kMetaDeviceId, "d_1"},
     });
@@ -42,7 +44,8 @@ TEST(ExtractAuth, TraceIdOptional) {
 }
 
 TEST(ExtractAuth, MissingUserIdThrows) {
-    auto cntl = make_cntl({
+    brpc::Controller cntl;
+    fill_cntl(cntl, {
         {kMetaDeviceId, "d_1"},
         {kMetaTraceId,  "t_1"},
     });
@@ -55,7 +58,8 @@ TEST(ExtractAuth, MissingUserIdThrows) {
 }
 
 TEST(ExtractAuth, MissingDeviceIdThrows) {
-    auto cntl = make_cntl({
+    brpc::Controller cntl;
+    fill_cntl(cntl, {
         {kMetaUserId,  "u_1"},
         {kMetaTraceId, "t_1"},
     });
