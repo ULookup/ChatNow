@@ -40,13 +40,22 @@
  (登录/JWT) (关系/申请) (会话/成员)   (发送入口)   (存储/检索) (对象存储+ASR)(在线状态/推送)
                                           │
                                           ▼
-                                     RabbitMQ (msg_exchange)
-                                       │      │
-                                       ▼      ▼
-                                     DB Q    ES Q
-                                       │      │
-                                       └──→ Message 服务（双消费）
-                                            写 message + user_timeline / 写 ES 索引
+                                     RabbitMQ
+                                       chat_msg_exchange
+                                          │
+                                          ▼
+                                     msg_queue_db
+                                          │
+                                  Message DB Consumer
+                                  写 message + user_timeline (一个 ODB 事务)
+                                          │
+                                          ▼ (commit 后 fire-and-forget)
+                                     es_index_exchange ──→ es_index_queue
+                                          │                     │
+                                          │              Message ES Consumer
+                                          │              写 ES 索引（仅文本）
+                                          │
+                                          └─→ push_queue ─→ Push 服务
 ```
 
 **架构关键点**
@@ -55,7 +64,7 @@
 2. **服务发现走 etcd** —— 各服务启动后注册到 `/service/<svc>/instance/<id>`；调用方用 `Discovery + ServiceManager` 自动发现可用 brpc Channel，轮询负载均衡。
 3. **proto 业务体干净** —— 业务 Req/Rsp 不再带 `user_id / session_id / trace_id`，全部走 metadata；这点是 P1 / P8 联合落地的硬规约。
 4. **媒体不过 bytes** —— Media 服务签 presigned URL 让客户端直传 MinIO；服务端只过元数据 + 配额，详见 §2.4。
-5. **写扩散 + MQ 双写** —— Transmite 投递 RabbitMQ 后由 Message 服务异步写 MySQL（含每会话成员的 timeline）+ 写 ES（仅文本）。
+5. **写扩散 + 串行 ES 索引** —— Transmite 投递 `chat_msg_exchange`，Message DB Consumer 在一个 ODB 事务里写 `message` + `user_timeline`（每个成员一行）；**事务 commit 后**才向 `es_index_exchange` 投递 `ESIndexEvent`，由 ES Consumer 写索引；失败落 `ESOutbox`（Redis ZSET）+ reaper 重投。这样不存在"ES 有而 DB 无"的不一致。
 6. **错误码统一** —— `proto/common/error.proto` 是真值源，C++ 镜像在 `common/error/error_codes.hpp`；handler 一律 `throw ServiceError(code, msg)`，由 `HANDLE_RPC` 宏统一捕获。
 
 ---
@@ -278,9 +287,22 @@ Gateway 收到响应后向所有在线接收者推 `CHAT_MESSAGE_NOTIFY`。
 
 **两个角色**：
 
-**A. MQ 双消费者**：
-- DB Consumer (`onDBMessage`) —— 一个 ODB 事务里同写 `message` + `user_timeline`（写扩散：会话每个成员一行）；失败 NackRequeue；
-- ES Consumer (`onESMessage`) —— 仅文本消息写 ES。
+**A. MQ 串行消费者**：
+
+```
+chat_msg_exchange ─→ msg_queue_db ─→ onDBMessage
+                                       │
+                                       │ (DB commit 成功后)
+                                       ├─→ es_index_exchange ─→ es_index_queue ─→ onESIndexMessage
+                                       │   失败落 ESOutbox（reaper 重投）
+                                       └─→ push_queue ─→ Push 服务
+                                           失败落 PushOutbox（reaper 重投）
+```
+
+- `onDBMessage` —— 一个 ODB 事务里同写 `message` + `user_timeline`（写扩散：会话每个成员一行）；失败 NackRequeue；
+- DB commit 后投递轻量 `ESIndexEvent` 到 `es_index_exchange`（不是 transmite 的"双写"路径），同时投递 `push_queue`；
+- `onESIndexMessage` —— 仅文本消息写 ES `message` 索引；
+- 启动时 `seq` 从 DB 回填 Redis（消除 Redis 重启丢失窗口，见 commit `6e04346`）。
 
 **B. RPC 查询**：
 - `GetHistoryMsg` / `GetRecentMsg` / `GetOfflineMsg`（按 `last_message_id` 增量）/ `GetMsgByIds`
@@ -362,13 +384,15 @@ Gateway 收到响应后向所有在线接收者推 `CHAT_MESSAGE_NOTIFY`。
 
 ### RabbitMQ
 
-| 资源 | 说明 |
-|---|---|
-| `msg_exchange` | FANOUT |
-| DB queue | Message DB Consumer 订阅 |
-| ES queue | Message ES Consumer 订阅 |
+| 资源 | 由谁发布 | 由谁消费 | 用途 |
+|---|---|---|---|
+| `chat_msg_exchange` → `msg_queue_db` | Transmite | Message `onDBMessage` | DB 落库（message + user_timeline） |
+| `es_index_exchange` → `es_index_queue` | Message（DB commit 后） | Message `onESIndexMessage` | ES 索引（仅文本，承载 `ESIndexEvent` 轻量事件） |
+| `push_exchange` → `push_queue` | Message（DB commit 后） | Push | 推送 |
 
-AMQP header：发布时由 transmite 注入 `x-trace-id`，消费时由 Message 服务取出 set 回 LogContext（P8 全链路）。
+设计意图：transmite **不**直接双写 DB queue + ES queue；ES 事件由 DB commit 之后再投递，避免 "ES 有而 DB 无" 的不一致。失败兜底：`ESOutbox` / `PushOutbox`（Redis ZSET）+ 单实例 reaper 租约重投。
+
+AMQP header：发布时注入 `x-trace-id`，消费时由 Message 服务取出 set 回 LogContext（P8 全链路）。
 
 ### MinIO（P4）
 
@@ -399,14 +423,19 @@ Gateway
 Transmite
   │ 4. 并行：User.GetUserInfo + ChatSession.GetMemberIdList
   │ 5. Snowflake 生成 message_id，组装 InternalMessage
-  │ 6. publish_confirm 投递 RabbitMQ（AMQP header 含 trace_id）
+  │ 6. publish_confirm 投递 chat_msg_exchange（AMQP header 含 trace_id）
   │ 7. Broker ACK 后 done->Run() 返回完整消息体 + 收件人列表
   ▼
 Gateway
   │ 8. 遍历 target_id_list，对在线用户 WS 推送 CHAT_MESSAGE_NOTIFY
-  ▼ （并行）
-Message DB Consumer            Message ES Consumer
-  写 message + user_timeline    仅文本写 ES
+  ▼
+Message onDBMessage
+  │ 9.  ODB 事务：写 message + user_timeline（写扩散）
+  │ 10. commit 后投递 ESIndexEvent → es_index_exchange（失败落 ESOutbox）
+  │ 11. commit 后投递 push 事件 → push_queue（失败落 PushOutbox）
+  ▼
+Message onESIndexMessage         Push 服务
+  仅文本写 ES `message` 索引       fanout / cross-instance 兜底
 ```
 
 接收端：客户端 WS 收到 `NotifyNewMessage` 触发 UI 刷新；上线时漏收走 `GetOfflineMsg(last_message_id)` 增量补齐。
@@ -499,35 +528,50 @@ docker compose up -d
 ```
 docs/
 ├── superpowers/
-│   ├── specs/2026-05-14-cross-cutting-architecture-design.md   # 横切基础设施权威 spec
-│   ├── specs/2026-05-14-proto-redesign*.md                     # proto 重构方案 + gaps
-│   ├── plans/2026-05-14-p1-foundations.md                      # P1 实施计划
-│   ├── plans/2026-05-14-p2-jwt-multi-device-auth.md            # P2 实施计划
-│   ├── plans/2026-05-14-p4-media-object-storage.md             # P4 实施计划
-│   ├── plans/2026-05-14-p8-trace-and-structured-logs.md        # P8 实施计划
-│   └── plans/2026-05-14-mq-quorum-design.md                    # MQ 高可用方案
-├── operations/
-│   ├── jwt-key-rotation.md                                     # JWT 密钥轮换 runbook
-│   ├── p2-smoke-test.md                                        # P2 烟雾测试
-│   ├── log-format-and-queries.md                               # 日志格式 + 查询模板
-│   ├── log-level-conventions.md                                # 日志等级约定
-│   └── monitoring-and-alerting.md                              # 监控告警约定
-├── client-sdk/                                                  # 客户端 SDK 契约 + 错误码重试策略
-├── ARCHITECTURE_v2.0_and_roadmap.md                             # 历史架构 + 路线图
+│   ├── specs/                       # 设计 spec
+│   └── plans/                       # 实施 plan（每个 plan 对应 1 条 feature 分支）
+├── operations/                      # 运维 runbook
+│   ├── jwt-key-rotation.md
+│   ├── p2-smoke-test.md
+│   ├── log-format-and-queries.md
+│   ├── log-level-conventions.md
+│   └── monitoring-and-alerting.md
+├── client-sdk/                      # 客户端 SDK 契约 + 错误码重试策略
+├── ARCHITECTURE_v2.0_and_roadmap.md
 ├── CHANGELOG_v2.0.md
-└── ...
+└── MESSAGE_PIPELINE.md
 ```
 
-3.0 重构进度：
+### 3.0 重构进度看板（按 spec 状态盘点）
 
-- [x] **P1** 横切基础（ServiceError / HANDLE_RPC / metadata / 错误码）
-- [x] **P2** JWT 多端鉴权
-- [x] **P4** MinIO 对象存储
-- [x] **P8** trace_id + 结构化日志
-- [ ] **P3** Device 模型（多端登录撤销）
-- [ ] **P5** Conversation / Message 重构
-- [ ] **P6** 推送可靠性与跨实例 fanout
-- [ ] **P7** ASR 接入 + Profile 服务端
+> ✅ 已实现 ｜ 🟡 部分实现（或仍在过渡） ｜ ⏳ 未开始
+
+| Spec | 状态 | 落地证据 |
+|---|---|---|
+| **`2026-05-14-cross-cutting-architecture-design.md`** —— 横切基础设施总纲 | 🟡 | P1/P2/P4/P8 已落；P3 Device 模型仅表落（`odb/user_device.hxx` + `mysql_user_device.hpp`），完整多端撤销逻辑待 P3 |
+| **`2026-05-14-proto-redesign.md`** —— proto 全量重构（域命名空间） | 🟡 | 9 个新域目录全部建立（`proto/identity/conversation/relationship/message/media/presence/transmite/push/common`）；老 flat proto（`base/chatsession/file/friend/message/notify/push/speech/transmite/user.proto`）仍在过渡共存 |
+| **`2026-05-14-proto-redesign-gaps.md`** —— 与主流 IM 差距清单 | n/a | 评审记录，非实施项 |
+| **`2026-05-14-service-migration-design.md`** —— 服务层迁移到新 proto | 🟡 | `chatsession` 已 include `conversation/conversation_service.pb.h`；`IdentityServiceImpl` 已实现；但服务类仍叫 `ChatSessionServiceImpl`（待改 `ConversationServiceImpl`），`UserService` 仍在 |
+| **`2026-05-14-db-redis-changes.md`** —— DB / Redis 变更跟随 proto | ✅ | `message_reaction` / `message_pin` 表已建；`message`: `edit_time` / `forward_from_uid` / `forward_at` 已加；`chat_session_member.draft` 已加 |
+| **`2026-05-13-message-reliability-hardening.md`** —— 消息可靠性加固 | ✅ | SeqGen 启动回填（`select_max_user_seq` + `backfill_session/user`）；`CrossInstanceOutbox` + reaper（`im:push:cross_outbox`）；`OnlineRoute` 惰性清理；心跳重传去耦合（commits `8c1cb6d` / `6e04346` / `d485f64` / `cf848d6`） |
+| **`2026-05-13-es-dual-write-redesign.md`** —— ES 串行投递替代双写 | ✅ | `onDBMessage` DB commit 后投递 `ESIndexEvent` → `es_index_exchange` → `onESIndexMessage`；失败落 `ESOutbox` + reaper（commits `5e434ac` / `53413d3` / `6d560e8` / `90276a4`） |
+| **`2026-05-13-cache-strategy-redesign.md`** —— Members / UserInfo / LastMessage 缓存 | 🟡 | `Members` 缓存已实现（warm/add/remove/invalidate）；`LastMessage` 缓存已接入；`UserInfoCache` 层尚未实现；穿透击穿防护（singleflight / null-cache）尚未实现 |
+| **`2026-05-14-mq-quorum-and-seq-ordering-design.md`** —— MQ quorum + 同会话 seq 严格有序 | ⏳ | 未开工：`common/mq/` 中无 `x-queue-type=quorum` / `queue_args`；无 `consistent_hash_exchange` / `shard_index` 配置 |
+| **`2026-05-14-dedup-redis-setnx.md`** —— Transmite SETNX 幂等去重 | ⏳ | 未开工：`im:dedup:` key 与 `kDedup` 常量未出现，仍走 RPC `SelectByClientMsgId` 路径 |
+
+### 3.0 P 系列计划状态
+
+| Plan | 状态 | 备注 |
+|---|---|---|
+| `2026-05-14-p1-foundations.md` —— 错误处理 / metadata / 结构化日志 | ✅ 已合并 | merge commit `138b6e6` |
+| `2026-05-14-p2-jwt-multi-device-auth.md` —— JWT 多端鉴权 | ✅ 已合并 | merge commit `bbc367d` |
+| `2026-05-14-p4-media-object-storage.md` —— MinIO 对象存储 | ✅ 已合并 | merge commit `dff0920` |
+| `2026-05-14-p8-trace-and-structured-logs.md` —— trace_id 全链路 | ✅ 已合并 | merge commit `b73d94b` |
+| P3 Device 模型（多端撤销逻辑） | 🟡 表已建，业务待补 | 仅 `user_device` 表 + DAO；JWT `device_id` 元数据已透传 |
+| P5 Conversation / Message 重构 | 🟡 进行中 | proto 域已拆，服务类未改名；`ChatSessionServiceImpl` → `ConversationServiceImpl` 待执行 |
+| P6 推送可靠性 + 跨实例 fanout | ✅ 大部分已落 | `CrossInstanceOutbox` + 惰性清理已合，可上线；细节优化按需 |
+| P7 ASR 接入 + Profile 服务端实现 | 🟡 占位就绪 | `SpeechHandler` 占位返回空；UpdateProfile 服务端实现待补 |
+| **下一阶段** —— MQ quorum + Transmite SETNX 去重 | ⏳ | 两份 spec 已就位，plan 未编 |
 
 ---
 
