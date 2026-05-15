@@ -1,6 +1,8 @@
 syntax = "proto3";
 package chatnow.relationship;
 
+option cc_generic_services = true;
+
 import "common/envelope.proto";
 import "common/types.proto";
 
