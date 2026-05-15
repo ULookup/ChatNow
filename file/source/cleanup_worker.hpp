@@ -250,6 +250,37 @@ inline void CleanupWorker::task_quarantine_gc() {
     if (cleaned > 0) LOG_INFO("gc_quarantine cleaned={}", cleaned);
 }
 
-inline void CleanupWorker::task_magic_sniff()      {}
+/* brief: committed 行扫游标后续：Range GET 前 512B → mime 不匹配则置 quarantined
+ *
+ * 为避免改 schema，cursor 仅作进程内变量；重启后从 now-10min 开始回扫，
+ * 重复 sniff 同一 committed 行无副作用（幂等）。
+ */
+inline void CleanupWorker::task_magic_sniff() {
+    static thread_local boost::posix_time::ptime cursor =
+        boost::posix_time::microsec_clock::universal_time()
+        - boost::posix_time::minutes(10);
+
+    auto rows = _files->list_committed_after(cursor, /*limit*/100);
+    int sniffed = 0;
+    int quarantined = 0;
+    for (auto& r : rows) {
+        try {
+            auto buf = _s3->get_range(r.bucket(), r.object_key(), 512);
+            if (!magic_sniff::matches_claimed(buf, r.mime_type())) {
+                _files->update_status(r.file_id(), MediaFileStatus::QUARANTINED);
+                ++quarantined;
+                LOG_WARN("quarantined file={} mime={} reason=magic_mismatch",
+                         r.file_id(), r.mime_type());
+            }
+            ++sniffed;
+        } catch (...) {
+            LOG_WARN("sniff failed file={} key={}", r.file_id(), r.object_key());
+        }
+        if (r.uploaded_at() > cursor) cursor = r.uploaded_at();
+    }
+    if (sniffed > 0 || quarantined > 0) {
+        LOG_INFO("gc_magic_sniff sniffed={} quarantined={}", sniffed, quarantined);
+    }
+}
 
 }  // namespace chatnow
