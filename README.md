@@ -2,7 +2,7 @@
 
 一个用 C++ 编写的分布式 IM 后端，目标是**生产可上线**：在 demo 项目和真正能扛业务的微服务集群之间，按"删掉这个会怎样"的尺度做取舍。
 
-支持单聊 / 群聊、好友关系、媒体上传（含大文件分片）、消息全文检索、离线消息增量补齐、多端在线状态与推送。客户端通过 HTTP（业务请求）+ WebSocket（服务端推送）与 Gateway 通信。
+支持单聊 / 群聊、好友关系、媒体上传（含大文件分片）、消息全文检索、离线消息增量补齐、多端在线状态与推送。客户端通过 HTTP（业务请求，走 Gateway）+ WebSocket（服务端推送，直连 Push 服务）与服务端通信。
 
 > **当前阶段**：3.0 重构线，已落地 P1（横切错误处理 / 鉴权元数据 / 结构化日志）、P2（JWT 多端鉴权）、P4（MinIO 对象存储）、P8（trace_id 全链路）。后续 P3 / P5 / P6 / P7 会继续覆盖 Device 模型、Conversation 拆分、Message 重构、运营工具。详见 `docs/superpowers/specs/`。
 
@@ -27,20 +27,20 @@
 
 ```
                     ┌────────────────────────────────┐
-       客户端  ───→ │  Gateway （HTTP + WebSocket）  │
-       (HTTP/WS)    │  鉴权 / 路由 / 长连接 / 推送   │
+       客户端  ───→ │  Gateway （HTTP 9000）         │
+       (HTTP)       │  鉴权 / 路由（无状态化）        │
                     └───────────────┬────────────────┘
                                     │ brpc + Protobuf
                                     │ (透传 metadata: x-user-id /
                                     │  x-device-id / x-trace-id / x-jwt-jti)
                                     ▼
-   ┌───────────┬───────────┬──────────────┬──────────┬──────────┬──────────┐
-   ▼           ▼           ▼              ▼          ▼          ▼          ▼
- Identity   Friend    ChatSession    Transmite   Message    Media       Push
- (登录/JWT) (关系/申请) (会话/成员)   (发送入口)   (存储/检索) (对象存储+ASR)(在线状态/推送)
-                                          │
-                                          ▼
-                                     RabbitMQ
+   ┌───────────┬───────────┬──────────────┬──────────┬──────────┬──────────────────────────┐
+   ▼           ▼           ▼              ▼          ▼          ▼                          ▼
+ Identity   Friend    ChatSession    Transmite   Message    Media        Push (含 WS 9001)
+ (登录/JWT) (关系/申请) (会话/成员)   (发送入口)   (存储/检索) (对象存储+ASR)  长连接 / 推送
+                                          │                                  ↑
+                                          ▼                                  │
+                                     RabbitMQ                              客户端 (WebSocket)
                                        chat_msg_exchange
                                           │
                                           ▼
@@ -55,12 +55,12 @@
                                           │              Message ES Consumer
                                           │              写 ES 索引（仅文本）
                                           │
-                                          └─→ push_queue ─→ Push 服务
+                                          └─→ msg_push_queue ─→ Push 服务 ─→ WebSocket 下发
 ```
 
 **架构关键点**
 
-1. **Gateway 是唯一鉴权点** —— 它校验 JWT，把 `user_id / device_id / trace_id / jti` 注入 brpc HTTP metadata；后端服务在内网只校验 metadata 存在，不再解 JWT，详见 §2。
+1. **HTTP 与 WebSocket 入口分离** —— Gateway 仅终结 HTTP（业务请求 + JWT 鉴权后注入 metadata），WebSocket 长连接由 Push 服务在 9001 终结并独立做首帧鉴权。后端业务服务在内网只校验 metadata 存在，不再解 JWT，详见 §2。
 2. **服务发现走 etcd** —— 各服务启动后注册到 `/service/<svc>/instance/<id>`；调用方用 `Discovery + ServiceManager` 自动发现可用 brpc Channel，轮询负载均衡。
 3. **proto 业务体干净** —— 业务 Req/Rsp 不再带 `user_id / session_id / trace_id`，全部走 metadata；这点是 P1 / P8 联合落地的硬规约。
 4. **媒体不过 bytes** —— Media 服务签 presigned URL 让客户端直传 MinIO；服务端只过元数据 + 配额，详见 §2.4。
@@ -195,7 +195,7 @@ ChatNow/
 │   ├── user.hxx / message.hxx / chat_session*.hxx / friend_apply.hxx ...
 │   └── media_file.hxx / media_blob_ref.hxx / media_user_quota.hxx (P4)
 │
-├── gateway/                       # 网关：HTTP + WS 入口 + JWT 鉴权中间件
+├── gateway/                       # 网关：HTTP 入口 + JWT 鉴权中间件（无状态化，不持长连接）
 ├── user/                          # IdentityService + UserService（注册/资料/搜索）
 ├── friend/                        # RelationshipService（好友 / 申请）
 ├── chatsession/                   # ConversationService（会话 / 成员）
@@ -222,18 +222,17 @@ ChatNow/
 
 ## 五、各服务说明
 
-### Gateway（HTTP 9000 / WS 9001）
+### Gateway（HTTP 9000，无状态化）
 
 源码：`gateway/source/`
 
-- **HTTP**：所有业务请求入口（注册 / 登录 / 资料 / 好友 / 会话 / 消息 / 媒体 / 推送），按路径分发到对应后端 brpc 服务。
-- **WebSocket**：客户端登录后建立长连接，用于服务端推送（`NotifyMessage`）。
+- **HTTP 唯一入口**：所有业务请求（注册 / 登录 / 资料 / 好友 / 会话 / 消息 / 媒体 / 推送通知发起），按路径分发到对应后端 brpc 服务。
 - **JWT 鉴权中间件**（`gateway_auth.hpp`，P2）：
   - 解析 `Authorization: Bearer <jwt>`；
   - 校验签名 + 过期 + 黑名单（Redis）；
   - 通过后把 `user_id / device_id / trace_id / jti` 注入下游 brpc HTTP metadata。
 - **trace_id**（`gateway_setup_trace`，P8）：客户端无 `x-trace-id` 时生成 32 hex；写入 LogContext + 透传下游。
-- **长连接表**：`Connection`（`source/connection.hpp`）维护 `user_id ↔ ws_hdl`，断连清理 Redis presence。
+- **不持有长连接**：Gateway 完全无状态化，WebSocket 终结在 Push 服务（见下文 Push 章节）。Gateway / 业务服务向客户端发通知统一走 `PushService.PushToUser`，由 Push 服务负责 fanout 到 WebSocket。
 
 ### IdentityService + UserService（端口 10003）
 
@@ -279,7 +278,7 @@ ChatNow/
 4. Broker ACK 后再 `done->Run()` 返回成功 + 完整消息体 + 收件人列表（保证不丢消息）；
 5. 发布前 `inject_trace_headers` 写 AMQP header（P8）。
 
-Gateway 收到响应后向所有在线接收者推 `CHAT_MESSAGE_NOTIFY`。
+Gateway 把 message_id / seq_id 回写给发送方；推送 `CHAT_MESSAGE_NOTIFY` 由 Message 在 DB commit 后投 `msg_push_queue` → Push 服务消费下发，详见 §7。
 
 ### Message 服务（端口 10005）
 
@@ -295,12 +294,12 @@ chat_msg_exchange ─→ msg_queue_db ─→ onDBMessage
                                        │ (DB commit 成功后)
                                        ├─→ es_index_exchange ─→ es_index_queue ─→ onESIndexMessage
                                        │   失败落 ESOutbox（reaper 重投）
-                                       └─→ push_queue ─→ Push 服务
+                                       └─→ chat_push_exchange ─→ msg_push_queue ─→ Push 服务
                                            失败落 PushOutbox（reaper 重投）
 ```
 
 - `onDBMessage` —— 一个 ODB 事务里同写 `message` + `user_timeline`（写扩散：会话每个成员一行）；失败 NackRequeue；
-- DB commit 后投递轻量 `ESIndexEvent` 到 `es_index_exchange`（不是 transmite 的"双写"路径），同时投递 `push_queue`；
+- DB commit 后投递轻量 `ESIndexEvent` 到 `es_index_exchange`（不是 transmite 的"双写"路径），同时投递 `msg_push_queue`；
 - `onESIndexMessage` —— 仅文本消息写 ES `message` 索引；
 - 启动时 `seq` 从 DB 回填 Redis（消除 Redis 重启丢失窗口，见 commit `6e04346`）。
 
@@ -325,13 +324,23 @@ chat_msg_exchange ─→ msg_queue_db ─→ onDBMessage
 
 详见 §2.4 + `docs/superpowers/plans/2026-05-14-p4-media-object-storage.md`。
 
-### Push 服务
+### Push 服务（brpc 内部端口 + WS 9001）
 
 源码：`push/source/`
 
-- 推送 outbox + 跨实例 fanout 路由
-- 在线状态多设备聚合
-- 失败投递兜底：Sorted Set + 单实例 reaper 租约
+承担两类职责：
+
+**A. WebSocket 终结**：
+
+- 监听 9001，终结客户端长连接；首帧客户端必须发 `CLIENT_AUTH` 完成鉴权，鉴权通过后写入本实例内存映射 `(user_id, device_id) ↔ ws_hdl`（`push/source/connection.hpp`）。
+- 处理客户端心跳与消息推送 ACK；断连清理本地映射 + Redis presence / online 路由。
+
+**B. 推送投递**：
+
+- 消费 `msg_push_queue`（由 Message 服务在 DB commit 后投递）→ 查 Redis 路由 → 命中本实例直接 WS 下发，命中其它实例则跨实例 brpc fanout，由对端实例完成 WS 下发。
+- 业务通知（好友申请 / 群事件 / 消息撤回等）通过 `PushToUser` brpc 入口由其它服务（如 Friend / Chatsession）发起。
+- 在线状态多设备聚合 + 在线路由维护。
+- 失败投递兜底：`PushOutbox` / `CrossInstanceOutbox`（Redis Sorted Set + 单实例 reaper 租约重投）。
 
 ---
 
@@ -388,7 +397,7 @@ chat_msg_exchange ─→ msg_queue_db ─→ onDBMessage
 |---|---|---|---|
 | `chat_msg_exchange` → `msg_queue_db` | Transmite | Message `onDBMessage` | DB 落库（message + user_timeline） |
 | `es_index_exchange` → `es_index_queue` | Message（DB commit 后） | Message `onESIndexMessage` | ES 索引（仅文本，承载 `ESIndexEvent` 轻量事件） |
-| `push_exchange` → `push_queue` | Message（DB commit 后） | Push | 推送 |
+| `chat_push_exchange` → `msg_push_queue` | Message（DB commit 后） | Push | 推送 |
 
 设计意图：transmite **不**直接双写 DB queue + ES queue；ES 事件由 DB commit 之后再投递，避免 "ES 有而 DB 无" 的不一致。失败兜底：`ESOutbox` / `PushOutbox`（Redis ZSET）+ 单实例 reaper 租约重投。
 
@@ -424,21 +433,26 @@ Transmite
   │ 4. 并行：User.GetUserInfo + ChatSession.GetMemberIdList
   │ 5. Snowflake 生成 message_id，组装 InternalMessage
   │ 6. publish_confirm 投递 chat_msg_exchange（AMQP header 含 trace_id）
-  │ 7. Broker ACK 后 done->Run() 返回完整消息体 + 收件人列表
+  │ 7. Broker ACK 后 done->Run() 返回 message_id / seq_id（target_id_list 仅作事实校验，不再驱动 Gateway 推送）
   ▼
 Gateway
-  │ 8. 遍历 target_id_list，对在线用户 WS 推送 CHAT_MESSAGE_NOTIFY
+  │ 8. 把 message_id / seq_id 回响应给发送方（无状态化：不再本机推送）
   ▼
 Message onDBMessage
   │ 9.  ODB 事务：写 message + user_timeline（写扩散）
   │ 10. commit 后投递 ESIndexEvent → es_index_exchange（失败落 ESOutbox）
-  │ 11. commit 后投递 push 事件 → push_queue（失败落 PushOutbox）
+  │ 11. commit 后投递 push 事件 → msg_push_queue（失败落 PushOutbox）
   ▼
 Message onESIndexMessage         Push 服务
-  仅文本写 ES `message` 索引       fanout / cross-instance 兜底
+  仅文本写 ES `message` 索引       消费 msg_push_queue
+                                   │ 12. 查 Redis 路由 → 命中本实例 WS 下发
+                                   │     命中它实例 → 跨实例 brpc fanout 后 WS 下发
+                                   │     失败 → CrossInstanceOutbox / PushOutbox 重投
+                                   ▼
+                                客户端 WS 收到 CHAT_MESSAGE_NOTIFY
 ```
 
-接收端：客户端 WS 收到 `NotifyNewMessage` 触发 UI 刷新；上线时漏收走 `GetOfflineMsg(last_message_id)` 增量补齐。
+接收端：客户端 WS 收到 `CHAT_MESSAGE_NOTIFY` 触发 UI 刷新；上线时漏收走 `GetOfflineMsg(last_message_id)` 增量补齐。
 
 ---
 
