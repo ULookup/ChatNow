@@ -3,70 +3,164 @@ package chatnow.media;
 
 import "common/envelope.proto";
 
-message FileDownloadData {
-    string file_id = 1;
-    bytes file_content = 2;
-}
+option cc_generic_services = true;
 
-message FileUploadData {
-    string file_name = 1;
-    int64 file_size = 2;
-    bytes file_content = 3;
+// ===========================================================================
+// MediaService —— P4 媒体子系统对外契约
+// ---------------------------------------------------------------------------
+// 三类调用：
+//   1. 单段上传（≤100MB）：ApplyUpload → 客户端 PUT presigned → CompleteUpload
+//   2. 分片上传（>100MB） ：InitMultipartUpload → ApplyPartUpload * N
+//                          → CompleteMultipartUpload | AbortMultipartUpload
+//   3. 下载/查询           ：ApplyDownload / GetFileInfo
+//   4. 短音频 ASR          ：SpeechRecognition（保留 RPC + bytes，不走 S3）
+// ---------------------------------------------------------------------------
+// 设计要点：
+//   - 服务端不过 bytes（除 SpeechRecognition）
+//   - file_id 由服务端在 ApplyUpload / InitMultipartUpload 时分配
+//   - content_hash 形式 "sha256:<64 lowercase hex>"，用于去重 + 完整性
+//   - 各 Req 都带 request_id；user_id / device_id 走 brpc metadata（gateway 注入）
+// ===========================================================================
+
+enum MediaPurpose {
+    MEDIA_PURPOSE_UNSPECIFIED = 0;
+    AVATAR        = 1;
+    GROUP_AVATAR  = 2;
+    CHAT          = 3;
+    STICKER       = 4;
 }
 
 message FileInfo {
-    string file_id = 1;
-    string file_name = 2;
-    int64 file_size = 3;
+    string file_id        = 1;
+    string file_name      = 2;
+    int64  file_size      = 3;
+    string mime_type      = 4;
+    int64  uploaded_at_ms = 5;
 }
 
-service MediaService {
-    rpc UploadFile(UploadFileReq) returns (UploadFileRsp);
-    rpc DownloadFile(DownloadFileReq) returns (DownloadFileRsp);
-    rpc GetFileInfo(GetFileInfoReq) returns (GetFileInfoRsp);
-    rpc SpeechRecognition(SpeechRecognitionReq) returns (SpeechRecognitionRsp);
+// ===== 单段三步上传 =====
+
+message ApplyUploadReq {
+    string       request_id   = 1;
+    string       file_name    = 2;
+    int64        file_size    = 3;
+    string       mime_type    = 4;
+    string       content_hash = 5;   // "sha256:<64hex>"
+    MediaPurpose purpose      = 6;
+}
+message ApplyUploadRsp {
+    chatnow.common.ResponseHeader header         = 1;
+    string                        file_id        = 2;
+    bool                          already_exists = 3;   // true=已去重命中，无需上传
+    string                        upload_url     = 4;   // presigned PUT URL（dedup 时为空）
+    map<string, string>           headers        = 5;   // 客户端 PUT 必带的 header
+    int32                         expires_in_sec = 6;
 }
 
-message UploadFileReq {
+message CompleteUploadReq {
     string request_id = 1;
-    optional string user_id = 2;
-    optional string session_id = 3;
-    FileUploadData file_data = 4;
+    string file_id    = 2;
 }
-message UploadFileRsp {
-    ResponseHeader header = 1;
-    FileInfo file_info = 2;
+message CompleteUploadRsp {
+    chatnow.common.ResponseHeader header    = 1;
+    FileInfo                      file_info = 2;
 }
 
-message DownloadFileReq {
-    string request_id = 1;
-    string file_id = 2;
-    optional string user_id = 3;
-    optional string session_id = 4;
+// ===== 分片上传 =====
+
+message InitMultipartReq {
+    string       request_id   = 1;
+    string       file_name    = 2;
+    int64        file_size    = 3;
+    string       mime_type    = 4;
+    string       content_hash = 5;
+    MediaPurpose purpose      = 6;
 }
-message DownloadFileRsp {
-    ResponseHeader header = 1;
-    FileDownloadData file_data = 2;
+message InitMultipartRsp {
+    chatnow.common.ResponseHeader header                       = 1;
+    string                        file_id                      = 2;
+    string                        upload_id                    = 3;
+    int32                         recommended_part_size_bytes  = 4;
+}
+
+message ApplyPartReq {
+    string request_id  = 1;
+    string upload_id   = 2;
+    int32  part_number = 3;   // 1..10000
+}
+message ApplyPartRsp {
+    chatnow.common.ResponseHeader header         = 1;
+    string                        upload_url     = 2;
+    int32                         expires_in_sec = 3;
+}
+
+message PartETag {
+    int32  part_number = 1;
+    string etag        = 2;
+}
+
+message CompleteMultipartReq {
+    string            request_id = 1;
+    string            upload_id  = 2;
+    repeated PartETag parts      = 3;   // 升序 part_number
+}
+message CompleteMultipartRsp {
+    chatnow.common.ResponseHeader header    = 1;
+    FileInfo                      file_info = 2;
+}
+
+message AbortMultipartReq {
+    string request_id = 1;
+    string upload_id  = 2;
+}
+message AbortMultipartRsp {
+    chatnow.common.ResponseHeader header = 1;
+}
+
+// ===== 下载 + 查询 =====
+
+message ApplyDownloadReq {
+    string request_id = 1;
+    string file_id    = 2;
+}
+message ApplyDownloadRsp {
+    chatnow.common.ResponseHeader header         = 1;
+    string                        download_url   = 2;   // presigned GET URL
+    int32                         expires_in_sec = 3;
+    FileInfo                      file_info      = 4;
 }
 
 message GetFileInfoReq {
     string request_id = 1;
-    string file_id = 2;
-    optional string user_id = 3;
-    optional string session_id = 4;
+    string file_id    = 2;
 }
 message GetFileInfoRsp {
-    ResponseHeader header = 1;
-    FileInfo file_info = 2;
+    chatnow.common.ResponseHeader header    = 1;
+    FileInfo                      file_info = 2;
 }
 
+// ===== 短音频 ASR（v1 保留 RPC + bytes，不入 S3） =====
+
 message SpeechRecognitionReq {
-    string request_id = 1;
-    bytes speech_content = 2;
-    optional string user_id = 3;
-    optional string session_id = 4;
+    string request_id     = 1;
+    bytes  speech_content = 2;
 }
 message SpeechRecognitionRsp {
-    ResponseHeader header = 1;
-    string recognition_result = 2;
+    chatnow.common.ResponseHeader header             = 1;
+    string                        recognition_result = 2;
+}
+
+service MediaService {
+    rpc ApplyUpload            (ApplyUploadReq)        returns (ApplyUploadRsp);
+    rpc CompleteUpload         (CompleteUploadReq)     returns (CompleteUploadRsp);
+
+    rpc InitMultipartUpload    (InitMultipartReq)      returns (InitMultipartRsp);
+    rpc ApplyPartUpload        (ApplyPartReq)          returns (ApplyPartRsp);
+    rpc CompleteMultipartUpload(CompleteMultipartReq)  returns (CompleteMultipartRsp);
+    rpc AbortMultipartUpload   (AbortMultipartReq)     returns (AbortMultipartRsp);
+
+    rpc ApplyDownload          (ApplyDownloadReq)      returns (ApplyDownloadRsp);
+    rpc GetFileInfo            (GetFileInfoReq)        returns (GetFileInfoRsp);
+
+    rpc SpeechRecognition      (SpeechRecognitionReq)  returns (SpeechRecognitionRsp);
 }
