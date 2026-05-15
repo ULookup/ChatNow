@@ -165,9 +165,51 @@ private:
     std::thread                           _t;
 };
 
-// 默认空实现：保证编译期 link 通过；Task 23/24/25 覆盖具体行为。
-inline void CleanupWorker::task_pending_timeout()  {}
-inline void CleanupWorker::task_multipart_orphan() {}
+// ===== 任务实现 =====
+
+/* brief: 1h 未 CompleteUpload 的 pending 行 → deleted；若 blob ref_count==0 顺手删 S3 对象 */
+inline void CleanupWorker::task_pending_timeout() {
+    auto cutoff = boost::posix_time::microsec_clock::universal_time()
+                - boost::posix_time::hours(1);
+    auto rows = _files->list_pending_older_than(cutoff, /*limit*/200);
+    int cleaned = 0;
+    for (auto& r : rows) {
+        // 若 blob 没有人引用（即从未 Complete 过），删 S3 对象
+        auto blob = _blobs->select_by_hash(r.content_hash());
+        if (!blob || blob->ref_count() == 0) {
+            try { _s3->delete_object(r.bucket(), r.object_key()); } catch (...) {}
+        }
+        // multipart 孤儿同时 abort
+        if (!r.upload_id().empty()) {
+            try { _s3->abort_multipart(r.bucket(), r.object_key(), r.upload_id()); } catch (...) {}
+        }
+        _files->update_status(r.file_id(), MediaFileStatus::DELETED);
+        ++cleaned;
+    }
+    if (cleaned > 0) LOG_INFO("gc_pending_timeout cleaned={}", cleaned);
+}
+
+/* brief: bucket 内 24h 无活动的 multipart upload → abort + 行 deleted */
+inline void CleanupWorker::task_multipart_orphan() {
+    auto cutoff_ms = now_ms() - 24LL * 60 * 60'000;
+    int aborted = 0;
+    for (const auto& bucket : { _pub_b, _pri_b }) {
+        std::vector<S3Client::OrphanUpload> ups;
+        try { ups = _s3->list_multipart_uploads(bucket); } catch (...) { continue; }
+        for (auto& u : ups) {
+            if (u.initiated_ms > cutoff_ms) continue;
+            try { _s3->abort_multipart(bucket, u.key, u.upload_id); ++aborted; }
+            catch (...) {}
+            // 关联 file 行（可能已经 deleted，select 不到也无所谓）
+            auto file = _files->select_by_upload_id(u.upload_id);
+            if (file && file->status() == MediaFileStatus::PENDING) {
+                _files->update_status(file->file_id(), MediaFileStatus::DELETED);
+            }
+        }
+    }
+    if (aborted > 0) LOG_INFO("gc_multipart_orphan aborted={}", aborted);
+}
+
 inline void CleanupWorker::task_unref_blob_gc()    {}
 inline void CleanupWorker::task_quarantine_gc()    {}
 inline void CleanupWorker::task_magic_sniff()      {}
