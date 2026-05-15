@@ -58,6 +58,7 @@ message NotifyTyping {
 message NotifyMessage {
     optional string notify_event_id = 1;
     NotifyType notify_type = 2;
+    optional string trace_id = 14;             // P8: 推送链路 trace_id 透传
     oneof notify_remarks {
         NotifyFriendAddApply friend_add_apply = 3;
         NotifyFriendAddProcess friend_process_result = 4;
