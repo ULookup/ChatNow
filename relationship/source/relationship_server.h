@@ -299,6 +299,82 @@ public:
         });
     }
 
+    // ---- 状态机迁移：处理好友申请 ----
+
+    void HandleFriendRequest(::google::protobuf::RpcController* base_cntl,
+                             const ::chatnow::relationship::HandleFriendReq* req,
+                             ::chatnow::relationship::HandleFriendRsp* rsp,
+                             ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            const std::string &eid       = req->notify_event_id();
+            const std::string &apply_uid = req->apply_user_id();    // 申请人
+            const std::string &peer_uid  = auth.user_id;            // 被申请人 = 当前调用者
+            if (eid.empty() || apply_uid.empty() || peer_uid == apply_uid)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "invalid event_id / apply_user_id");
+
+            auto ev = _mysql_friend_apply->select_by_event_id(eid);
+            if (!ev || ev->user_id() != apply_uid || ev->peer_id() != peer_uid)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "event not found");
+            if (ev->status() != FriendApplyStatus::PENDING)
+                throw ServiceError(::chatnow::error::kRelationshipRequestPending,
+                                   "event not pending");
+
+            if (!req->agree()) {
+                if (!_mysql_friend_apply->update_status(eid, FriendApplyStatus::REJECTED))
+                    throw ServiceError(::chatnow::error::kSystemInternalError,
+                                       "update apply rejected failed");
+                return; // 拒绝路径结束
+            }
+
+            // 同意：先写关系 → 再调 Conversation 建单聊
+            if (!_mysql_friend_apply->update_status(eid, FriendApplyStatus::ACCEPTED))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "update apply accepted failed");
+            if (!_mysql_relation->insert(peer_uid, apply_uid))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "insert relation failed");
+
+            // 调 Conversation.CreateConversation；fail-soft：失败仅记 ERROR，
+            // 关系已建，new_conversation_id 留空返回，header 仍 success=true。
+            auto channel = _mm_channels->choose(_conversation_service_name);
+            if (!channel) {
+                LOG_ERROR("rid={} conversation 子服务节点不可达 svc={}",
+                          req->request_id(), _conversation_service_name);
+                return;
+            }
+            ::chatnow::conversation::ConversationService_Stub conv(channel.get());
+            ::chatnow::conversation::CreateConversationReq  cq;
+            ::chatnow::conversation::CreateConversationRsp  ca;
+            cq.set_request_id(req->request_id());
+            cq.set_name("");                 // 单聊不传名字
+            cq.add_member_id_list(peer_uid);
+            cq.add_member_id_list(apply_uid);
+
+            brpc::Controller out_cntl;
+            ::chatnow::auth::forward_auth_metadata(cntl, &out_cntl);
+            conv.CreateConversation(&out_cntl, &cq, &ca, nullptr);
+            if (out_cntl.Failed()) {
+                LOG_ERROR("rid={} CreateConversation brpc 失败: {}",
+                          req->request_id(), out_cntl.ErrorText());
+                return;
+            }
+            if (!ca.header().success()) {
+                LOG_ERROR("rid={} CreateConversation 业务失败: code={} msg={}",
+                          req->request_id(), ca.header().error_code(),
+                          ca.header().error_message());
+                return;
+            }
+            if (ca.has_conversation()) {
+                rsp->set_new_conversation_id(ca.conversation().conversation_id());
+            }
+        });
+    }
+
 private:
     bool fetch_users(brpc::Controller* in_cntl,
                      const std::string &rid,
