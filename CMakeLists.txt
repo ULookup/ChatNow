@@ -12,5 +12,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/friend)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/chatsession)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/gateway)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/push)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/common/test)
 # 4.
 set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})
