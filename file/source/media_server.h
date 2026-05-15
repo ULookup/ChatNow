@@ -151,6 +151,97 @@ inline void MediaServiceImpl::CompleteUpload(
     });
 }
 
+inline void MediaServiceImpl::InitMultipartUpload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::InitMultipartReq* req,
+    ::chatnow::media::InitMultipartRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _multi->init(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::ApplyPartUpload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::ApplyPartReq* req,
+    ::chatnow::media::ApplyPartRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _multi->apply_part(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::CompleteMultipartUpload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::CompleteMultipartReq* req,
+    ::chatnow::media::CompleteMultipartRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _multi->complete(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::AbortMultipartUpload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::AbortMultipartReq* req,
+    ::chatnow::media::AbortMultipartRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _multi->abort(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::ApplyDownload(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::ApplyDownloadReq* req,
+    ::chatnow::media::ApplyDownloadRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _download->apply(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::GetFileInfo(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::GetFileInfoReq* req,
+    ::chatnow::media::GetFileInfoRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _download->info(auth.user_id, *req, rsp);
+    });
+}
+
+inline void MediaServiceImpl::SpeechRecognition(
+    ::google::protobuf::RpcController* base_cntl,
+    const ::chatnow::media::SpeechRecognitionReq* req,
+    ::chatnow::media::SpeechRecognitionRsp* rsp,
+    ::google::protobuf::Closure* done)
+{
+    brpc::ClosureGuard done_guard(done);
+    auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+    HANDLE_RPC(cntl, req, rsp, {
+        _speech->recognize(*req, rsp);
+    });
+}
+
 class MediaServer {
 public:
     using ptr = std::shared_ptr<MediaServer>;
