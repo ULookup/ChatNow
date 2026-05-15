@@ -16,6 +16,18 @@
 namespace chatnow::error {
 
 inline constexpr int32_t kOK                       = 0;
+
+// 1000-1999 认证（与 proto/common/error.proto 同步）
+inline constexpr int32_t kAuthInvalidCredentials    = 1001;
+inline constexpr int32_t kAuthTokenExpired          = 1002;
+inline constexpr int32_t kAuthTokenInvalid          = 1003;
+inline constexpr int32_t kAuthUserNotFound          = 1004;
+inline constexpr int32_t kAuthUserAlreadyExists     = 1005;
+inline constexpr int32_t kAuthVerifyCodeInvalid     = 1006;
+inline constexpr int32_t kAuthVerifyCodeExpired     = 1007;
+inline constexpr int32_t kAuthRefreshTokenReused    = 1008;
+inline constexpr int32_t kAuthDeviceRevoked         = 1009;
+
 inline constexpr int32_t kSystemInternalError      = 9001;
 inline constexpr int32_t kSystemUnavailable        = 9002;
 inline constexpr int32_t kSystemTimeout            = 9003;
