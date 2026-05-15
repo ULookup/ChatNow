@@ -210,8 +210,46 @@ inline void CleanupWorker::task_multipart_orphan() {
     if (aborted > 0) LOG_INFO("gc_multipart_orphan aborted={}", aborted);
 }
 
-inline void CleanupWorker::task_unref_blob_gc()    {}
-inline void CleanupWorker::task_quarantine_gc()    {}
+/* brief: ref_count==0 + 7 天 GC 缓冲 → 真删 MinIO 对象 + 退 quota */
+inline void CleanupWorker::task_unref_blob_gc() {
+    auto cutoff = boost::posix_time::microsec_clock::universal_time()
+                - boost::posix_time::hours(24 * 7);
+    auto rows = _blobs->list_zero_ref_older_than(cutoff, /*limit*/200);
+    int    cleaned = 0;
+    int64_t total_size = 0;
+    auto now = boost::posix_time::microsec_clock::universal_time();
+    for (auto& b : rows) {
+        try { _s3->delete_object(b.bucket(), b.object_key()); }
+        catch (...) {
+            LOG_WARN("gc_unref_blob: delete s3 object 失败 hash={}", b.content_hash());
+            continue;
+        }
+        // 退还相关 owner 的 quota（按 status in {DELETED, QUARANTINED} 的关联 file 行）
+        auto orphans = _files->list_files_by_hash_dead(b.content_hash());
+        for (auto& f : orphans) {
+            _quota->dec_used(f.owner_id(), b.total_size(), now);
+        }
+        _blobs->erase(b.content_hash());
+        total_size += b.total_size();
+        ++cleaned;
+    }
+    if (cleaned > 0) LOG_INFO("gc_unref_blob cleaned={} total_size={}", cleaned, total_size);
+}
+
+/* brief: status=QUARANTINED + 7 天 → 真删 + 行 deleted */
+inline void CleanupWorker::task_quarantine_gc() {
+    auto cutoff = boost::posix_time::microsec_clock::universal_time()
+                - boost::posix_time::hours(24 * 7);
+    auto rows = _files->list_quarantined_older_than(cutoff, /*limit*/200);
+    int cleaned = 0;
+    for (auto& r : rows) {
+        try { _s3->delete_object(r.bucket(), r.object_key()); } catch (...) {}
+        _files->update_status(r.file_id(), MediaFileStatus::DELETED);
+        ++cleaned;
+    }
+    if (cleaned > 0) LOG_INFO("gc_quarantine cleaned={}", cleaned);
+}
+
 inline void CleanupWorker::task_magic_sniff()      {}
 
 }  // namespace chatnow
