@@ -24,6 +24,7 @@
 #include <condition_variable>
 #include <functional>
 #include <future>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -80,6 +81,9 @@ enum class PublishStatus { Acked, Nacked, Lost, Error };
 enum class ConsumeAction { Ack, NackRequeue, NackDiscard };
 
 using MessageCallback         = std::function<ConsumeAction(const char*, size_t, bool)>;
+using MessageCallbackWithHeaders =
+    std::function<ConsumeAction(const char*, size_t, bool,
+                                const std::map<std::string, std::string>&)>;
 using PublishConfirmCallback  = std::function<void(PublishStatus, const std::string&)>;
 
 class MQClient
@@ -170,6 +174,30 @@ public:
         });
     }
 
+    /* brief: 带 broker 确认的发布（带 headers）；headers 进 AMQP envelope（用于 trace_id 等透传） */
+    void publish_confirm(const std::string &exchange,
+                         const std::string &routing_key,
+                         const std::string &body,
+                         const std::map<std::string, std::string> &headers,
+                         const PublishConfirmCallback &callback)
+    {
+        if(!_reliable) {
+            if(callback) callback(PublishStatus::Error, "发布确认未启用");
+            return;
+        }
+        post_task([this, exchange, routing_key, body, headers, callback]() {
+            AMQP::Envelope env(body.data(), body.size());
+            for (const auto &kv : headers) {
+                env.setHeader(kv.first, kv.second);
+            }
+            _reliable->publish(exchange, routing_key, env)
+                .onAck  ([callback]()                  { if(callback) callback(PublishStatus::Acked,  "broker 已确认"); })
+                .onNack ([callback]()                  { if(callback) callback(PublishStatus::Nacked, "broker 显式拒绝"); })
+                .onLost ([callback]()                  { if(callback) callback(PublishStatus::Lost,   "通道断开，状态未知"); })
+                .onError([callback](const char *msg)   { if(callback) callback(PublishStatus::Error, msg ? msg : "未知错误"); });
+        });
+    }
+
     /* brief: 订阅队列；如果是 delayed 模式应订阅 DLX 队列（外层 Subscriber 已处理） */
     bool consume(const std::string &queue, const MessageCallback &callback,
                  uint16_t prefetch = kDefaultPrefetch)
@@ -186,6 +214,55 @@ public:
                                             bool redelivered) {
                     try {
                         ConsumeAction action = callback(message.body(), message.bodySize(), redelivered);
+                        switch(action) {
+                        case ConsumeAction::Ack:         _channel.ack(deliveryTag); break;
+                        case ConsumeAction::NackRequeue: _channel.reject(deliveryTag, true);  break;
+                        case ConsumeAction::NackDiscard: _channel.reject(deliveryTag, false); break;
+                        }
+                    } catch(const std::exception &e) {
+                        LOG_ERROR("消费回调异常: {}", e.what());
+                        _channel.reject(deliveryTag, true);
+                    } catch(...) {
+                        LOG_ERROR("消费回调发生未知异常");
+                        _channel.reject(deliveryTag, true);
+                    }
+                })
+                .onError([&promise, queue](const char *message) {
+                    LOG_ERROR("订阅消息失败: {} - {}", queue, message ? message : "");
+                    promise.set_value(false);
+                })
+                .onSuccess([&promise, queue]() {
+                    LOG_DEBUG("成功订阅队列: {}", queue);
+                    promise.set_value(true);
+                });
+        });
+        return future.get();
+    }
+
+    /* brief: 订阅队列（带 headers 暴露）；P8 用于 trace_id 透传 */
+    bool consume(const std::string &queue, const MessageCallbackWithHeaders &callback,
+                 uint16_t prefetch = kDefaultPrefetch)
+    {
+        std::promise<bool> promise;
+        auto future = promise.get_future();
+
+        post_task([this, queue, callback, prefetch, &promise]() {
+            _channel.setQos(prefetch);
+            _channel.consume(queue)
+                .onMessage([this, callback](const AMQP::Message &message,
+                                            uint64_t deliveryTag,
+                                            bool redelivered) {
+                    std::map<std::string, std::string> headers;
+                    const auto &table = message.headers();
+                    for (const auto &kv : table) {
+                        // AMQP::Field 仅在为字符串类型时取出；其他类型转为字符串表示
+                        if (kv.second.isString()) {
+                            headers[kv.first] = std::string(kv.second);
+                        }
+                    }
+                    try {
+                        ConsumeAction action = callback(message.body(), message.bodySize(),
+                                                        redelivered, headers);
                         switch(action) {
                         case ConsumeAction::Ack:         _channel.ack(deliveryTag); break;
                         case ConsumeAction::NackRequeue: _channel.reject(deliveryTag, true);  break;
@@ -320,6 +397,12 @@ public:
     void publish_confirm(const std::string &body, const PublishConfirmCallback &cb) {
         _mq->publish_confirm(_settings.exchange, _settings.binding_key, body, cb);
     }
+    /* brief: 带 headers 的发布（trace_id 等） */
+    void publish_confirm(const std::string &body,
+                         const std::map<std::string, std::string> &headers,
+                         const PublishConfirmCallback &cb) {
+        _mq->publish_confirm(_settings.exchange, _settings.binding_key, body, headers, cb);
+    }
 private:
     MQClient::ptr _mq;
     declare_settings _settings;
@@ -339,10 +422,18 @@ public:
             ? _settings.dlx_queue() : _settings.queue;
         _mq->consume(q, _callback, prefetch);
     }
+    /* brief: 带 headers 暴露的订阅 */
+    void consume(MessageCallbackWithHeaders &&cb, uint16_t prefetch = kDefaultPrefetch) {
+        _callback_h = std::move(cb);
+        const std::string &q = (_settings.exchange_type == DELAYED)
+            ? _settings.dlx_queue() : _settings.queue;
+        _mq->consume(q, _callback_h, prefetch);
+    }
 private:
     MQClient::ptr _mq;
     declare_settings _settings;
     MessageCallback _callback;
+    MessageCallbackWithHeaders _callback_h;
 };
 
 class MQFactory
