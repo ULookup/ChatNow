@@ -14,6 +14,7 @@
  */
 
 #include "auth/metadata_keys.hpp"
+#include "error/error_codes.hpp"
 #include "error/service_error.hpp"
 #include <brpc/controller.h>
 #include <string>
@@ -27,21 +28,25 @@ struct AuthContext {
     std::string jwt_jti;       // 可空
 };
 
+namespace detail {
+
 inline std::string read_header(brpc::Controller* cntl, const char* key) {
     if (!cntl) return "";
     const std::string* v = cntl->http_request().GetHeader(key);
     return v ? *v : "";
 }
 
+}  // namespace detail
+
 inline AuthContext extract_auth(brpc::Controller* cntl) {
     AuthContext ctx;
-    ctx.user_id   = read_header(cntl, kMetaUserId);
-    ctx.device_id = read_header(cntl, kMetaDeviceId);
-    ctx.trace_id  = read_header(cntl, kMetaTraceId);
-    ctx.jwt_jti   = read_header(cntl, kMetaJwtJti);
+    ctx.user_id   = detail::read_header(cntl, kMetaUserId);
+    ctx.device_id = detail::read_header(cntl, kMetaDeviceId);
+    ctx.trace_id  = detail::read_header(cntl, kMetaTraceId);
+    ctx.jwt_jti   = detail::read_header(cntl, kMetaJwtJti);
 
     if (ctx.user_id.empty() || ctx.device_id.empty()) {
-        throw ServiceError(/*SYSTEM_INTERNAL_ERROR=*/9001,
+        throw ServiceError(::chatnow::error::kSystemInternalError,
                            "missing auth metadata: x-user-id / x-device-id required");
     }
     return ctx;

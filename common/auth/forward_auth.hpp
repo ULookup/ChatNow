@@ -17,6 +17,8 @@
 
 namespace chatnow::auth {
 
+namespace detail {
+
 inline void copy_header(brpc::Controller* in, brpc::Controller* out, const char* key) {
     if (!in || !out) return;
     const std::string* v = in->http_request().GetHeader(key);
@@ -25,11 +27,13 @@ inline void copy_header(brpc::Controller* in, brpc::Controller* out, const char*
     }
 }
 
+}  // namespace detail
+
 inline void forward_auth_metadata(brpc::Controller* in, brpc::Controller* out) {
-    copy_header(in, out, kMetaTraceId);
-    copy_header(in, out, kMetaUserId);
-    copy_header(in, out, kMetaDeviceId);
-    copy_header(in, out, kMetaJwtJti);
+    detail::copy_header(in, out, kMetaTraceId);
+    detail::copy_header(in, out, kMetaUserId);
+    detail::copy_header(in, out, kMetaDeviceId);
+    detail::copy_header(in, out, kMetaJwtJti);
 }
 
 }  // namespace chatnow::auth
