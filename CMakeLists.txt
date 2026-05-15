@@ -6,7 +6,7 @@ project(message_server)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/message)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/user)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/file)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/speech)
+# speech 子服务在 P4 已并入 media_server（位于 file/）；speech/ 目录已删除。
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/transmite)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/friend)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/chatsession)
