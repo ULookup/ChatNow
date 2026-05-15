@@ -47,7 +47,7 @@ public:
         try {
             // 撤销 lease，关联的 key 立刻失效；旧实现错调 Lease() 实际是 getter
             _keep_alive->Cancel();
-            _client->lease_revoke(_lease_id).wait();
+            _client->leaserevoke(_lease_id).wait();
         } catch(...) { /* 析构吞异常 */ }
     }
 
