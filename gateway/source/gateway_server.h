@@ -230,6 +230,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         /* P8: 入口三件套 —— trace_id 解析/生成 + 写 metadata + LogContext::set */
         std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
         response.set_header("X-Trace-Id", trace_id);
@@ -243,6 +245,7 @@ private:
     }
     /* brief: 用户注册 */
     void UserRegister(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         UserRegisterReq req;
         UserRegisterRsp rsp;
@@ -264,6 +267,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.UserRegister(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -274,6 +279,7 @@ private:
     }
     /* brief: 用户登录 */
     void UserLogin(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         UserLoginReq req;
         UserLoginRsp rsp;
@@ -295,6 +301,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.UserLogin(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -304,6 +312,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MailRegister(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         MailRegisterReq req;
         MailRegisterRsp rsp;
@@ -325,6 +334,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.MailRegister(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -334,6 +345,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MailLogin(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         MailLoginReq req;
         MailLoginRsp rsp;
@@ -355,6 +367,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.MailLogin(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -364,6 +378,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetUserInfo(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         GetUserInfoReq req;
         GetUserInfoRsp rsp;
@@ -393,6 +408,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetUserInfo(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -402,6 +419,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserAvatar(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         SetUserAvatarReq req;
         SetUserAvatarRsp rsp;
@@ -431,6 +449,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetUserAvatar(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -440,6 +460,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserNickname(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         SetUserNicknameReq req;
         SetUserNicknameRsp rsp;
@@ -469,6 +490,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetUserNickname(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -478,6 +501,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserDescription(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         SetUserDescriptionReq req;
         SetUserDescriptionRsp rsp;
@@ -507,6 +531,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetUserDescription(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -516,6 +542,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetUserMailNumber(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         SetUserMailNumberReq req;
         SetUserMailNumberRsp rsp;
@@ -545,6 +572,8 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetUserMailNumber(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -554,6 +583,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetFriendList(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         GetFriendListReq req;
         GetFriendListRsp rsp;
@@ -583,6 +613,8 @@ private:
         }
         FriendService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetFriendList(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -606,6 +638,11 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        /* 内部辅助：从 LogContext 透传 trace_id 到下游 RPC */
+        const auto& _ctx = ::chatnow::log::LogContext::current();
+        if (!_ctx.trace_id.empty()) {
+            cntl.http_request().SetHeader(::chatnow::auth::kMetaTraceId, _ctx.trace_id);
+        }
         stub.GetUserInfo(&cntl, &req, rsp.get(), nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -616,6 +653,7 @@ private:
     }
 
     void FriendAdd(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         // 好友申请的业务处理中，好友子服务只是在数据库创建了申请事件
         // 网关需要做的事件：当好友子服务将业务处理完毕后，如果处理成功 -- 需要通知被申请方
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -647,6 +685,8 @@ private:
         }
         FriendService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.FriendAdd(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -668,6 +708,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void FriendAddProcess(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //好友申请处理
         //1. 反序列化请求正文，提取要素：登录会话ID，处理结果，申请人
         FriendAddProcessReq req;
@@ -698,6 +739,8 @@ private:
         }
         FriendService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.FriendAddProcess(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -752,6 +795,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void FriendRemove(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         FriendRemoveReq req;
         FriendRemoveRsp rsp;
@@ -781,6 +825,8 @@ private:
         }
         FriendService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.FriendRemove(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -797,6 +843,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void FriendSearch(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         FriendSearchReq req;
         FriendSearchRsp rsp;
@@ -826,6 +873,8 @@ private:
         }
         FriendService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.FriendSearch(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -835,6 +884,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetPendingFriendEventList(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetPendingFriendEventListReq req;
         GetPendingFriendEventListRsp rsp;
@@ -864,6 +914,8 @@ private:
         }
         FriendService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetPendingFriendEventList(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -873,6 +925,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetChatSessionList(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetChatSessionListReq req;
         GetChatSessionListRsp rsp;
@@ -902,6 +955,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetChatSessionList(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -911,6 +966,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetChatSessionMember(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetChatSessionMemberReq req;
         GetChatSessionMemberRsp rsp;
@@ -940,6 +996,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetChatSessionMember(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -949,6 +1007,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void ChatSessionCreate(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         ChatSessionCreateReq req;
         ChatSessionCreateRsp rsp;
@@ -978,6 +1037,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.ChatSessionCreate(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -998,6 +1059,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetHistoryMsg(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetHistoryMsgReq req;
         GetHistoryMsgRsp rsp;
@@ -1027,6 +1089,8 @@ private:
         }
         MsgStorageService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetHistoryMsg(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1036,6 +1100,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetRecentMsg(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetRecentMsgReq req;
         GetRecentMsgRsp rsp;
@@ -1065,6 +1130,8 @@ private:
         }
         MsgStorageService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetRecentMsg(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1074,6 +1141,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MsgSearch(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         MsgSearchReq req;
         MsgSearchRsp rsp;
@@ -1103,6 +1171,8 @@ private:
         }
         MsgStorageService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.MsgSearch(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1112,6 +1182,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetSingleFile(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetSingleFileReq req;
         GetSingleFileRsp rsp;
@@ -1141,6 +1212,8 @@ private:
         }
         FileService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetSingleFile(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1150,6 +1223,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetMultiFile(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetMultiFileReq req;
         GetMultiFileRsp rsp;
@@ -1179,6 +1253,8 @@ private:
         }
         FileService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetMultiFile(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1188,6 +1264,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void PutSingleFile(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         PutSingleFileReq req;
         PutSingleFileRsp rsp;
@@ -1217,6 +1294,8 @@ private:
         }
         FileService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.PutSingleFile(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1226,6 +1305,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void PutMultiFile(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         PutMultiFileReq req;
         PutMultiFileRsp rsp;
@@ -1255,6 +1335,8 @@ private:
         }
         FileService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.PutMultiFile(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 文件存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1264,6 +1346,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SpeechRecognition(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SpeechRecognitionReq req;
         SpeechRecognitionRsp rsp;
@@ -1293,6 +1376,8 @@ private:
         }
         SpeechService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SpeechRecognition(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 语音识别子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1302,6 +1387,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void NewMessage(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         NewMessageReq req;
         NewMessageRsp rsp;  //给客户端的响应
@@ -1332,6 +1418,8 @@ private:
         }
         MsgTransmitService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetTransmitTarget(&cntl, &req, &target_rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 消息转发子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1354,6 +1442,7 @@ private:
     //===================== V2.0 =============================//
     //========================================================//
     void GetChatSessionDetail(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetChatSessionDetailReq req;
         GetChatSessionDetailRsp rsp;  //给客户端的响应
@@ -1383,6 +1472,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetChatSessionDetail(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1392,6 +1483,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetChatSessionName(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SetChatSessionNameReq req;
         SetChatSessionNameRsp rsp;  //给客户端的响应
@@ -1421,6 +1513,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetChatSessionName(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1430,6 +1524,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetChatSessionAvatar(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SetChatSessionAvatarReq req;
         SetChatSessionAvatarRsp rsp;  //给客户端的响应
@@ -1459,6 +1554,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetChatSessionAvatar(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1468,6 +1565,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void AddChatSessionMember(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         AddChatSessionMemberReq req;
         AddChatSessionMemberRsp rsp;  //给客户端的响应
@@ -1497,6 +1595,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.AddChatSessionMember(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1506,6 +1606,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void RemoveChatSessionMember(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         RemoveChatSessionMemberReq req;
         RemoveChatSessionMemberRsp rsp;  //给客户端的响应
@@ -1535,6 +1636,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.RemoveChatSessionMember(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1544,6 +1647,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void TransferChatSessionOwner(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         TransferChatSessionOwnerReq req;
         TransferChatSessionOwnerRsp rsp;  //给客户端的响应
@@ -1573,6 +1677,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.TransferChatSessionOwner(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1582,6 +1688,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void ModifyMemberPermission(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         ModifyMemberPermissionReq req;
         ModifyMemberPermissionRsp rsp;  //给客户端的响应
@@ -1611,6 +1718,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.ModifyMemberPermission(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1620,6 +1729,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void ModifyChatSessionStatus(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         ModifyChatSessionStatusReq req;
         ModifyChatSessionStatusRsp rsp;  //给客户端的响应
@@ -1649,6 +1759,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.ModifyChatSessionStatus(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1658,6 +1770,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SearchChatSession(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SearchChatSessionReq req;
         SearchChatSessionRsp rsp;  //给客户端的响应
@@ -1687,6 +1800,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SearchChatSession(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1696,6 +1811,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetSessionMuted(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SetSessionMutedReq req;
         SetSessionMutedRsp rsp;  //给客户端的响应
@@ -1725,6 +1841,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetSessionMuted(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1734,6 +1852,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetSessionPinned(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SetSessionPinnedReq req;
         SetSessionPinnedRsp rsp;  //给客户端的响应
@@ -1763,6 +1882,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetSessionPinned(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1772,6 +1893,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void SetSessionVisible(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         SetSessionVisibleReq req;
         SetSessionVisibleRsp rsp;  //给客户端的响应
@@ -1801,6 +1923,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.SetSessionVisible(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1810,6 +1934,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void QuitChatSession(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         QuitChatSessionReq req;
         QuitChatSessionRsp rsp;  //给客户端的响应
@@ -1839,6 +1964,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.QuitChatSession(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1848,6 +1975,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void MsgReadAck(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         MsgReadAckReq req;
         MsgReadAckRsp rsp;  //给客户端的响应
@@ -1877,6 +2005,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.MsgReadAck(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1886,6 +2016,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetMemberIdList(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetMemberIdListReq req;
         GetMemberIdListRsp rsp;  //给客户端的响应
@@ -1915,6 +2046,8 @@ private:
         }
         ChatSessionService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetMemberIdList(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1924,6 +2057,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetOfflineMsg(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetOfflineMsgReq req;
         GetOfflineMsgRsp rsp;  //给客户端的响应
@@ -1953,6 +2087,8 @@ private:
         }
         MsgStorageService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetOfflineMsg(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
@@ -1962,6 +2098,7 @@ private:
         response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
     void GetUnreadCount(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
         GetUnreadCountReq req;
         GetUnreadCountRsp rsp;  //给客户端的响应
@@ -1991,6 +2128,8 @@ private:
         }
         MsgStorageService_Stub stub(channel.get());
         brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetUnreadCount(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
