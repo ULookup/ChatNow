@@ -106,7 +106,8 @@ private:
     #pragma db id auto
     unsigned long _id;
 
-    #pragma db type("varchar(32)") unique
+    // file_id：snowflake Next() 渲染为 16 hex（uint64_t 一次出 ID 已全局唯一）
+    #pragma db type("varchar(20)") unique
     std::string _file_id;
 
     #pragma db type("varchar(72)")

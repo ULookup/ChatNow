@@ -14,7 +14,7 @@
 -- 媒体文件元数据
 CREATE TABLE IF NOT EXISTS media_file (
     id              BIGINT NOT NULL AUTO_INCREMENT,
-    file_id         VARCHAR(32)  NOT NULL,                  -- 业务唯一 ID（snowflake hex）
+    file_id         VARCHAR(20)  NOT NULL,                  -- 业务唯一 ID（snowflake Next() → 16 hex）
     content_hash    VARCHAR(72)  NOT NULL,                  -- "sha256:<64hex>"
     bucket          VARCHAR(64)  NOT NULL,
     object_key      VARCHAR(255) NOT NULL,
