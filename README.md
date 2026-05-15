@@ -1,392 +1,533 @@
-# ChatNow 即时通讯系统
+# ChatNow 即时通讯系统（服务端）
 
-一个基于 C++ 实现的分布式即时通讯（IM）系统，采用微服务架构，支持单聊 / 群聊、文件传输、语音消息（含语音转文字）、好友关系管理、离线消息推拉结合等功能。客户端基于 Qt6 实现，通过 HTTP + WebSocket 与服务端通信。
+一个用 C++ 编写的分布式 IM 后端，目标是**生产可上线**：在 demo 项目和真正能扛业务的微服务集群之间，按"删掉这个会怎样"的尺度做取舍。
+
+支持单聊 / 群聊、好友关系、媒体上传（含大文件分片）、消息全文检索、离线消息增量补齐、多端在线状态与推送。客户端通过 HTTP（业务请求）+ WebSocket（服务端推送）与 Gateway 通信。
+
+> **当前阶段**：3.0 重构线，已落地 P1（横切错误处理 / 鉴权元数据 / 结构化日志）、P2（JWT 多端鉴权）、P4（MinIO 对象存储）、P8（trace_id 全链路）。后续 P3 / P5 / P6 / P7 会继续覆盖 Device 模型、Conversation 拆分、Message 重构、运营工具。详见 `docs/superpowers/specs/`。
 
 ---
 
 ## 目录
 
 - [一、整体架构](#一整体架构)
-- [二、技术栈](#二技术栈)
-- [三、目录结构](#三目录结构)
-- [四、各服务实现说明](#四各服务实现说明)
-- [五、数据存储设计](#五数据存储设计)
-- [六、消息流转链路](#六消息流转链路)
-- [七、客户端实现](#七客户端实现)
+- [二、横切基础设施（P1 / P2 / P4 / P8）](#二横切基础设施p1--p2--p4--p8)
+- [三、技术栈](#三技术栈)
+- [四、目录结构](#四目录结构)
+- [五、各服务说明](#五各服务说明)
+- [六、数据存储](#六数据存储)
+- [七、消息流转链路](#七消息流转链路)
 - [八、构建与部署](#八构建与部署)
 - [九、配置说明](#九配置说明)
+- [十、文档索引](#十文档索引)
 
 ---
 
 ## 一、整体架构
 
-ChatNow 整体采用 **「客户端 ↔ 网关 ↔ 后端微服务集群」** 三层结构，服务之间通过 **brpc + Protobuf** 进行 RPC 通信，通过 **etcd** 完成服务注册与发现，依赖 **MySQL / Redis / Elasticsearch / RabbitMQ** 作为持久化、缓存、检索与异步消息中间件。
-
 ```
-                        ┌──────────────────────────┐
-                        │       Qt6 客户端          │
-                        │  (HTTP 业务请求 + WS 长连接) │
-                        └────────────┬─────────────┘
-                                     │
-                                     ▼
-                        ┌──────────────────────────┐
-                        │  Gateway (网关 / 9000:HTTP, │
-                        │            9001:WebSocket) │
-                        │  · 鉴权 · 路由 · 长连接管理   │
-                        └────────────┬─────────────┘
-                                     │ brpc
-        ┌────────────┬──────────────┼──────────────┬────────────┬────────────┐
-        ▼            ▼              ▼              ▼            ▼            ▼
-   User 服务      Friend 服务   ChatSession 服务  Transmite 服务   Message 服务   File / Speech
-  (账号/资料)    (好友/申请)     (会话/成员)       (转发入口)      (消息存储/检索)  (文件/语音识别)
-        │            │              │              │            │            │
-        └─── MySQL ──┴──── ES ──────┴── Redis ─────┴── RabbitMQ ─┘            │
-                                                                              │
-                                                              本地磁盘 / 百度ASR
+                    ┌────────────────────────────────┐
+       客户端  ───→ │  Gateway （HTTP + WebSocket）  │
+       (HTTP/WS)    │  鉴权 / 路由 / 长连接 / 推送   │
+                    └───────────────┬────────────────┘
+                                    │ brpc + Protobuf
+                                    │ (透传 metadata: x-user-id /
+                                    │  x-device-id / x-trace-id / x-jwt-jti)
+                                    ▼
+   ┌───────────┬───────────┬──────────────┬──────────┬──────────┬──────────┐
+   ▼           ▼           ▼              ▼          ▼          ▼          ▼
+ Identity   Friend    ChatSession    Transmite   Message    Media       Push
+ (登录/JWT) (关系/申请) (会话/成员)   (发送入口)   (存储/检索) (对象存储+ASR)(在线状态/推送)
+                                          │
+                                          ▼
+                                     RabbitMQ (msg_exchange)
+                                       │      │
+                                       ▼      ▼
+                                     DB Q    ES Q
+                                       │      │
+                                       └──→ Message 服务（双消费）
+                                            写 message + user_timeline / 写 ES 索引
 ```
 
-服务之间通过 **etcd** 实现：
-- 各微服务启动后注册自身实例到 `/service/<服务名>/instance/<id>`；
-- 网关 / 上游服务通过 `Discovery` 监听根路径，自动维护可用 brpc 信道（`ServiceManager`），实现 **动态服务发现 + 负载均衡（轮询）**。
+**架构关键点**
+
+1. **Gateway 是唯一鉴权点** —— 它校验 JWT，把 `user_id / device_id / trace_id / jti` 注入 brpc HTTP metadata；后端服务在内网只校验 metadata 存在，不再解 JWT，详见 §2。
+2. **服务发现走 etcd** —— 各服务启动后注册到 `/service/<svc>/instance/<id>`；调用方用 `Discovery + ServiceManager` 自动发现可用 brpc Channel，轮询负载均衡。
+3. **proto 业务体干净** —— 业务 Req/Rsp 不再带 `user_id / session_id / trace_id`，全部走 metadata；这点是 P1 / P8 联合落地的硬规约。
+4. **媒体不过 bytes** —— Media 服务签 presigned URL 让客户端直传 MinIO；服务端只过元数据 + 配额，详见 §2.4。
+5. **写扩散 + MQ 双写** —— Transmite 投递 RabbitMQ 后由 Message 服务异步写 MySQL（含每会话成员的 timeline）+ 写 ES（仅文本）。
+6. **错误码统一** —— `proto/common/error.proto` 是真值源，C++ 镜像在 `common/error/error_codes.hpp`；handler 一律 `throw ServiceError(code, msg)`，由 `HANDLE_RPC` 宏统一捕获。
 
 ---
 
-## 二、技术栈
+## 二、横切基础设施（P1 / P2 / P4 / P8）
 
-### 服务端
+3.0 重构的核心：**先把基础设施做对**，业务再迭代。
 
-| 类别 | 选型 |
+### 2.1 错误处理 + 鉴权元数据 + 结构化日志（P1）
+
+源码：`common/error/`、`common/auth/`、`common/log/`、`common/infra/log_json.hpp`
+
+- **`ServiceError(code, msg)`** —— 业务异常基类；handler 一律 throw，不手填 ResponseHeader。
+- **`HANDLE_RPC(cntl, req, rsp, { body })` 宏** —— 自动：
+  1. `extract_auth(cntl)` 解析 metadata（x-user-id / x-device-id / x-trace-id / x-jwt-jti）；缺失抛 `kSystemInternalError`；
+  2. `LogContext::set` 把 trace 字段写入 bthread-local；
+  3. 先写成功 ResponseHeader，再执行 body；
+  4. body 抛 `ServiceError` → 覆盖为失败 + WARN 日志；抛其它异常 → 9001 + ERROR 日志（不泄漏 what）；
+  5. finally 清理 LogContext。
+- **`AuthContext`**（`common/auth/auth_context.hpp`）—— 保存 user_id / device_id / trace_id / jwt_jti，body 内可直接用 `auth.user_id`。
+- **`forward_auth_metadata`**（`common/auth/forward_auth.hpp`）—— 内部服务间二跳调用时透传 metadata。
+- **结构化日志** —— `common/infra/log_json.hpp` + spdlog；输出 JSON 行，含 `service_name / level / ts / trace_id / user_id / device_id / msg + 字段`。
+
+### 2.2 JWT 多端鉴权（P2）
+
+源码：`common/auth/jwt_codec.hpp`、`jwt_store.hpp`、`auth_config_loader.hpp`
+
+- **HS256**（仅此一种），多 `kid` 支持（密钥轮换不停机）。
+- **JwtCodec** —— 签发 access / refresh，验证签名 + 过期 + jti。
+- **JwtStore（Redis）** —— 黑名单 / refresh 反查 / refresh 重放检测（SETNX）。
+- **加载** —— `load_jwt_config_from_file("conf/auth.json")`，fail-fast。
+- **运维** —— `docs/operations/jwt-key-rotation.md` 详细记录密钥轮换 runbook。
+
+```json
+// conf/auth.json
+{ "auth": { "jwt": {
+  "current_kid": "v1",
+  "keys": { "v1": "<>=32 字节字符串>" },
+  "access_ttl_sec": 7200,
+  "refresh_ttl_sec": 2592000
+}}}
+```
+
+接入路径：`IdentityService.Login / Logout / RefreshToken`（`proto/identity/identity_service.proto`），服务端实现在 `user/source/`，Gateway 中间件在 `gateway/source/gateway_auth.hpp`。
+
+### 2.3 trace_id 全链路（P8）
+
+源码：`common/utils/trace_id.hpp`、`common/log/log_context.hpp`、`common/mq/`
+
+- 32 char 小写 hex 全局唯一，由 Gateway 生成或客户端透传。
+- HTTP header `x-trace-id` → brpc metadata → handler 内 `auth.trace_id` → 结构化日志字段 → MQ AMQP header → 消费者再 set 回 LogContext。
+- 监控/排障路径：日志查询直接按 `trace_id` 过滤即可串起一次请求。
+
+### 2.4 MinIO 对象存储（P4）
+
+源码：`common/infra/s3_client.hpp`、`common/utils/{content_hash,object_key,magic_sniff,mime_whitelist,avatar_url}.hpp`、`file/source/`、`odb/media_*.hxx`、`common/dao/mysql_media_*.hpp`
+
+替换原本"file/ 写本地磁盘 + bytes 走 RPC"的简陋实现，改为：
+
+| 能力 | 实现 |
 |---|---|
-| 语言 / 标准 | C++17 |
-| RPC 框架 | brpc + Protobuf 3 |
-| HTTP 服务 | cpp-httplib（用于网关对外） |
-| WebSocket | websocketpp（网关长连接） |
-| 服务注册/发现 | etcd（etcd-cpp-api） |
-| 关系数据库 | MySQL 8.0（ODB ORM） |
-| 搜索引擎 | Elasticsearch 7（elasticlient） |
-| 缓存 | Redis 7（redis++） |
-| 消息队列 | RabbitMQ（AMQP-CPP + libev） |
-| 日志 | spdlog |
-| 邮件 | libcurl + SMTP |
-| 语音识别 | 百度 AIP SDK |
-| ID 生成 | Snowflake（雪花算法） |
-| 容器化 | Docker + docker-compose |
+| 单段三步上传 | `ApplyUpload` → 客户端 PUT presigned URL → `CompleteUpload` |
+| 大文件分片 | `InitMultipart` → `ApplyPart` × N → `CompleteMultipart` / `AbortMultipart` |
+| 下载 | `ApplyDownload` 签 presigned GET（私密 bucket） |
+| 头像 / sticker | 公共 bucket + anonymous download，URL 永久可达，无需签名 |
+| 短音频 ASR | `SpeechRecognition` 保留 RPC + bytes 通道（待接 ASR） |
+| **去重** | `content_hash = sha256:<64hex>`，多 file_id 共享同一物理对象，`ref_count` 跟踪 |
+| **配额** | 用户级 5 GB（默认），`media_user_quota` 表，`used + pending + new ≤ quota` 校验 |
+| **mime 白名单** | JSON 配置 + size 上限：image*(20MB) / video(500MB) / audio(50MB) / pdf(100MB) / text(5MB) |
+| **危险类拦截** | magic sniff 检测 PE/ELF/Mach-O，伪装成图片直接置 quarantined |
+| **垃圾回收** | 内嵌 `CleanupWorker`：5 类任务（pending 超时 / multipart 孤儿 / 未引用 blob GC / quarantined / magic sniff），Redis lease 单实例租约 |
 
-### 客户端
+**两个 bucket**：
+- `chatnow-media-public` —— 头像 / 群头像 / sticker，匿名可读，CDN 友好
+- `chatnow-media-private` —— 聊天媒体，全部走 presigned URL
 
-| 类别 | 选型 |
-|---|---|
-| 框架 | Qt6（Widgets / Network / WebSockets / Protobuf / Multimedia） |
-| 通信 | HTTP（QNetworkAccessManager）+ WebSocket（QWebSocket） |
-| 序列化 | Qt Protobuf（`*.qpb.h`） |
+详细 spec 见 `docs/superpowers/specs/2026-05-14-cross-cutting-architecture-design.md` §3。
 
 ---
 
-## 三、目录结构
+## 三、技术栈
+
+| 类别 | 选型 | 备注 |
+|---|---|---|
+| 语言 / 标准 | C++17 | 多处用到 nested namespace / string_view / inline header |
+| RPC | brpc + Protobuf 3 | HTTP+JSON 入站同时启用 |
+| 数据库 | MySQL 8.0 | ODB ORM，schema 由 `--generate-schema` 生成 |
+| 缓存 | Redis 7 | redis++（hiredis）|
+| 检索 | Elasticsearch 7 | elasticlient |
+| 消息队列 | RabbitMQ | AMQP-CPP + libev，`publish_confirm` 异步带 ACK |
+| 对象存储 | MinIO（S3 兼容）| aws-sdk-cpp v1.11.420（仅 S3 module）|
+| 服务发现 | etcd | etcd-cpp-api，监听 `/service/*` 维护信道 |
+| 鉴权 | jwt-cpp v0.7.0（HS256）| picojson |
+| 日志 | spdlog（JSON 输出）| 自实现 `log_json` |
+| ID 生成 | Snowflake | `common/infra/snowflake.hpp`，`Next() → uint64_t` |
+| 邮件 | libcurl + SMTP | 注册 / 找回 |
+| 容器 | Docker + docker-compose | minio/mysql/redis/etcd/rabbitmq |
+
+---
+
+## 四、目录结构
 
 ```
 ChatNow/
-└── code/
-    ├── client/                # Qt6 客户端
-    │   ├── proto/             # 客户端使用的 .proto 文件
-    │   ├── model/             # 客户端数据模型与 DataCenter
-    │   ├── network/           # NetClient（HTTP + WebSocket 封装）
-    │   ├── *widget.{h,cpp}    # 各 UI 模块（登录、主界面、会话、消息、好友、设置...）
-    │   └── CMakeLists.txt
-    │
-    └── server/
-        ├── proto/             # 全部服务端 .proto 接口定义
-        ├── common/            # 公共组件（etcd / channel / mysql / redis / es / mq / asr / mail / snowflake ...）
-        ├── odb/               # ODB 生成的实体头文件（.hxx）
-        ├── sql/               # 数据库建表 SQL（自动挂载到 MySQL 容器）
-        ├── conf/              # 各服务运行配置（gflags flagfile）
-        │
-        ├── gateway/           # 网关服务（HTTP + WebSocket 入口）
-        ├── user/              # 用户服务（注册/登录/资料）
-        ├── friend/            # 好友服务（关系/申请/搜索）
-        ├── chatsession/       # 会话服务（单聊/群聊/成员/会话状态）
-        ├── transmite/         # 消息转发服务（消息预处理 + 投递 MQ）
-        ├── message/           # 消息存储服务（DB/ES 落库 + 历史/未读/Timeline）
-        ├── file/              # 文件服务（文件上传/下载/本地存储）
-        ├── speech/            # 语音识别服务（百度 ASR）
-        │
-        ├── docker-compose.yml # 一键起：etcd/mysql/redis/es/mq + 7 个微服务
-        ├── depends.sh         # 抽取每个服务可执行文件的 .so 依赖
-        ├── entrypoint.sh      # 容器启动脚本（端口探测 + 启动）
-        └── CMakeLists.txt
+├── proto/                         # 全部 proto 契约（按域分目录）
+│   ├── common/                    # envelope / error / types
+│   ├── identity/                  # IdentityService（登录 / JWT / 资料）
+│   ├── conversation/              # 会话域（拆分自老 chatsession.proto）
+│   ├── relationship/              # 好友 / 申请 / 黑名单
+│   ├── message/                   # 消息域
+│   ├── media/                     # MediaService（P4）
+│   ├── presence/                  # 在线状态
+│   ├── transmite/                 # 消息转发入口
+│   └── push/                      # 推送通知
+│
+├── common/                        # 公共组件（header-only 优先）
+│   ├── auth/                      # AuthContext / JwtCodec / JwtStore / forward_auth
+│   ├── error/                     # ServiceError / HANDLE_RPC / error_codes
+│   ├── log/                       # LogContext (bthread-local)
+│   ├── infra/                     # logger / log_json / etcd / s3_client / snowflake / mail
+│   ├── dao/                       # MySQL ODB DAO 包装 + Redis / ES helper
+│   ├── mq/                        # RabbitMQ Channel + Publisher + Consumer
+│   ├── utils/                     # trace_id / content_hash / object_key /
+│   │                              # magic_sniff / mime_whitelist / avatar_url 等
+│   └── test/                      # 公共组件单元测试（GLOB test_*.cc）
+│
+├── odb/                           # ODB schema 源（*.hxx，pragma db）
+│   ├── user.hxx / message.hxx / chat_session*.hxx / friend_apply.hxx ...
+│   └── media_file.hxx / media_blob_ref.hxx / media_user_quota.hxx (P4)
+│
+├── gateway/                       # 网关：HTTP + WS 入口 + JWT 鉴权中间件
+├── user/                          # IdentityService + UserService（注册/资料/搜索）
+├── friend/                        # RelationshipService（好友 / 申请）
+├── chatsession/                   # ConversationService（会话 / 成员）
+├── transmite/                     # 消息转发：组装 + 投递 MQ
+├── message/                       # 消息存储 + 检索 + 双消费者
+├── file/                          # MediaService（P4 重写为对象存储）
+│   └── source/                    # media_main / media_server / *_handler / cleanup_worker
+├── push/                          # PushService（在线状态 + 推送 outbox）
+│
+├── conf/                          # gflags flagfile + JSON 配置
+│   ├── auth.json                  # JWT 多 kid（P2）
+│   ├── media.json                 # bucket / mime 白名单 / presign（P4）
+│   └── *_server.conf              # 各服务运行参数
+│
+├── sql/V4__media.sql              # P4 媒体三表参考 DDL（权威由 ODB 生成）
+├── docker/                        # docker-compose（minio + minio-init）
+├── scripts/install_aws_sdk_linux.sh  # P4 依赖安装
+├── docker-compose.yml             # 顶层：基础设施 + 各服务（旧）
+├── docs/                          # 架构 / spec / 实施计划 / 运维 runbook
+└── CMakeLists.txt
 ```
 
 ---
 
-## 四、各服务实现说明
+## 五、各服务说明
 
-### 1. Gateway（网关服务）
+### Gateway（HTTP 9000 / WS 9001）
 
-源码：`code/server/gateway/`
+源码：`gateway/source/`
 
-- 同时启动 **HTTP 服务（默认 9000）** 与 **WebSocket 服务（默认 9001）**：
-  - HTTP：客户端所有请求/响应类业务接口（注册、登录、好友/会话/消息查询、文件上传等），路径形如 `/service/user/...`、`/service/friend/...`、`/service/chatsession/...`、`/service/message_storage/...`、`/service/file/...`、`/service/speech/...`、`/service/message_transmit/new_message`。
-  - WebSocket：客户端登录后建立长连接，用于服务端推送（新消息、好友申请、会话创建等 `NotifyMessage`）。
-- **登录态管理**：使用 Redis 存储 `session_id → user_id`（`Session`）和 `user_id → 在线状态`（`Status`）。
-- **鉴权与路由**：每个 HTTP handler 从请求 body 中反序列化 protobuf，根据 `session_id` 取到 `user_id` 后填充进上游 RPC 请求，再通过 `ServiceManager::choose()` 选择对应后端服务的 brpc Channel 转发。
-- **长连接表**：`Connection`（`source/connection.hpp`）维护 `user_id ↔ websocket_hdl` 映射，断开时清理 Redis 登录态。
-- **下行通知**：当后端服务（friend / chatsession / transmite）需要推送给在线用户时，由网关通过 WebSocket 发送 `NotifyMessage`。
+- **HTTP**：所有业务请求入口（注册 / 登录 / 资料 / 好友 / 会话 / 消息 / 媒体 / 推送），按路径分发到对应后端 brpc 服务。
+- **WebSocket**：客户端登录后建立长连接，用于服务端推送（`NotifyMessage`）。
+- **JWT 鉴权中间件**（`gateway_auth.hpp`，P2）：
+  - 解析 `Authorization: Bearer <jwt>`；
+  - 校验签名 + 过期 + 黑名单（Redis）；
+  - 通过后把 `user_id / device_id / trace_id / jti` 注入下游 brpc HTTP metadata。
+- **trace_id**（`gateway_setup_trace`，P8）：客户端无 `x-trace-id` 时生成 32 hex；写入 LogContext + 透传下游。
+- **长连接表**：`Connection`（`source/connection.hpp`）维护 `user_id ↔ ws_hdl`，断连清理 Redis presence。
 
-入口：`gateway_server.cc`，使用 `GatewayServerBuilder` 构造（建造者模式）。
+### IdentityService + UserService（端口 10003）
 
-### 2. User 服务（用户服务，端口 10003）
+源码：`user/source/`，proto: `proto/identity/identity_service.proto` + `proto/user.proto`
 
-源码：`code/server/user/`
+| RPC | 用途 |
+|---|---|
+| `Register` | 用户名 / 邮箱验证码注册 |
+| `Login` | 签发 access + refresh JWT；写 Redis presence |
+| `Logout` | access 加黑、refresh 撤销 |
+| `RefreshToken` | 重放检测后换新 access；老 refresh 立即失效 |
+| `SendVerifyCode` | 邮箱验证码（SMTP 163），写 Redis Codes |
+| `GetProfile` / `UpdateProfile` | 资料；avatar 走 file_id（P4 改造，见 §2.4） |
+| `SearchUsers` | 走 ES `user` 索引模糊搜索 |
+| `GetMultiUserInfo` | 内部批量查询 |
 
-提供账户与个人资料相关 RPC（见 `proto/user.proto`）：
+### RelationshipService（端口 10006）
 
-- 用户名注册/登录、邮箱验证码注册/登录；
-- 个人信息查询 / 批量用户信息查询（内部接口供其它服务调用）；
-- 修改昵称 / 签名 / 头像（头像上传到 File 服务，仅保存 file_id）/ 绑定邮箱。
+源码：`friend/source/`，proto: `proto/relationship/`
 
-实现要点：
-- 用户主数据写入 MySQL（`user` 表，ODB ORM）；
-- 同步索引到 ES（`ESUser`），用于昵称/邮箱模糊搜索；
-- 邮箱验证码通过 SMTP（163）发送，验证码保存至 Redis（`Codes`）；
-- 登录成功后生成 `login_session_id` 写入 Redis（`Session`），并标记在线状态（`Status`）。
+- 好友列表 / 删除 / 申请 / 处理（同意时自动建会话）/ 待处理列表 / 模糊搜索（ES）。
+- 同意申请会写 `relation` + 创建 `chat_session` + `chat_session_member`，并通过网关推送 `FRIEND_ADD_PROCESS_NOTIFY` / `CHAT_SESSION_CREATE_NOTIFY`。
 
-### 3. Friend 服务（好友服务，端口 10006）
+### ConversationService（端口内部）
 
-源码：`code/server/friend/`
+源码：`chatsession/source/`，proto: `proto/conversation/`
 
-提供好友关系与申请相关 RPC（见 `proto/friend.proto`）：
+接口最丰富的服务，覆盖：
+- 会话生命周期：创建 / 列表 / 详情 / 改名 / 改头像 / 状态（NORMAL/ARCHIVED/DISMISSED）/ 搜索
+- 成员管理：列表 / 添加 / 移除 / 转让群主 / 改权限 / 退群
+- 用户在该会话中的状态：免打扰、置顶、显示/隐藏、未读 ACK
+- 内部接口：`GetMemberIdList` 供 Transmite 服务做消息扩散
 
-- 好友列表 `GetFriendList`、删除好友、好友申请、申请处理（同意时自动创建单聊会话）、待处理申请列表、好友模糊搜索（走 ES `ESUser`）。
-- 同意申请会写 `relation` 表 + 创建 `chat_session`、`chat_session_member` 记录；并通过网关向相关用户推送 `FRIEND_ADD_PROCESS_NOTIFY`、`CHAT_SESSION_CREATE_NOTIFY` 等通知。
+### Transmite 服务（端口 10004）
 
-### 4. ChatSession 服务（会话管理，端口暂用内部）
+源码：`transmite/source/`
 
-源码：`code/server/chatsession/`
+接收客户端 `/service/message_transmit/new_message` 请求，核心流程：
 
-实现 `proto/chatsession.proto` 中所有会话相关接口，是接口数最丰富的服务（约 18 个 RPC），覆盖：
+1. 并行 brpc：User.GetUserInfo + ChatSession.GetMemberIdList；
+2. Snowflake 生成 message_id，组装"胖" `InternalMessage`（含 MessageInfo + member_id_list）；
+3. RabbitMQ `publish_confirm` 异步投递；
+4. Broker ACK 后再 `done->Run()` 返回成功 + 完整消息体 + 收件人列表（保证不丢消息）；
+5. 发布前 `inject_trace_headers` 写 AMQP header（P8）。
 
-- 会话生命周期：创建、获取列表、获取详情、修改名称/头像、修改状态（NORMAL / ARCHIVED / DISMISSED）、搜索；
-- 成员管理：成员列表、添加 / 移除成员、转让群主、修改成员权限（NORMAL / ADMIN / OWNER）、退出会话；
-- 用户在该会话中的个人状态：免打扰、置顶、显示/隐藏、未读 ACK；
-- 内部接口：根据会话 ID 获取成员 ID 列表（供 transmite 服务做消息扩散使用）。
+Gateway 收到响应后向所有在线接收者推 `CHAT_MESSAGE_NOTIFY`。
 
-依赖：
-- MySQL（`chat_session` / `chat_session_member` / 视图 `chat_session_view`）；
-- ES（`ESChatSession`）做会话名称模糊搜索；
-- 调用 User、File、Message 子服务做信息聚合（如带最近一条消息预览的会话列表）。
+### Message 服务（端口 10005）
 
-### 5. Transmite 服务（消息转发，端口 10004）
+源码：`message/source/`
 
-源码：`code/server/transmite/`
+**两个角色**：
 
-接口：`MsgTransmitService::GetTransmitTarget`（即客户端发送消息 `/service/message_transmit/new_message` 的后端实现）。
+**A. MQ 双消费者**：
+- DB Consumer (`onDBMessage`) —— 一个 ODB 事务里同写 `message` + `user_timeline`（写扩散：会话每个成员一行）；失败 NackRequeue；
+- ES Consumer (`onESMessage`) —— 仅文本消息写 ES。
 
-核心流程（`transmite_server.h`）：
+**B. RPC 查询**：
+- `GetHistoryMsg` / `GetRecentMsg` / `GetOfflineMsg`（按 `last_message_id` 增量）/ `GetMsgByIds`
+- `MsgSearch`（走 ES）
+- `DeleteTimelineMsg`（用户删除自己的聊天记录，原始 message 保留）
+- `GetUnreadCount`（按 `last_read_msg_id`）
 
-1. 用 `brpc::DoNothing()` **并行** 调用：
-   - User 服务：拿到发送者完整 `UserInfo`；
-   - ChatSession 服务：拿到该会话所有成员 ID 列表。
-2. 用 Snowflake 算法生成全局 `message_id`，组装 `InternalMessage`（包含 `MessageInfo` 与 `member_id_list`，"胖消息"），下游消费者无需再回查。
-3. 通过 RabbitMQ Publisher（`publish_confirm` 异步带 ACK）将消息投递到交换机；
-4. **MQ Broker ACK 后再调用 `done->Run()`** 把响应返回给网关——保证消息不丢；同时把组装好的完整 `MessageInfo` 与 `target_id_list` 一并返回，网关据此向所有在线接收者通过 WebSocket 推送 `CHAT_MESSAGE_NOTIFY`。
+### MediaService（端口 10002，P4 重写）
 
-> 注：MQ 投递成功才视为发送成功；若失败则清空响应中的消息内容，由客户端重试。
+源码：`file/source/`，proto: `proto/media/media_service.proto`
 
-### 6. Message 服务（消息存储与检索，端口 10005）
+| RPC | 用途 |
+|---|---|
+| `ApplyUpload` | 校验 mime + size + quota → 签 PUT presigned URL（含去重） |
+| `CompleteUpload` | HEAD 比对 + ref_count++ + quota++ |
+| `InitMultipartUpload` / `ApplyPartUpload` / `CompleteMultipartUpload` / `AbortMultipartUpload` | 大文件分片 |
+| `ApplyDownload` | 签 GET presigned URL（committed 行才放） |
+| `GetFileInfo` | 元数据 |
+| `SpeechRecognition` | 短音频 ASR 占位（待接百度 ASR） |
 
-源码：`code/server/message/`
+详见 §2.4 + `docs/superpowers/plans/2026-05-14-p4-media-object-storage.md`。
 
-承担两大角色：
+### Push 服务
 
-#### A. 异步消费 + 双写
-订阅 RabbitMQ 上的两个队列（DB / ES），分别由 `onDBMessage`、`onESMessage` 回调处理：
+源码：`push/source/`
 
-- **DB Consumer**：
-  - 反序列化 `InternalMessage`；
-  - 文件/图片/语音消息：先调用 File 服务上传文件得到 `file_id`；
-  - 在一个 ODB 事务里同时写 `message` 表 与 **`user_timeline` 表（写扩散）**：会话每个成员都插入一条 timeline 记录，方便后续按用户拉取。
-  - 失败时返回 `NackRequeue`，由 MQ 重投，避免丢消息。
-- **ES Consumer**：
-  - 仅文本消息写入 ES，用于全文检索；其它类型直接 ACK。
-
-#### B. RPC 查询接口（`MsgStorageService`）
-- `GetHistoryMsg`：按时间段查 timeline，再按 ID 批量查 `message`，并批量回查 File / User 服务做内容/发送者补全；
-- `GetRecentMsg`：取最近 N 条消息；
-- `MsgSearch`：基于 ES 做关键字检索；
-- `GetOfflineMsg`：基于 `last_message_id` 游标的增量拉取（替代轮询，配合上线同步）；
-- `GetMsgByIds`：按 ID 批量查询消息（供其它服务做"最后一条消息预览"等场景）；
-- `DeleteTimelineMsg`：用户删除自己的聊天记录（仅删 timeline，原始 `message` 保留）；
-- `GetUnreadCount`：根据 `last_read_msg_id` 计算指定会话的未读数量。
-
-### 7. File 服务（文件存储，端口 10002）
-
-源码：`code/server/file/`
-
-接口：`FileService`（单/多文件上传下载）。
-
-- 启动时根据 `--storage_path` 创建本地存储目录；
-- 上传时使用 `uuid()` 生成文件名作为 `file_id`，原内容直接写入磁盘文件；
-- 下载根据 `file_id` 读取文件返回二进制；
-- 不依赖 DB，纯本地磁盘 + brpc。
-
-### 8. Speech 服务（语音识别，端口 10001）
-
-源码：`code/server/speech/`
-
-接口：`SpeechService::SpeechRecognition`。
-
-- 封装百度 AIP SDK（`asr.hpp`）；
-- 接收客户端上传的 PCM 16k 语音二进制，调用 `aip::Speech::recognize` 得到识别文本返回；
-- 配置文件中通过 `app_id` / `api_key` / `secret_key` 注入鉴权信息。
+- 推送 outbox + 跨实例 fanout 路由
+- 在线状态多设备聚合
+- 失败投递兜底：Sorted Set + 单实例 reaper 租约
 
 ---
 
-## 五、数据存储设计
+## 六、数据存储
 
 ### MySQL（库名：`chatnow`）
 
-建表 SQL 位于 `code/server/sql/`，docker-compose 启动时挂载到 MySQL 容器的 `/docker-entrypoint-initdb.d/` 自动执行。
+权威 schema 由 ODB 通过 `odb/*.hxx` 的 `--generate-schema` 自动生成。`sql/V4__media.sql` 仅作部署参考。
 
-| 表名 | 说明 |
+| 表 | 说明 |
 |---|---|
-| `user` | 用户基本信息：`user_id` / `nickname` / `description` / `password` / `mail` / `avatar_id`；nickname、mail、user_id 全部唯一索引 |
-| `relation` | 好友关系（`user_id`, `peer_id`），按用户索引 |
-| `friend_apply` | 好友申请事件（`event_id` 唯一，含状态、创建/处理时间） |
-| `chat_session` | 会话主表：会话 ID / 名称 / 类型（单聊/群聊）/ 创建时间 / 最近一条消息 ID 与时间 / 成员数 / 状态 / 头像 |
-| `chat_session_member` | 用户在会话中的状态：`session_id` + `user_id` 唯一；含 `last_read_msg`、`muted`、`visible`、`pin_time`、`role`、`join_time`，是会话成员个性化配置的核心表 |
-| `message` | 消息原始内容：`message_id` 唯一（Snowflake）、消息类型、内容/file 元信息、状态、撤回时间 |
-| `user_timeline` | **写扩散** Timeline：每条消息为每个会话成员各插一行（`user_id` + `session_id` + `message_id`），是离线/历史/增量拉取的查询入口 |
+| `user` | 用户主表：user_id / nickname / mail / phone / avatar_id / status |
+| `user_device` | 多端登录设备（P3 规划，部分字段已就位） |
+| `relation` / `friend_apply` | 好友关系 / 申请事件 |
+| `chat_session` / `chat_session_member` | 会话 + 成员个性化（last_read_msg / muted / pin / role） |
+| `chat_session_view` | 会话视图（聚合最近一条消息预览） |
+| `message` | 消息原始内容 |
+| `message_attachment` | 多附件（多图、视频带封面） |
+| `message_mention` / `message_reaction` / `message_read` | @ / reaction / 已读 |
+| `user_timeline` | 写扩散：每条消息为每个会话成员各一行 |
+| `media_file` | 媒体元数据 + 状态机（pending/committed/deleted/quarantined） |
+| `media_blob_ref` | 物理 blob 引用计数（按 content_hash 去重） |
+| `media_user_quota` | 用户级配额（默认 5 GB） |
 
-### Redis
+### Redis（域命名空间隔离）
 
-- `Session`：登录会话 `session_id → user_id`；
-- `Status`：在线状态 `user_id → bool`；
-- `Codes`：邮箱验证码（带 TTL）。
+| key 前缀 | 用途 |
+|---|---|
+| `im:sess:` | 登录 session_id → user_id（P2 后逐步弃用，走 JWT） |
+| `im:status:` | user_id → 在线状态 |
+| `im:code:` | 邮箱验证码 |
+| `im:seq:ssid:` / `im:seq:uid:` | 会话级 / 用户级单调 seq |
+| `im:last:` | 最后一条消息预览缓存 |
+| `im:dev:` | 用户在线设备集合（多端推送用） |
+| `im:read:` | 大群已读暂存（落库前缓冲） |
+| `im:rl:user:` / `im:rl:ssid:` | 令牌桶限流 |
+| `im:online:` / `im:push:route:` | 跨实例推送路由 |
+| `im:unack:` | 未确认消息 Sorted Set |
+| `im:push:outbox` / `:cross_outbox` | 投递失败兜底（带 reaper 单实例租约） |
+| `im:media:gc:lease` | MediaService cleanup worker 单实例租约（P4） |
+| `im:auth:bl:` / `im:auth:rt:` | JWT 黑名单 / refresh 反查（P2） |
 
 ### Elasticsearch
 
-- `user` 索引：用户昵称/邮箱/签名，支持好友/用户搜索；
-- `chat_session` 索引：会话名称模糊搜索；
-- `message` 索引：仅文本消息，支持历史消息全文检索。
+| 索引 | 用途 |
+|---|---|
+| `user` | 昵称 / 邮箱 / 签名 模糊搜索 |
+| `chat_session` | 会话名搜索 |
+| `message` | 仅文本消息全文检索 |
 
 ### RabbitMQ
 
-- 交换机：`msg_exchange`（FANOUT）
-- 队列：DB 队列 与 ES 队列各订阅一份
-- 投递路径：`Transmite 服务（生产者）→ Exchange →（DB Queue / ES Queue）→ Message 服务（消费者，双写）`。
+| 资源 | 说明 |
+|---|---|
+| `msg_exchange` | FANOUT |
+| DB queue | Message DB Consumer 订阅 |
+| ES queue | Message ES Consumer 订阅 |
+
+AMQP header：发布时由 transmite 注入 `x-trace-id`，消费时由 Message 服务取出 set 回 LogContext（P8 全链路）。
+
+### MinIO（P4）
+
+| bucket | 访问 |
+|---|---|
+| `chatnow-media-public` | anonymous download；avatar / sticker URL 永久可达 |
+| `chatnow-media-private` | 私密；仅签名 GET URL |
+
+object key 格式：
+- `chat/<yyyy/mm/dd>/<hash[:2]>/<hash>` —— 私密会话媒体，date+hash 双层分片（冷热分区友好）
+- `avatar/<hash>` / `sticker/<hash>` —— 公共资源，hash 直寻址
 
 ---
 
-## 六、消息流转链路
+## 七、消息流转链路
 
-以一次 **群消息发送** 为例，完整链路如下：
+群消息发送，完整链路：
 
 ```
 客户端
   │ 1. HTTP POST /service/message_transmit/new_message
+  │    Authorization: Bearer <jwt>
   ▼
 Gateway
-  │ 2. 校验登录态 → 注入 user_id → brpc 调 transmite_service
+  │ 2. JWT 校验 → 注入 metadata（user_id/device_id/trace_id/jti）
+  │ 3. brpc 调 transmite_service
   ▼
 Transmite
-  │ 3. 并行 RPC: User.GetUserInfo + ChatSession.GetMemberIdList
-  │ 4. Snowflake 生成 message_id, 组装 InternalMessage（含成员列表）
-  │ 5. publish_confirm 异步投递到 RabbitMQ
-  │ 6. Broker ACK 后 done->Run() 返回成功 + 完整消息体 + 收件人列表
+  │ 4. 并行：User.GetUserInfo + ChatSession.GetMemberIdList
+  │ 5. Snowflake 生成 message_id，组装 InternalMessage
+  │ 6. publish_confirm 投递 RabbitMQ（AMQP header 含 trace_id）
+  │ 7. Broker ACK 后 done->Run() 返回完整消息体 + 收件人列表
   ▼
 Gateway
-  │ 7. 遍历 target_id_list，对在线用户通过 WebSocket 推送 CHAT_MESSAGE_NOTIFY
+  │ 8. 遍历 target_id_list，对在线用户 WS 推送 CHAT_MESSAGE_NOTIFY
   ▼ （并行）
-Message (DB Consumer)         Message (ES Consumer)
-  │ 写 message + user_timeline   │ 仅文本消息写 ES 索引
+Message DB Consumer            Message ES Consumer
+  写 message + user_timeline    仅文本写 ES
 ```
 
-接收端：客户端在 WS 长连接上收到 `NotifyNewMessage`，触发 UI 增量刷新。下次上线如有遗漏，可走 `GetOfflineMsg` 按 `last_message_id` 增量补齐。
-
----
-
-## 七、客户端实现
-
-源码：`code/client/`，Qt6 项目。
-
-- **入口**：`main.cpp` → `LoginWidget`，登录成功后切换到 `MainWidget`。
-- **UI 模块**：
-  - `loginwidget` / `mailloginwidget` / `verifycodewidget`：用户名 + 密码、邮箱验证码两套登录方式；
-  - `mainwidget`：主界面骨架，左侧会话/好友列表、中部消息区、右侧详情；
-  - `sessionfriendarea` / `messageshowarea` / `messageeditarea`：会话列表、消息渲染、输入区（含图片/文件/语音录制）；
-  - `selfinfowidget` / `userinfowidget` / `sessiondetailwidget` / `groupsessiondetailwidget`：资料/会话详情；
-  - `addfrienddialog` / `choosefrienddialog`：好友查找/邀请；
-  - `historymessagewidget`：历史消息检索/查看；
-  - `soundrecorder`：语音消息录制（PCM 16k）；
-  - `toast`：轻量消息提示。
-- **模型层** `model/`：
-  - `data.h`：用户、好友、会话、消息等领域模型，提供 protobuf ↔ Qt 模型互转；
-  - `datacenter.{h,cpp}`：进程级单例，集中管理本地状态、缓存、当前登录会话，并对外提供"业务方法"（内部调用 `NetClient`）。
-- **网络层** `network/NetClient.{h,cpp}`：
-  - 封装 HTTP（`QNetworkAccessManager`）与 WebSocket（`QWebSocket`）；
-  - 提供模板化的 `handleHttpResponse<T>()`，统一反序列化 + 业务错误判定；
-  - 收到 WebSocket `NotifyMessage` 后按类型分派到对应处理器（新消息、好友申请、申请处理、会话创建等），并通知 `DataCenter` 更新 UI。
-- **proto** 与服务端 `code/server/proto` 内容一致，仅在 CMake 中通过 `qt_add_protobuf` 生成 `*.qpb.h` 给 Qt 使用。
-
-服务器地址默认指向 `http://127.0.0.1:8000` / `ws://127.0.0.1:8001`，部署时需根据网关实际地址修改 `network/NetClient.h` 中常量。
+接收端：客户端 WS 收到 `NotifyNewMessage` 触发 UI 刷新；上线时漏收走 `GetOfflineMsg(last_message_id)` 增量补齐。
 
 ---
 
 ## 八、构建与部署
 
-### 1. 服务端（推荐 docker-compose）
+### 1. 依赖
 
-`code/server/docker-compose.yml` 一键拉起 **基础设施 + 全部 7 个微服务**：
+#### 系统依赖（Linux 推荐 Ubuntu 22.04）
+
+brpc / protobuf / odb / odb-mysql / odb-boost / hiredis / redis++ / etcd-cpp-api / elasticlient / spdlog / fmt / gtest / libcurl / libssl / cpprest / leveldb / jsoncpp / libev / amqp-cpp。
+
+#### aws-sdk-cpp（P4 必需）
 
 ```bash
-cd code/server
-# 1) 先在宿主机本地（或 CI 中）按服务依次构建可执行文件，输出到各自 build/ 目录
-#    每个服务独立 CMake：cd <svc> && mkdir build && cd build && cmake .. && make
-# 2) 抽取动态库依赖到各服务 depends/，复制 nc 工具
-bash depends.sh
-# 3) 启动整套环境
-docker-compose up -d
+sudo bash scripts/install_aws_sdk_linux.sh
+# 安装 v1.11.420 仅 S3 module 到 /usr/local，约 5–15 分钟
 ```
 
-启动后开放端口：
+### 2. 编译
 
-| 服务 | 端口 |
-|---|---|
-| etcd | 2379 |
-| MySQL | 3306 |
-| Redis | 6379 |
-| Elasticsearch | 9200 / 9300 |
-| RabbitMQ | 5672 |
-| Gateway | 9000(HTTP) / 9001(WS) |
-| Speech / File / User / Transmite / Message / Friend | 10001 ~ 10006 |
-
-容器启动脚本 `entrypoint.sh` 会先用 `nc` 探测依赖端口（etcd/MySQL/Redis/ES/MQ）就绪，再启动业务进程，避免冷启动竞态。
-
-### 2. 客户端
+每个服务独立 CMakeLists（顶层 `CMakeLists.txt` 仅 `add_subdirectory`）：
 
 ```bash
-cd code/client
 mkdir build && cd build
-cmake .. -DCMAKE_PREFIX_PATH=<Qt6 安装路径>
+cmake ..
 cmake --build . -j
-./ChatClient
 ```
 
-依赖：Qt 6（Widgets / Network / WebSockets / Protobuf / Multimedia）。
+主要 target：
+- `gateway_server` / `user_server` / `friend_server` / `chatsession_server`
+- `transmite_server` / `message_server` / `push_server`
+- `media_server` / `media_client`（原 `file_server` 重命名，P4）
+- `common_tests`（公共组件单元测试聚合）
+
+### 3. 启动基础设施
+
+```bash
+# MinIO（P4 必需）
+cd docker && docker compose up -d minio minio-init && cd ..
+# bucket 自动创建：chatnow-media-public / chatnow-media-private
+
+# 顶层 docker-compose（旧，按需用：mysql / redis / es / etcd / rabbitmq）
+docker compose up -d
+```
+
+### 4. 启动服务
+
+```bash
+# 例：MediaService
+./build/file/media_server \
+  --media_conf=conf/media.json \
+  --auth_config=conf/auth.json \
+  --mysql_host=127.0.0.1 --mysql_user=root --mysql_pswd=*** \
+  --mysql_db=chatnow --mysql_cset=utf8mb4 \
+  --redis_host=127.0.0.1 --redis_port=6379 \
+  --registry_host=http://127.0.0.1:2379 \
+  --listen_port=10002 --access_host=127.0.0.1:10002
+```
+
+其它服务参数模板见 `conf/<svc>_server.conf`，以 `-flagfile` 形式传入。
+
+### 5. 烟雾测试
+
+| 场景 | 脚本 |
+|---|---|
+| P2 JWT 鉴权 | `docs/operations/p2-smoke-test.md` |
+| P4 媒体上传下载 | `file/test/smoke/run_smoke.sh` |
 
 ---
 
 ## 九、配置说明
 
-每个服务配置文件位于 `code/server/conf/<svc>_server.conf`，通过 gflags 的 `-flagfile` 形式加载。常见字段：
+| 文件 | 用途 |
+|---|---|
+| `conf/<svc>_server.conf` | gflags flagfile（端口 / etcd / mysql / redis / es / mq / 邮件） |
+| `conf/auth.json` | JWT 多 kid（P2）|
+| `conf/media.json` | s3 + media 段（双 bucket / mime 白名单 / presign） |
 
-- `run_mode` / `log_file` / `log_level`：日志输出模式与等级；
-- `registry_host`：etcd 地址；
-- `base_service` + `instance_name`：本实例在 etcd 中的注册路径；
-- `access_host`：注册到 etcd 的对外可访问地址（容器化部署时填宿主机/内网 IP + 端口）；
-- 各服务对其依赖（MySQL / Redis / ES / MQ / 邮件 / ASR）的连接参数。
+### 安全提示
 
-> ⚠️ 仓库中的配置文件示例包含明文密码、邮箱授权码与 ASR `secret_key`，**生产环境部署前请替换为环境变量或安全的配置中心**。
+⚠️ 仓库内的样例配置含明文密码 / 邮箱授权码 / MinIO 默认凭据，**生产部署前务必替换为安全的配置中心或环境变量**。
+
+---
+
+## 十、文档索引
+
+```
+docs/
+├── superpowers/
+│   ├── specs/2026-05-14-cross-cutting-architecture-design.md   # 横切基础设施权威 spec
+│   ├── specs/2026-05-14-proto-redesign*.md                     # proto 重构方案 + gaps
+│   ├── plans/2026-05-14-p1-foundations.md                      # P1 实施计划
+│   ├── plans/2026-05-14-p2-jwt-multi-device-auth.md            # P2 实施计划
+│   ├── plans/2026-05-14-p4-media-object-storage.md             # P4 实施计划
+│   ├── plans/2026-05-14-p8-trace-and-structured-logs.md        # P8 实施计划
+│   └── plans/2026-05-14-mq-quorum-design.md                    # MQ 高可用方案
+├── operations/
+│   ├── jwt-key-rotation.md                                     # JWT 密钥轮换 runbook
+│   ├── p2-smoke-test.md                                        # P2 烟雾测试
+│   ├── log-format-and-queries.md                               # 日志格式 + 查询模板
+│   ├── log-level-conventions.md                                # 日志等级约定
+│   └── monitoring-and-alerting.md                              # 监控告警约定
+├── client-sdk/                                                  # 客户端 SDK 契约 + 错误码重试策略
+├── ARCHITECTURE_v2.0_and_roadmap.md                             # 历史架构 + 路线图
+├── CHANGELOG_v2.0.md
+└── ...
+```
+
+3.0 重构进度：
+
+- [x] **P1** 横切基础（ServiceError / HANDLE_RPC / metadata / 错误码）
+- [x] **P2** JWT 多端鉴权
+- [x] **P4** MinIO 对象存储
+- [x] **P8** trace_id + 结构化日志
+- [ ] **P3** Device 模型（多端登录撤销）
+- [ ] **P5** Conversation / Message 重构
+- [ ] **P6** 推送可靠性与跨实例 fanout
+- [ ] **P7** ASR 接入 + Profile 服务端
 
 ---
 
