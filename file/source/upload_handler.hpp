@@ -83,6 +83,17 @@ inline std::string next_file_id_hex() {
     return std::string(buf);
 }
 
+/* brief: 把 MediaFile 行字段填到 proto FileInfo（uploaded_at → epoch_ms） */
+inline void fill_file_info(const MediaFile& f, ::chatnow::media::FileInfo* info) {
+    info->set_file_id(f.file_id());
+    info->set_file_name(f.file_name());
+    info->set_file_size(f.file_size());
+    info->set_mime_type(f.mime_type());
+    auto epoch = boost::posix_time::ptime(boost::gregorian::date(1970, 1, 1));
+    auto diff = f.uploaded_at() - epoch;
+    info->set_uploaded_at_ms(diff.total_milliseconds());
+}
+
 // ========== UploadHandler ==========
 
 class UploadHandler {
@@ -148,7 +159,7 @@ public:
             rsp->set_file_id(file_id);
             rsp->set_already_exists(true);
             rsp->set_expires_in_sec(0);
-            LOG_INFO("apply_upload(dedup) user={} file={} hash={} size={}",
+            LOG_INFO("apply_upload_dedup user={} file={} hash={} size={}",
                      user_id, file_id, req.content_hash(), req.file_size());
             return;
         }
@@ -209,7 +220,7 @@ public:
         }
         // 幂等：已 committed → 直接回填 FileInfo
         if (file->status() == MediaFileStatus::COMMITTED) {
-            fill_info(*file, rsp->mutable_file_info());
+            fill_file_info(*file, rsp->mutable_file_info());
             return;
         }
         if (file->status() != MediaFileStatus::PENDING) {
@@ -255,7 +266,7 @@ public:
 
         // 5) 回填 FileInfo（用最新 status 重新查一次也行；这里复用旧行字段+设置 committed）
         file->status(MediaFileStatus::COMMITTED);
-        fill_info(*file, rsp->mutable_file_info());
+        fill_file_info(*file, rsp->mutable_file_info());
 
         LOG_INFO("complete_upload user={} file={} size={} mime={} hash={}",
                  user_id, file->file_id(), file->file_size(), file->mime_type(),
@@ -263,17 +274,6 @@ public:
     }
 
 protected:
-    static void fill_info(const MediaFile& f, ::chatnow::media::FileInfo* info) {
-        info->set_file_id(f.file_id());
-        info->set_file_name(f.file_name());
-        info->set_file_size(f.file_size());
-        info->set_mime_type(f.mime_type());
-        // ptime → epoch_ms：从 1970-01-01 起算秒
-        auto epoch = boost::posix_time::ptime(boost::gregorian::date(1970, 1, 1));
-        auto diff = f.uploaded_at() - epoch;
-        info->set_uploaded_at_ms(diff.total_milliseconds());
-    }
-
     std::shared_ptr<S3Client>            _s3;
     std::shared_ptr<MimeWhitelist>       _mime;
     std::shared_ptr<MediaFileTable>      _files;

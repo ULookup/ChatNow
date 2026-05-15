@@ -130,7 +130,85 @@ public:
         rsp->set_expires_in_sec(_presign);
     }
 
-    // complete / abort 在 Task 19 追加
+    /* brief: CompleteMultipartUpload —— S3 complete + HEAD + ref_count++ + quota++ */
+    void complete(const std::string& user_id,
+                  const ::chatnow::media::CompleteMultipartReq& req,
+                  ::chatnow::media::CompleteMultipartRsp* rsp) {
+        auto file = _files->select_by_upload_id(req.upload_id());
+        if (!file) {
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "upload not found");
+        }
+        if (file->owner_id() != user_id) {
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "owner mismatch");
+        }
+        if (file->status() == MediaFileStatus::COMMITTED) {
+            // 幂等
+            fill_file_info(*file, rsp->mutable_file_info());
+            return;
+        }
+        if (file->status() != MediaFileStatus::PENDING) {
+            throw ServiceError(::chatnow::error::kMediaUploadFailed, "bad status");
+        }
+
+        std::vector<S3Client::PartETag> parts;
+        parts.reserve(req.parts_size());
+        for (const auto& p : req.parts()) {
+            S3Client::PartETag pe;
+            pe.part_number = p.part_number();
+            pe.etag        = p.etag();
+            parts.push_back(std::move(pe));
+        }
+        if (parts.empty()) {
+            throw ServiceError(::chatnow::error::kMediaPartNotFound, "no parts to complete");
+        }
+
+        _s3->complete_multipart(file->bucket(), file->object_key(),
+                                req.upload_id(), parts);
+
+        // HEAD 校验 size
+        auto head = _s3->head_object(file->bucket(), file->object_key());
+        if (head.content_length != file->file_size()) {
+            try { _s3->delete_object(file->bucket(), file->object_key()); }
+            catch (...) { LOG_WARN("complete_multipart: delete after size mismatch failed file={}", file->file_id()); }
+            _files->update_status(file->file_id(), MediaFileStatus::DELETED);
+            throw ServiceError(::chatnow::error::kMediaHashMismatch, "size mismatch");
+        }
+
+        // blob_ref + status + quota
+        if (!_blobs->select_by_hash(file->content_hash())) {
+            MediaBlobRef br;
+            br.content_hash(file->content_hash());
+            br.bucket(file->bucket());
+            br.object_key(file->object_key());
+            br.ref_count(0);
+            br.total_size(file->file_size());
+            br.last_decremented_at(now_ptime());
+            _blobs->upsert(br);
+        }
+        _blobs->inc_ref(file->content_hash());
+        _files->update_status(file->file_id(), MediaFileStatus::COMMITTED);
+        _quota->inc_used(user_id, file->file_size(), now_ptime());
+
+        file->status(MediaFileStatus::COMMITTED);
+        fill_file_info(*file, rsp->mutable_file_info());
+        LOG_INFO("complete_multipart user={} file={} parts={} size={}",
+                 user_id, file->file_id(), req.parts_size(), file->file_size());
+    }
+
+    /* brief: AbortMultipartUpload —— 中止 + 行置 deleted（幂等） */
+    void abort(const std::string& user_id,
+               const ::chatnow::media::AbortMultipartReq& req,
+               ::chatnow::media::AbortMultipartRsp* /*rsp*/) {
+        auto file = _files->select_by_upload_id(req.upload_id());
+        if (!file) return;  // 幂等
+        if (file->owner_id() != user_id) {
+            throw ServiceError(::chatnow::error::kMediaFileNotFound, "owner mismatch");
+        }
+        try { _s3->abort_multipart(file->bucket(), file->object_key(), req.upload_id()); }
+        catch (...) { LOG_WARN("abort_multipart: s3 abort failed file={}", file->file_id()); }
+        _files->update_status(file->file_id(), MediaFileStatus::DELETED);
+        LOG_INFO("abort_multipart user={} file={}", user_id, file->file_id());
+    }
 
 protected:
     std::shared_ptr<S3Client>            _s3;
