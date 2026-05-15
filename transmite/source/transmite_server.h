@@ -4,6 +4,7 @@
 #include "infra/logger.hpp"   // 日志模块封装
 #include "mq/rabbitmq.hpp"
 #include "mq/channel.hpp"
+#include "mq/trace_headers.hpp"
 #include "utils/utils.hpp"
 #include "infra/snowflake.hpp"
 #include "dao/data_redis.hpp"
@@ -261,7 +262,10 @@ public:
         std::shared_ptr<std::atomic<bool>> done_called =
             std::make_shared<std::atomic<bool>>(false);
         try {
+            std::map<std::string, std::string> _mq_headers;
+            ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
+                _mq_headers,
                 [async_done, response, rid, done_called](PublishStatus status, const std::string& msg) {
                 if(done_called->exchange(true)) return;  // 防止重复 Run
                 if(status == PublishStatus::Acked) {
