@@ -287,12 +287,12 @@ SpeechService_Stub        → MediaService_Stub
 | 依赖 | 类型 | 用途 |
 |---|---|---|
 | RabbitMQ (`Publisher`) | MQ | 发布 InternalMessage |
-| Redis (`SeqGen`, `Members`, `RateLimiter`) | Redis | seq 生成、成员缓存、限流 |
+| Redis (`SeqGen`, `Members`, `RateLimiter`, `DedupCache`) | Redis | seq 生成、成员缓存、限流、**SETNX 幂等去重**（替代 RPC 查询） |
 | Snowflake (`SnowflakeId`) | 本地 | 分布式 message_id |
 | WorkerIdAllocator | Redis | Snowflake worker 租约 |
 | IdentityService (RPC) | 服务依赖 | `GetProfile` 获取发送者信息 |
 | ConversationService (RPC) | 服务依赖 | `GetMemberIds` 获取会话成员 |
-| MessageService (RPC) | 服务依赖 | `SelectByClientMsgId` 幂等去重 |
+| _(MessageService 不再用于去重)_ | — | SelectByClientMsgId 调用由 Redis SETNX 替代，见 dedup-redis-setnx.md |
 
 **RPC 迁移**：
 
@@ -303,7 +303,7 @@ SpeechService_Stub        → MediaService_Stub
 **跨服务调用**：
 - `UserService_Stub.GetUserInfo` → `IdentityService_Stub.GetProfile`
 - `ChatSessionService_Stub.GetMemberIdList` → `ConversationService_Stub.GetMemberIds`
-- `MsgStorageService_Stub.SelectByClientMsg` → `MessageService_Stub.SelectByClientMsgId`
+- ~~`MsgStorageService_Stub.SelectByClientMsg`~~ → **已移除**，改用 Redis SETNX 在 seq 分配前去重（见 dedup-redis-setnx.md）
 
 **迁移要点**：
 1. 3 个 stub 调用更新
@@ -506,7 +506,7 @@ SpeechService_Stub        → MediaService_Stub
 | **Message** | GetMultiUserInfo | — | — | — | DownloadFile | — | — |
 | **Conversation** | GetMultiUserInfo | — | — | SyncMessages | UploadFile | — | — |
 | **Relationship** | GetMultiUserInfo | — | — | — | — | — | — |
-| **Transmite** | GetProfile | — | GetMemberIds | SelectByClientMsgId | — | — | — |
+| **Transmite** | GetProfile | — | GetMemberIds | — | — | — | — |
 | **Push** | — | — | — | UpdateReadAck, SyncMessages | — | PushBatch | — |
 
 **连锁影响关键路径**：
