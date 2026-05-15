@@ -1,6 +1,11 @@
 #pragma once
 
 #include <brpc/server.h>
+#include <string>
+#include <vector>
+#include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include "infra/etcd.hpp"
 #include "mq/channel.hpp"
 #include "infra/logger.hpp"
@@ -45,9 +50,170 @@ public:
 
     ~RelationshipServiceImpl() override = default;
 
-    // 9 个 RPC handler 在 Task 5/6/7 实现，先编译通过用 default override
-    // 注：brpc 自动给 ::SERVICE_NAME stub 提供 default 实现，未实现的 RPC
-    // 走 NOT_IMPLEMENTED；但本仓约定服务端要显式 override，因此 Task 5+ 会逐个补全。
+    // ---- 4 个读取类 RPC ----
+
+    void ListFriends(::google::protobuf::RpcController* base_cntl,
+                     const ::chatnow::relationship::ListFriendsReq* req,
+                     ::chatnow::relationship::ListFriendsRsp* rsp,
+                     ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto friend_ids = _mysql_relation->friends(auth.user_id);
+            std::unordered_set<std::string> uid_set(friend_ids.begin(), friend_ids.end());
+
+            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            if (!uid_set.empty()) {
+                if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
+                    throw ServiceError(::chatnow::error::kSystemUnavailable,
+                                       "identity service unavailable");
+            }
+            for (auto &kv : user_map) {
+                auto* u = rsp->add_friend_list();
+                u->CopyFrom(kv.second);
+            }
+            // page 字段：当前 DAO 还没分页参数，先全量返回；page.has_more=false
+            rsp->mutable_page()->set_has_more(false);
+            rsp->mutable_page()->set_total_count(static_cast<int32_t>(friend_ids.size()));
+        });
+    }
+
+    void SearchFriends(::google::protobuf::RpcController* base_cntl,
+                       const ::chatnow::relationship::SearchFriendsReq* req,
+                       ::chatnow::relationship::SearchFriendsRsp* rsp,
+                       ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            // 1. 排除集合：自己 + 已是好友 + (我拉黑 ∪ 拉黑我)
+            std::vector<std::string> exclude;
+            exclude.push_back(auth.user_id);
+            auto friends_v = _mysql_relation->friends(auth.user_id);
+            exclude.insert(exclude.end(), friends_v.begin(), friends_v.end());
+            auto block_set = _mysql_user_block->blocked_or_blocking(auth.user_id);
+            exclude.insert(exclude.end(), block_set.begin(), block_set.end());
+
+            // 2. ES 搜索
+            auto hits = _es_user->search(req->search_key(), exclude);
+            std::unordered_set<std::string> uid_set;
+            for (auto &h : hits) uid_set.insert(h.user_id());
+
+            // 3. 批量取 UserInfo
+            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            if (!uid_set.empty()) {
+                if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
+                    throw ServiceError(::chatnow::error::kSystemUnavailable,
+                                       "identity service unavailable");
+            }
+            for (auto &kv : user_map) {
+                auto* u = rsp->add_user_info();
+                u->CopyFrom(kv.second);
+            }
+        });
+    }
+
+    void ListPendingRequests(::google::protobuf::RpcController* base_cntl,
+                             const ::chatnow::relationship::ListPendingReq* req,
+                             ::chatnow::relationship::ListPendingRsp* rsp,
+                             ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto pendings = _mysql_friend_apply->select_pending(auth.user_id);
+            std::unordered_set<std::string> uid_set;
+            for (auto &row : pendings) uid_set.insert(row.user_id());
+
+            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            if (!uid_set.empty()) {
+                if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
+                    throw ServiceError(::chatnow::error::kSystemUnavailable,
+                                       "identity service unavailable");
+            }
+            for (auto &row : pendings) {
+                auto it = user_map.find(row.user_id());
+                if (it == user_map.end()) continue; // 申请人已注销/查不到，跳过
+                auto* ev = rsp->add_event();
+                ev->set_event_id(row.event_id());
+                ev->mutable_sender()->CopyFrom(it->second);
+            }
+        });
+    }
+
+    void ListBlockedUsers(::google::protobuf::RpcController* base_cntl,
+                          const ::chatnow::relationship::ListBlockedReq* req,
+                          ::chatnow::relationship::ListBlockedRsp* rsp,
+                          ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            // PageRequest.cursor 当前不解析（DAO 用 offset/limit 简单分页）
+            int limit  = req->page().limit() > 0 ? req->page().limit() : 50;
+            int offset = 0;
+            if (!req->page().cursor().empty()) {
+                try { offset = std::stoi(req->page().cursor()); }
+                catch (...) { offset = 0; }
+            }
+            auto blocked_ids = _mysql_user_block->list_blocked(auth.user_id, offset, limit);
+            std::unordered_set<std::string> uid_set(blocked_ids.begin(), blocked_ids.end());
+
+            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            if (!uid_set.empty()) {
+                if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
+                    throw ServiceError(::chatnow::error::kSystemUnavailable,
+                                       "identity service unavailable");
+            }
+            for (auto &id : blocked_ids) {
+                auto it = user_map.find(id);
+                if (it == user_map.end()) continue;
+                auto* u = rsp->add_blocked_list();
+                u->CopyFrom(it->second);
+            }
+            int64_t total = _mysql_user_block->count_blocked(auth.user_id);
+            rsp->mutable_page()->set_total_count(static_cast<int32_t>(total));
+            rsp->mutable_page()->set_has_more(offset + limit < total);
+            if (rsp->page().has_more()) {
+                rsp->mutable_page()->set_next_cursor(std::to_string(offset + limit));
+            }
+        });
+    }
+
+private:
+    bool fetch_users(brpc::Controller* in_cntl,
+                     const std::string &rid,
+                     const std::unordered_set<std::string> &uid_set,
+                     std::unordered_map<std::string, ::chatnow::common::UserInfo> &out)
+    {
+        auto channel = _mm_channels->choose(_identity_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} identity 子服务节点不可达 svc={}",
+                      rid, _identity_service_name);
+            return false;
+        }
+        ::chatnow::identity::IdentityService_Stub stub(channel.get());
+        ::chatnow::identity::GetMultiUserInfoReq  q;
+        ::chatnow::identity::GetMultiUserInfoRsp  a;
+        q.set_request_id(rid);
+        for (auto &id : uid_set) q.add_users_id(id);
+
+        brpc::Controller out_cntl;
+        ::chatnow::auth::forward_auth_metadata(in_cntl, &out_cntl);
+        stub.GetMultiUserInfo(&out_cntl, &q, &a, nullptr);
+        if (out_cntl.Failed()) {
+            LOG_ERROR("rid={} GetMultiUserInfo brpc 失败: {}", rid, out_cntl.ErrorText());
+            return false;
+        }
+        if (!a.header().success()) {
+            LOG_ERROR("rid={} GetMultiUserInfo 业务失败: code={} msg={}",
+                      rid, a.header().error_code(), a.header().error_message());
+            return false;
+        }
+        for (auto &kv : a.users_info()) out.emplace(kv.first, kv.second);
+        return true;
+    }
 
 private:
     ESUser::ptr                  _es_user;
