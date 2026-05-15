@@ -2701,7 +2701,7 @@ Client ─┤          ├──────────────────
 | **§5 mime_whitelist** | 同上；测试加到 `common/test/test_mime_whitelist.cc`。注意 `nlohmann::json` 依赖：仓库已通过 `third/include/jsoncpp` 走 jsoncpp，但 `gateway_auth.hpp` 等已使用 `nlohmann/json`（third/include 中存在），保持原计划的 nlohmann::json。 |
 | **§6/§7 s3_client** | 仅头文件 + 测试；`#include "common/error.pb.h"` → 改为 `#include "common/error/error_codes.hpp"`；抛错改为 `throw ServiceError(error::kMediaUploadFailed, ...)`。 |
 | **§8 media_service.proto** | 重写时：(a) 所有 `ResponseHeader` 写全 `chatnow.common.ResponseHeader`；(b) 顶部加 `import "common/types.proto";` 仅在需要时；(c) 移除老消息；(d) 加 `option cc_generic_services = true;`（与 identity 一致）。 |
-| **§9 identity_service.proto** | 现有 UpdateProfileReq 已有 `optional string avatar_url = 6;`；P4 操作：**保留 avatar_url**，**新增 `optional string avatar_file_id = 8;`**（不复用 6 号 tag，避免破坏在途客户端）。文档说明：服务端二选一，优先 file_id；P7 删除 avatar_url。 |
+| **§9 identity_service.proto** | 项目未上线，不考虑 wire 兼容：直接把 `optional string avatar_url = 6;` 替换为 `optional string avatar_file_id = 6;`（沿用 tag 6）。`avatar_url::of(prefix, file_id)` 仅供服务端组装返回值时用，请求体不再传 URL。 |
 | **§10 sql/V4__media.sql** | 创建 `sql/` 目录；DDL 与原 plan 一致，但首行加注释「ODB 是权威 schema；本文件仅作部署参考」。 |
 | **§11 DAO** | 整段重写为 ODB 模式：<br/>- `odb/media_file.hxx`（pragma db object）<br/>- `odb/media_blob_ref.hxx`<br/>- `odb/media_user_quota.hxx`<br/>- `common/dao/mysql_media_file.hpp` / `mysql_media_blob_ref.hpp` / `mysql_media_user_quota.hpp`（CRUD 包装，仿 `mysql_user.hpp`）<br/>- 测试 `file/test/test_media_dao_integration.cc` 用 ODBFactory::create + `MediaFileTable::insert()` 等真实 ODB API。<br/>- 字段类型：时间戳列用 `boost::posix_time::ptime`（与 user/message 一致），不用 `int64_t epoch_ms`；handler 内部计算用 epoch_ms 但写库前转 ptime。<br/>- 业务约束（`status IN (...)`、`ref_count >= 0`）放在 DAO 层 C++ 中校验，不依赖 SQL CHECK。 |
 | **§12 file/CMakeLists.txt** | 仿 `user/CMakeLists.txt`：(a) target 名 `media_server`；(b) 引入 odb 编译段：`odb_files = media_file.hxx media_blob_ref.hxx media_user_quota.hxx`；(c) 链接库：`-laws-cpp-sdk-s3 -laws-cpp-sdk-core` 加在原有 `-l...` 列表末尾；(d) 同时 `git rm file/source/file_server.h file/source/file_server.cc`；(e) `media_client` target 用于 `file/test/test_*.cc` 单测。 |
@@ -2715,7 +2715,7 @@ Client ─┤          ├──────────────────
 | **§22 cleanup_worker 框架** | Redis 直接用 `std::shared_ptr<sw::redis::Redis>`（即 `data_redis.hpp` 内的同款 client）；MediaDao/QuotaDao 改为 ODB 包装类型。 |
 | **§23–§25 cleanup tasks** | 同上；ODB 查询用 `odb::query`（参见 `mysql_user.hpp` 中的写法）。 |
 | **§26 speech proto include** | 现有 `speech/source/speech_server.h` 实际 include 已是 `media/media_service.pb.h`（已对）。本 task 真正要做的是：移除老 RPC `SpeechRecognition` 字段中的 `user_id/session_id`（P4 §8 重写时一起处理）+ 编译验证 speech_server target 在新 proto 下仍能编。 |
-| **§27 avatar_url 工具 + 契约** | 与 §9 偏离协同：`UpdateProfile` 同时支持 `avatar_url` 和 `avatar_file_id`，二选一。`avatar_url::of(prefix, file_id)` 工具不变。 |
+| **§27 avatar_url 工具 + 契约** | 与 §9 协同：`UpdateProfileReq.avatar_file_id` 是唯一头像入参；`avatar_url::of(prefix, file_id)` 仅服务端组装返回值时用。 |
 | **§28 docker-compose** | 创建 `docker/` 目录；docker-compose.yml 仅放 minio + minio-init 两个服务（不重新声明 mysql/redis/etcd——本仓暂未提供 compose，以后可再扩）。 |
 | **§29 minio-init 脚本** | 不变。 |
 | **§30 conf/media.json** | server 段去掉（端口走 gflags），保留：`s3 / media（双 bucket / public_url_prefix / presign_seconds / asr_endpoint / mime_whitelist）`；mysql/redis/etcd 走 gflags，不重复在 JSON 里。 |
