@@ -28,6 +28,16 @@ inline constexpr int32_t kAuthVerifyCodeExpired     = 1007;
 inline constexpr int32_t kAuthRefreshTokenReused    = 1008;
 inline constexpr int32_t kAuthDeviceRevoked         = 1009;
 
+// 5000-5999 媒体（P4，与 proto/common/error.proto 同步）
+inline constexpr int32_t kMediaFileTooLarge        = 5001;
+inline constexpr int32_t kMediaUnsupportedFormat   = 5002;
+inline constexpr int32_t kMediaUploadFailed        = 5003;
+inline constexpr int32_t kMediaQuotaExceeded       = 5004;
+inline constexpr int32_t kMediaHashMismatch        = 5005;
+inline constexpr int32_t kMediaUploadIncomplete    = 5006;
+inline constexpr int32_t kMediaPartNotFound        = 5007;
+inline constexpr int32_t kMediaFileNotFound        = 5008;  // 本仓内部使用：file_id 不存在 / 已删除
+
 inline constexpr int32_t kSystemInternalError      = 9001;
 inline constexpr int32_t kSystemUnavailable        = 9002;
 inline constexpr int32_t kSystemTimeout            = 9003;
