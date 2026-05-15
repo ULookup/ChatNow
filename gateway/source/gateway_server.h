@@ -10,6 +10,7 @@
 #include "infra/logger.hpp"
 #include "mq/channel.hpp"
 #include "utils/brpc_closure.hpp"
+#include "gateway_trace.hpp"
 
 // 注意：B3 — Gateway 已彻底无状态化，WebSocket 终结迁至 push 服务（push_server.h）。
 // 不再 include "connection.hpp"，不再监听 9001 端口，不再维护 uid→conn 映射。
@@ -207,6 +208,7 @@ private:
     //     也不再访问 _connections / _ws_server。客户端鉴权 / 心跳 / ACK 全部走 push。
     /* brief: 获取邮件验证码 */
     void GetMailVerifyCode(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
         //1. 取出http请求正文，将正文进行反序列化
         MailVerifyCodeReq req;
         MailVerifyCodeRsp rsp;
@@ -228,6 +230,9 @@ private:
         }
         UserService_Stub stub(channel.get());
         brpc::Controller cntl;
+        /* P8: 入口三件套 —— trace_id 解析/生成 + 写 metadata + LogContext::set */
+        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        response.set_header("X-Trace-Id", trace_id);
         stub.GetMailVerifyCode(&cntl, &req, &rsp, nullptr);
         if(cntl.Failed()) {
             LOG_ERROR("请求ID - {} 用户子服务调用失败: {}", req.request_id(), cntl.ErrorText());
