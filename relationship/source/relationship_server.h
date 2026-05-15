@@ -181,6 +181,124 @@ public:
         });
     }
 
+    // ---- 4 个写入类 RPC ----
+
+    void SendFriendRequest(::google::protobuf::RpcController* base_cntl,
+                           const ::chatnow::relationship::SendFriendReq* req,
+                           ::chatnow::relationship::SendFriendRsp* rsp,
+                           ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            const std::string &uid = auth.user_id;
+            const std::string &pid = req->respondent_id();
+            if (pid.empty() || uid == pid)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "invalid respondent_id");
+
+            // 对端拉黑了我 → 直接 BLOCKED
+            if (_mysql_user_block->is_blocked(pid, uid))
+                throw ServiceError(::chatnow::error::kRelationshipBlocked,
+                                   "blocked by peer");
+
+            if (_mysql_relation->exists(uid, pid))
+                throw ServiceError(::chatnow::error::kRelationshipAlreadyFriends,
+                                   "already friends");
+
+            // PENDING 中 → 直接复用之前 event_id（与现状一致）
+            if (_mysql_friend_apply->exists_pending(uid, pid)) {
+                auto latest = _mysql_friend_apply->select_latest(uid, pid);
+                if (latest && latest->status() == FriendApplyStatus::PENDING) {
+                    rsp->set_notify_event_id(latest->event_id());
+                    return; // HANDLE_RPC 已写好成功 header
+                }
+                throw ServiceError(::chatnow::error::kRelationshipRequestPending,
+                                   "duplicate apply");
+            }
+
+            // 上一次被拒 + 距今 <72h → 拒绝
+            auto last = _mysql_friend_apply->select_latest(uid, pid);
+            if (last && last->status() == FriendApplyStatus::REJECTED) {
+                auto now = boost::posix_time::microsec_clock::universal_time();
+                if (now - last->create_time() < boost::posix_time::hours(72))
+                    throw ServiceError(::chatnow::error::kRelationshipRequestPending,
+                                       "rejected within 72h");
+            }
+
+            // 新建申请
+            std::string eid = uuid();
+            FriendApply ev(eid, uid, pid, FriendApplyStatus::PENDING,
+                           boost::posix_time::microsec_clock::universal_time());
+            if (!_mysql_friend_apply->insert(ev))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "insert friend_apply failed");
+            rsp->set_notify_event_id(eid);
+        });
+    }
+
+    void RemoveFriend(::google::protobuf::RpcController* base_cntl,
+                      const ::chatnow::relationship::RemoveFriendReq* req,
+                      ::chatnow::relationship::RemoveFriendRsp* rsp,
+                      ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            const std::string &uid = auth.user_id;
+            const std::string &pid = req->peer_id();
+            if (pid.empty() || uid == pid)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "invalid peer_id");
+            if (!_mysql_relation->exists(uid, pid))
+                throw ServiceError(::chatnow::error::kRelationshipNotFriends,
+                                   "not friends");
+            if (!_mysql_relation->remove(uid, pid))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "remove relation failed");
+            // user_block 表与好友关系独立，删好友不动 user_block；
+            // 现状会话清理改由 Conversation 服务负责（不在本服务范围内）。
+        });
+    }
+
+    void BlockUser(::google::protobuf::RpcController* base_cntl,
+                   const ::chatnow::relationship::BlockUserReq* req,
+                   ::chatnow::relationship::BlockUserRsp* rsp,
+                   ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            const std::string &uid = auth.user_id;
+            const std::string &pid = req->peer_id();
+            if (pid.empty() || uid == pid)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "invalid peer_id");
+            if (!_mysql_user_block->insert(uid, pid))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "insert user_block failed");
+        });
+    }
+
+    void UnblockUser(::google::protobuf::RpcController* base_cntl,
+                     const ::chatnow::relationship::UnblockUserReq* req,
+                     ::chatnow::relationship::UnblockUserRsp* rsp,
+                     ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            const std::string &uid = auth.user_id;
+            const std::string &pid = req->peer_id();
+            if (pid.empty() || uid == pid)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "invalid peer_id");
+            if (!_mysql_user_block->remove(uid, pid))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "remove user_block failed");
+        });
+    }
+
 private:
     bool fetch_users(brpc::Controller* in_cntl,
                      const std::string &rid,
