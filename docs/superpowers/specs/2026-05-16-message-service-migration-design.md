@@ -549,8 +549,86 @@ void MessageServerBuilder::backfill_seq_from_db_() {
 
 ---
 
-## 10. 实施记录
+## 10. 实施记录（2026-05-16）
 
-> **实施落地后填写。** 模仿 `2026-05-15-relationship-service-migration-design.md` §11 / `2026-05-16-conversation-service-migration-design.md` §11 同模式。
->
-> 至少包含：状态总览表 / commit 序列 / 横切 hotfix 列表 / 关键设计选择固化记录 / 已知阻塞 / 给下一位 Agent 的接手清单 / 结构性约束。
+> **给下一位接手 Agent 的速读区。** 本节记录代码已完成到什么程度、什么没验证、什么阻塞了哪一步、哪些约束必须遵守。
+
+### 10.1 状态总览
+
+| 类别 | 状态 |
+|---|---|
+| 全部 15 个 RPC 代码 | ✅ 已落（`message/source/message_server.h`，0 placeholder 残留） |
+| proto 4 文件清理（message_service / message_internal / push-notify / push-service） | ✅ 已落 |
+| DAO message +4 方法（update_status_to_recalled / select_max_seq / select_history / select_after） | ✅ |
+| DAO user_timeline +3 方法（delete_by_message_ids / delete_by_conversation / select_max_user_seq） | ✅ |
+| DAO MessageReactionTable 新文件（insert/remove/select_by_message/select_by_messages 幂等） | ✅ |
+| DAO MessagePinTable 新文件（insert/remove/count/list_by_conversation/list_pinned_in 幂等） | ✅ |
+| 错误码 4000-4999 message 段（kMessageNotFound/RecallTimeout/AlreadyRecalled/ContentInvalid） | ✅ |
+| MessageServiceImpl 重写（namespace chatnow::message，15 RPC + 权限直接读 conversation_member） | ✅ |
+| Push notify 强类型化（NotifyMessage 含 RECALLED/REACTION_CHANGED/PIN_CHANGED） | ✅ |
+| Gateway 10 个新 handler + 3 个 handler 切换 + 2 个旧 handler 删除 | ✅ |
+| 旧 `proto/message.proto` 删除 | ✅ |
+| onDBMessage / onESIndexMessage 包名切换 + 真实实现 | ✅ |
+| SeqGen 启动回填（backfill_seq_from_db_） | ✅ |
+| **编译验证** | ❌ 未跑（plan 约束 T1-T18 不跑 build） |
+| **集成验收（启动 + curl）** | ❌ 未跑（依赖编译） |
+
+### 10.2 commit 序列（按时间序）
+
+base：`c819ec2`（cleanup 旧 chatsession/）
+
+```
+e6614c4  proto(message): 删鉴权字段 + 全限定 + cc_generic_services        T1
+5492bc3  proto(message-internal): 全限定 + cc_generic_services            T2
+2de77b9  proto(push-notify): 加 3 NotifyType + cc_generic_services + 全限定 T3
+8ae349c  proto(push-service): bytes notify_payload → NotifyMessage 强类型  T4
+7a8c910  error: 加 4000-4999 message 错误码常量                            T5
+b02aa4a  dao(message): +4 方法                                             T6
+cf2aa6d  dao(user_timeline): +3 方法                                       T7
+546f9b3  dao: 新增 MessageReactionTable                                    T8
+92bdbfe  dao: 新增 MessagePinTable                                         T9
+fca16a8  message: 服务骨架重写（类切换 + Builder + 15 RPC placeholder）    T10
+24a93fb  message: 实现 4 个读取类 RPC                                      T11
+b6a1115  message: 实现 RecallMessage + recalled notify fail-soft           T12
+2663921  message: 实现 Reaction 3 RPC + 仅推 sender 的强类型 notify         T13
+bd41855  message: 实现 Pin 3 RPC + push 强类型 notify                      T14
+a09afb7  message: 实现剩余 4 RPC                                           T15
+```
+
+T16-T18 为当前 session 未提交变更（gateway_server.h / message_server.h / proto/message.proto 删除）。
+
+### 10.3 横切 hotfix
+
+无。全部按 plan 执行，未发现 plan 外缺失依赖。
+
+### 10.4 关键设计选择（执行时固化）
+
+- **权限不走 RPC** — Recall / Pin / Reaction / Delete 的成员校验直接读 `conversation_member` 表（`ConversationMemberTable::select_self`），不走 ConversationService RPC，避免高频路径双跳。
+- **Reaction 仅推消息发送者** — `publish_reaction_notify_` 直接调 `PushService.PushToUser` RPC 推单用户，不走 push_queue 广播。这是因为 reaction 变动只需让消息作者感知。
+- **Recall 双权限** — 消息作者 120s 内 OR 会话 OWNER/ADMIN 随时。DB 层 race-safe：`UPDATE ... SET status=REVOKED WHERE status=NORMAL`，只 NORMAL→REVOKED 成功。
+- **Delete 仅删自己 timeline** — `DeleteMessages` / `ClearConversation` 只删 `user_timeline` 行，不碰 `message` 主表。这是"删自己的收件箱"语义，不是"全局删除"。
+- **Pin 上限 10 条** — OWNER/ADMIN only。`MessagePinTable::insert` 幂等（唯一索引冲突吃异常）。
+- **Reaction 读时聚合** — 不维护 summary 表，`GetReactions` / `fill_reactions_for_messages_` 读 `message_reaction` 行后 GROUP BY emoji 内存聚合。
+- **Notify fail-soft** — 所有 `publish_*_notify_` 方法 MQ 投递失败仅记 ERROR + 入 `push_outbox`，不抛 ServiceError 导致 RPC 失败。
+- **DB→ES 派生拓扑** — `onDBMessage` 在 DB commit 后发布 `ESIndexEvent` 到 `es_index_exchange`；`onESIndexMessage` 消费索引事件写 ES。不是双写。
+- **ODB legacy 命名** — ODB 实体用 `_session_id`（非 `_conversation_id`），DAO 方法参数名用 `cid`，内部查询用 `query::session_id`。改 ODB entity 字段名会触发 DB 列 mapping 断裂，不动。
+- **Content 转换** — `convert_db_message_to_proto_` 根据 `message_type` 枚举把 ODB `Message` 的 flat 字段（content / file_id / file_name / file_size）映射到 proto `Message.Content` oneof（text / image / file / audio）。
+
+### 10.5 已知阻塞
+
+| 阻塞项 | 详情 |
+|---|---|
+| Transmite 服务引用旧 `MsgStorageService_Stub` | `transmite/source/transmite_server.h:105`；Transmite 迁移期解决 |
+| Push 服务引用旧 `MsgStorageService_Stub` + `GetOfflineMsg` | `push/source/push_server.h:303,398`；Push 迁移期解决 |
+| 全量编译 | T1-T18 按 plan 不跑 build；T19 之后统一编译 |
+
+### 10.6 结构性约束（给下一位 Agent）
+
+1. **namespace** — 新代码一律 `chatnow::message`，不要回退到 flat `chatnow`。
+2. **stub 类型** — `chatnow::message::MessageService_Stub` 替代 `MsgStorageService_Stub`。
+3. **proto 路径** — `message/message_service.proto`（非旧 `message.proto`）。
+4. **ODB entity 不改名** — `_session_id` 字段名在 ODB entity 中保留，不要改成 `_conversation_id`（会断映射）。
+5. **push/transmite 旧引用不修** — 属各自迁移期范围，本 spec 不动。
+6. **reaction/pin DAO 幂等** — 依赖 `odb::object_already_persistent` + MySQL 1062 捕获，删改时不要移除。
+7. **HANDLE_RPC 宏** — 所有 handler 统一用 `HANDLE_RPC(cntl, req, rsp, { ... })`，内抛 `ServiceError(code, msg)`；成功自动填 `header->set_success(true)`。
+8. **编译未验证** — 未跑 build，预期有 include 路径 / 链接 / proto 生成等编译问题。

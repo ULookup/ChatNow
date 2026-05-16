@@ -89,10 +89,17 @@ namespace chatnow
 #define QUIT_CHAT_SESSION           "/service/chatsession/quit_chat_session"          //退出聊天会话
 #define MSG_READ_ACK                "/service/chatsession/msg_read_ack"               //更新已读消息ID
 #define GET_MEMBER_ID_LIST          "/service/chatsession/get_member_id_list"         //获取会话成员ID列表
-#define GET_OFFLINE_MSG             "/service/message_storage/get_offline_msg"        //从 timeline 拉取用户的增量消息
-//#define GET_MSG_BY_IDS              "/service/message_storage/get_msg_by_ids"         //通过消息ID获取消息（内部接口）
-//#define DELETE_TIMELINE_MSG         "/service/message_storage/delete_timeline_msg"    //删除用户自己的timeline里的消息
-#define GET_UNREAD_COUNT            "/service/message_storage/get_unread_count"       //帮助会话服务算未读消息数量
+// 新 Message service RPC 路由
+#define MESSAGE_RECALL              "/service/message/recall"
+#define MESSAGE_REACTION_ADD        "/service/message/reaction/add"
+#define MESSAGE_REACTION_REMOVE     "/service/message/reaction/remove"
+#define MESSAGE_REACTION_LIST       "/service/message/reaction/list"
+#define MESSAGE_PIN                 "/service/message/pin"
+#define MESSAGE_UNPIN               "/service/message/unpin"
+#define MESSAGE_LIST_PINNED         "/service/message/list_pinned"
+#define MESSAGE_DELETE              "/service/message/delete"
+#define MESSAGE_CLEAR               "/service/message/clear"
+#define MESSAGE_GET_BY_ID           "/service/message/get_by_id"
  
 class GatewayServer
 {
@@ -151,9 +158,9 @@ public:
         _http_server.Post(CREATE_CHAT_SESSION,          (httplib::Server::Handler)std::bind(&GatewayServer::ChatSessionCreate,         this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_CHAT_SESSION_MEMBER,      (httplib::Server::Handler)std::bind(&GatewayServer::GetChatSessionMember,      this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_PENDING_FRIEND_EVENTS,    (httplib::Server::Handler)std::bind(&GatewayServer::GetPendingFriendEventList, this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_HISTORY,                  (httplib::Server::Handler)std::bind(&GatewayServer::GetHistoryMsg,             this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_RECENT,                   (httplib::Server::Handler)std::bind(&GatewayServer::GetRecentMsg,              this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(SEARCH_HISTORY,               (httplib::Server::Handler)std::bind(&GatewayServer::MsgSearch,                 this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_HISTORY,                  (httplib::Server::Handler)std::bind(&GatewayServer::GetHistory,                this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(GET_RECENT,                   (httplib::Server::Handler)std::bind(&GatewayServer::SyncMessages,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SEARCH_HISTORY,               (httplib::Server::Handler)std::bind(&GatewayServer::SearchMessages,            this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(NEW_MESSAGE,                  (httplib::Server::Handler)std::bind(&GatewayServer::NewMessage,                this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_SINGLE_FILE,              (httplib::Server::Handler)std::bind(&GatewayServer::GetSingleFile,             this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_MULTI_FILE,               (httplib::Server::Handler)std::bind(&GatewayServer::GetMultiFile,              this, std::placeholders::_1, std::placeholders::_2));
@@ -178,10 +185,17 @@ public:
         _http_server.Post(QUIT_CHAT_SESSION,            (httplib::Server::Handler)std::bind(&GatewayServer::QuitChatSession,           this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(MSG_READ_ACK,                 (httplib::Server::Handler)std::bind(&GatewayServer::MsgReadAck,                this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(GET_MEMBER_ID_LIST,           (httplib::Server::Handler)std::bind(&GatewayServer::GetMemberIdList,           this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_OFFLINE_MSG,              (httplib::Server::Handler)std::bind(&GatewayServer::GetOfflineMsg,             this, std::placeholders::_1, std::placeholders::_2));
-        //_http_server.Post(GET_MSG_BY_IDS,               (httplib::Server::Handler)std::bind(&GatewayServer::GetMsgByIDs,               this, std::placeholders::_1, std::placeholders::_2));
-       // _http_server.Post(DELETE_TIMELINE_MSG,          (httplib::Server::Handler)std::bind(&GatewayServer::DeleteTimelineMsg,         this, std::placeholders::_1, std::placeholders::_2));
-        _http_server.Post(GET_UNREAD_COUNT,             (httplib::Server::Handler)std::bind(&GatewayServer::GetUnreadCount,            this, std::placeholders::_1, std::placeholders::_2));
+        // 新 Message service RPC 路由
+        _http_server.Post(MESSAGE_RECALL,               (httplib::Server::Handler)std::bind(&GatewayServer::RecallMessage,             this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_REACTION_ADD,         (httplib::Server::Handler)std::bind(&GatewayServer::AddReaction,               this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_REACTION_REMOVE,      (httplib::Server::Handler)std::bind(&GatewayServer::RemoveReaction,            this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_REACTION_LIST,        (httplib::Server::Handler)std::bind(&GatewayServer::GetReactions,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_PIN,                  (httplib::Server::Handler)std::bind(&GatewayServer::PinMessage,                this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_UNPIN,                (httplib::Server::Handler)std::bind(&GatewayServer::UnpinMessage,              this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_LIST_PINNED,          (httplib::Server::Handler)std::bind(&GatewayServer::ListPinnedMessages,        this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_DELETE,               (httplib::Server::Handler)std::bind(&GatewayServer::DeleteMessages,            this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_CLEAR,                (httplib::Server::Handler)std::bind(&GatewayServer::ClearConversation,         this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(MESSAGE_GET_BY_ID,            (httplib::Server::Handler)std::bind(&GatewayServer::GetMessagesById,           this, std::placeholders::_1, std::placeholders::_2));
 
     }
     /* 启动服务器：阻塞主线程在 HTTP 监听上
@@ -1085,126 +1099,446 @@ private:
         // T15: 旧 _pushNotify(CHAT_SESSION_CREATE_NOTIFY) 在 Push 链路适配新 Conversation 类型后再补回（spec §11.6.3）。
         response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
-    void GetHistoryMsg(const httplib::Request &request, httplib::Response &response) {
+    void GetHistory(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetHistoryMsgReq req;
-        GetHistoryMsgRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        chatnow::message::GetHistoryReq req;
+        chatnow::message::GetHistoryRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取历史消息请求正文反序列化失败");
-            return err_response("获取历史消息请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("GetHistory 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse GetHistoryReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息存储子服务进行业务处理
         auto channel = _mm_channels->choose(_message_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的消息存储子服务节点", req.request_id());
-            return err_response("未找到可提供业务的消息存储子服务节点");
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
         }
-        MsgStorageService_Stub stub(channel.get());
+        chatnow::message::MessageService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetHistoryMsg(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("消息存储子服务调用失败");
+        stub.GetHistory(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
-    void GetRecentMsg(const httplib::Request &request, httplib::Response &response) {
+    void SyncMessages(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetRecentMsgReq req;
-        GetRecentMsgRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        chatnow::message::SyncMessagesReq req;
+        chatnow::message::SyncMessagesRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取最近消息请求正文反序列化失败");
-            return err_response("获取最近消息请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SyncMessages 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SyncMessagesReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息存储子服务进行业务处理
         auto channel = _mm_channels->choose(_message_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的消息存储子服务节点", req.request_id());
-            return err_response("未找到可提供业务的消息存储子服务节点");
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
         }
-        MsgStorageService_Stub stub(channel.get());
+        chatnow::message::MessageService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetRecentMsg(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("消息存储子服务调用失败");
+        stub.SyncMessages(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
-    void MsgSearch(const httplib::Request &request, httplib::Response &response) {
+    void SearchMessages(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        MsgSearchReq req;
-        MsgSearchRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        chatnow::message::SearchMessagesReq req;
+        chatnow::message::SearchMessagesRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("消息搜索请求正文反序列化失败");
-            return err_response("消息搜索请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SearchMessages 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SearchMessagesReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息存储子服务进行业务处理
         auto channel = _mm_channels->choose(_message_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的消息存储子服务节点", req.request_id());
-            return err_response("未找到可提供业务的消息存储子服务节点");
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
         }
-        MsgStorageService_Stub stub(channel.get());
+        chatnow::message::MessageService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.MsgSearch(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 消息存储子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("消息存储子服务调用失败");
+        stub.SearchMessages(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
+
+    void RecallMessage(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::RecallMessageReq req;
+        chatnow::message::RecallMessageRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("RecallMessage 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse RecallMessageReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.RecallMessage(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void AddReaction(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::AddReactionReq req;
+        chatnow::message::AddReactionRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("AddReaction 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse AddReactionReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.AddReaction(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void RemoveReaction(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::RemoveReactionReq req;
+        chatnow::message::RemoveReactionRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("RemoveReaction 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse RemoveReactionReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.RemoveReaction(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void GetReactions(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::GetReactionsReq req;
+        chatnow::message::GetReactionsRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("GetReactions 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse GetReactionsReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.GetReactions(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void PinMessage(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::PinMessageReq req;
+        chatnow::message::PinMessageRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("PinMessage 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse PinMessageReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.PinMessage(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void UnpinMessage(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::UnpinMessageReq req;
+        chatnow::message::UnpinMessageRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("UnpinMessage 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse UnpinMessageReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.UnpinMessage(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void ListPinnedMessages(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::ListPinnedReq req;
+        chatnow::message::ListPinnedRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ListPinnedMessages 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ListPinnedReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.ListPinnedMessages(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void DeleteMessages(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::DeleteMessagesReq req;
+        chatnow::message::DeleteMessagesRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("DeleteMessages 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse DeleteMessagesReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.DeleteMessages(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void ClearConversation(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::ClearConversationReq req;
+        chatnow::message::ClearConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ClearConversation 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ClearConversationReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.ClearConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
+    void GetMessagesById(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        chatnow::message::GetMessagesByIdReq req;
+        chatnow::message::GetMessagesByIdRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &msg) -> void {
+            rsp.mutable_header()->set_success(false);
+            rsp.mutable_header()->set_error_code(code);
+            rsp.mutable_header()->set_error_message(msg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("GetMessagesById 请求正文反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse GetMessagesByIdReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service unavailable");
+        }
+        chatnow::message::MessageService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.GetMessagesById(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            return err_response(::chatnow::error::kSystemUnavailable, "message service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+
     void GetSingleFile(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
         //1. 正文反序列化，提取关键要素：登录会话ID
@@ -2072,86 +2406,6 @@ private:
             return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
         response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
-    }
-    void GetOfflineMsg(const httplib::Request &request, httplib::Response &response) {
-        chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetOfflineMsgReq req;
-        GetOfflineMsgRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
-        };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取离线消息请求正文反序列化失败");
-            return err_response("获取离线消息请求正文反序列化失败");
-        }
-        //2. JWT 鉴权（横切 spec §2.5）
-        chatnow::gateway::AuthInfo _auth;
-        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
-                                                 /*whitelisted=*/false, _auth)) {
-            return;
-        }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_conversation_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
-        }
-        MsgStorageService_Stub stub(channel.get());
-        brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
-        response.set_header("X-Trace-Id", trace_id);
-        stub.GetOfflineMsg(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
-        }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
-    }
-    void GetUnreadCount(const httplib::Request &request, httplib::Response &response) {
-        chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetUnreadCountReq req;
-        GetUnreadCountRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
-        };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取未读消息数请求正文反序列化失败");
-            return err_response("获取未读消息数请求正文反序列化失败");
-        }
-        //2. JWT 鉴权（横切 spec §2.5）
-        chatnow::gateway::AuthInfo _auth;
-        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
-                                                 /*whitelisted=*/false, _auth)) {
-            return;
-        }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_conversation_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
-        }
-        MsgStorageService_Stub stub(channel.get());
-        brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
-        response.set_header("X-Trace-Id", trace_id);
-        stub.GetUnreadCount(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
-        }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
     }
 private:
     std::shared_ptr<::chatnow::auth::JwtCodec> _jwt_codec;

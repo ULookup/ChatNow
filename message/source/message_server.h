@@ -40,6 +40,7 @@
 #include <chrono>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/date_time/gregorian/gregorian.hpp>
 
@@ -444,17 +445,175 @@ public:
         });
     }
 
-    // ====== MQ consumer：T10 占位，T18 替换为真实实现 ======
+    // ====== MQ consumer（T18：真实实现） ======
 
     ConsumeAction onDBMessage(const char *body, size_t sz, bool redelivered) {
-        (void)body; (void)sz; (void)redelivered;
-        LOG_WARN("onDBMessage placeholder; will be replaced in T18");
+        LOG_DEBUG("收到新消息，进行存储处理！redelivered={}", redelivered);
+
+        chatnow::message::internal::InternalMessage internal_msg;
+        if (!internal_msg.ParseFromArray(body, sz)) {
+            LOG_ERROR("DB-Consumer: 反序列化 InternalMessage 失败");
+            return ConsumeAction::NackDiscard;
+        }
+
+        const auto &msg_pb = internal_msg.message();
+        const unsigned long mid = static_cast<unsigned long>(msg_pb.message_id());
+        const unsigned long session_seq = static_cast<unsigned long>(msg_pb.seq_id());
+        const std::string &client_msg_id = msg_pb.client_msg_id();
+
+        // 提取内容：根据 Content oneof 取文本 / file_id
+        std::string file_id, file_name, content_text;
+        int64_t file_size = 0;
+        auto msg_type = msg_pb.message_type();
+        if (msg_pb.has_content()) {
+            const auto &ct = msg_pb.content();
+            switch (ct.type()) {
+                case chatnow::message::TEXT:
+                    content_text = ct.text().text();
+                    break;
+                case chatnow::message::IMAGE:
+                    file_id = ct.image().file_id();
+                    break;
+                case chatnow::message::FILE:
+                    file_id = ct.file().file_id();
+                    file_name = ct.file().file_name();
+                    file_size = ct.file().file_size();
+                    break;
+                case chatnow::message::AUDIO:
+                    file_id = ct.audio().file_id();
+                    break;
+                default:
+                    LOG_ERROR("DB-Consumer: 未知消息类型 mid={}", mid);
+                    return ConsumeAction::NackDiscard;
+            }
+        }
+
+        if (msg_type != chatnow::message::TEXT && file_id.empty()) {
+            LOG_ERROR("DB-Consumer: 非文本消息缺少 file_id mid={}", mid);
+            return ConsumeAction::NackDiscard;
+        }
+
+        // 组装 Message ODB 实体
+        namespace pt = boost::posix_time;
+        pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
+        Message msg(mid,
+                    msg_pb.conversation_id(),
+                    msg_pb.sender_id(),
+                    static_cast<MessageType>(static_cast<int>(msg_type)),
+                    epoch + boost::posix_time::milliseconds(msg_pb.created_at_ms()),
+                    MessageStatus::NORMAL);
+        msg.seq_id(session_seq);
+        msg.content(content_text);
+        msg.file_id(file_id);
+        msg.file_name(file_name);
+        msg.file_size(file_size);
+        if (!client_msg_id.empty()) msg.client_msg_id(client_msg_id);
+
+        // 写扩散：组装 user_timeline 列表（大群跳过）
+        std::vector<UserTimeline> timeline_list;
+        if (!internal_msg.is_large_group()) {
+            std::unordered_map<std::string, unsigned long> uid2seq;
+            for (const auto &p : internal_msg.user_seqs())
+                uid2seq[p.user_id()] = p.user_seq();
+
+            timeline_list.reserve(internal_msg.member_id_list_size());
+            auto msg_pt = epoch + pt::milliseconds(msg_pb.created_at_ms());
+            for (const auto &member : internal_msg.member_id_list()) {
+                UserTimeline tl;
+                tl.user_id(member);
+                tl.session_id(msg_pb.conversation_id());
+                tl.message_id(mid);
+                tl.message_time(msg_pt);
+                tl.session_seq(session_seq);
+                auto it = uid2seq.find(member);
+                if (it != uid2seq.end()) tl.user_seq(it->second);
+                timeline_list.push_back(std::move(tl));
+            }
+        }
+
+        // 落库：先消息后 timeline（各自事务感知；时序依赖而非强原子）
+        try {
+            _mysql_msg->insert(msg);
+        } catch (const odb::object_already_persistent &) {
+            LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
+            return ConsumeAction::Ack;
+        } catch (std::exception &e) {
+            LOG_ERROR("DB-Consumer: 消息落库失败 mid={}: {}", mid, e.what());
+            if (redelivered) return ConsumeAction::NackDiscard;
+            return ConsumeAction::NackRequeue;
+        }
+        if (!timeline_list.empty()) {
+            try {
+                _mysql_user_timeline->insert(timeline_list);
+            } catch (std::exception &e) {
+                LOG_ERROR("DB-Consumer: timeline 落库失败 mid={} n={}: {}", mid,
+                          timeline_list.size(), e.what());
+                if (redelivered) return ConsumeAction::NackDiscard;
+                return ConsumeAction::NackRequeue;
+            }
+        }
+
+        LOG_INFO("DB-Consumer: 存储成功 mid={} cid={} seq={}", mid,
+                 msg_pb.conversation_id(), session_seq);
+
+        // 发布 ESIndexEvent（仅文本消息入 ES；fail-soft）
+        if (msg_type == chatnow::message::TEXT && !content_text.empty() && _es_publisher) {
+            chatnow::message::internal::ESIndexEvent es_event;
+            es_event.set_message_id(msg_pb.message_id());
+            es_event.set_conversation_id(msg_pb.conversation_id());
+            es_event.set_sender_id(msg_pb.sender_id());
+            es_event.set_content_text(content_text);
+            es_event.set_created_at_ms(msg_pb.created_at_ms());
+            es_event.set_seq_id(msg_pb.seq_id());
+            es_event.set_message_type(msg_pb.message_type());
+
+            std::string es_payload = es_event.SerializeAsString();
+            try {
+                _es_publisher->publish_confirm(es_payload, {},
+                    [es_payload, outbox = _es_outbox](PublishStatus st, const std::string &err) {
+                        if (st != PublishStatus::Acked && outbox)
+                            outbox->enqueue(es_payload, static_cast<long long>(time(nullptr)));
+                    });
+            } catch (std::exception &e) {
+                LOG_ERROR("DB-Consumer: 发布 ESIndexEvent 异常 mid={}: {}", mid, e.what());
+                if (_es_outbox)
+                    _es_outbox->enqueue(es_payload, static_cast<long long>(time(nullptr)));
+            }
+        }
+
         return ConsumeAction::Ack;
     }
 
     ConsumeAction onESIndexMessage(const char *body, size_t sz, bool redelivered) {
-        (void)body; (void)sz; (void)redelivered;
-        LOG_WARN("onESIndexMessage placeholder; will be replaced in T18");
+        chatnow::message::internal::ESIndexEvent es_event;
+        if (!es_event.ParseFromArray(body, sz)) {
+            LOG_ERROR("ES-Index-Consumer: 反序列化 ESIndexEvent 失败");
+            return ConsumeAction::NackDiscard;
+        }
+        if (es_event.message_type() != chatnow::message::TEXT) {
+            LOG_WARN("ES-Index-Consumer: 收到非文本消息 mid={}", es_event.message_id());
+            return ConsumeAction::Ack;
+        }
+
+        long create_time_sec = static_cast<long>(es_event.created_at_ms() / 1000);
+        bool ret = _es_msg->appendData(
+            es_event.sender_id(),
+            static_cast<unsigned long>(es_event.message_id()),
+            static_cast<unsigned long>(es_event.seq_id()),
+            create_time_sec,
+            es_event.conversation_id(),
+            es_event.content_text());
+
+        if (!ret) {
+            if (redelivered) {
+                LOG_ERROR("ES-Index-Consumer: 二次失败转 DLX mid={}", es_event.message_id());
+                return ConsumeAction::NackDiscard;
+            }
+            LOG_ERROR("ES-Index-Consumer: 写入 ES 失败（首次），重投 mid={}", es_event.message_id());
+            return ConsumeAction::NackRequeue;
+        }
+
+        LOG_DEBUG("ES-Index-Consumer: 索引成功 mid={}", es_event.message_id());
         return ConsumeAction::Ack;
     }
 
