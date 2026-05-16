@@ -65,6 +65,9 @@ public:
     // —— 18 个 RPC 占位实现（T10–T14 逐步替换） ——
     // T10 已替换：ListConversations / GetConversation / ListMembers /
     //              SearchConversations / GetMemberIds
+    // T11 已替换：CreateConversation / UpdateConversation /
+    //              DismissConversation / QuitConversation
+    // T12 已替换：AddMembers / RemoveMembers / TransferOwner / ChangeMemberRole
     #define _PLACEHOLDER_RPC(Method, Req, Rsp) \
         void Method(::google::protobuf::RpcController* base_cntl, \
                     const ::chatnow::conversation::Req* req, \
@@ -78,10 +81,6 @@ public:
                 ::chatnow::error::kSystemInternalError); \
             rsp->mutable_header()->set_error_message("not implemented"); \
         }
-    _PLACEHOLDER_RPC(AddMembers,         AddMembersReq,         AddMembersRsp)
-    _PLACEHOLDER_RPC(RemoveMembers,      RemoveMembersReq,      RemoveMembersRsp)
-    _PLACEHOLDER_RPC(TransferOwner,      TransferOwnerReq,      TransferOwnerRsp)
-    _PLACEHOLDER_RPC(ChangeMemberRole,   ChangeMemberRoleReq,   ChangeMemberRoleRsp)
     _PLACEHOLDER_RPC(SetMute,            SetMuteReq,            SetMuteRsp)
     _PLACEHOLDER_RPC(SetPin,             SetPinReq,             SetPinRsp)
     _PLACEHOLDER_RPC(SetVisible,         SetVisibleReq,         SetVisibleRsp)
@@ -263,6 +262,142 @@ public:
             invalidate_members_cache_(req->conversation_id());
             // set_quit 内部已经维护 member_count（_update_session_member_count(-1)），
             // 不需要再 _mysql_conv->update。
+        });
+    }
+
+    // —— 4 个成员管理 RPC（T12） ——
+
+    void AddMembers(::google::protobuf::RpcController* base_cntl,
+                    const ::chatnow::conversation::AddMembersReq* req,
+                    ::chatnow::conversation::AddMembersRsp* rsp,
+                    ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto c = _mysql_conv->select(req->conversation_id());
+            if (!c)
+                throw ServiceError(::chatnow::error::kConversationNotFound, "not found");
+            if (c->conversation_type() != ::chatnow::ConversationType::GROUP)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "only GROUP allows AddMembers");
+
+            auto role = role_of_(req->conversation_id(), auth.user_id);
+            if (role != ::chatnow::MemberRole::OWNER && role != ::chatnow::MemberRole::ADMIN)
+                throw ServiceError(::chatnow::error::kConversationNoPermission,
+                                   "owner/admin only");
+
+            constexpr int kGroupMemberLimit = 500;
+            // 注意：实际新增数无法精确预估（已是成员/已 quit/全新），
+            // 这里用最严格的上界估计：当前 member_count + 全部待加都视为新成员
+            if (c->member_count() + req->member_ids_size() > kGroupMemberLimit)
+                throw ServiceError(::chatnow::error::kConversationMemberLimit, "member limit");
+
+            auto now = boost::posix_time::microsec_clock::universal_time();
+            for (int i = 0; i < req->member_ids_size(); ++i) {
+                const auto& uid = req->member_ids(i);
+                auto m = _mysql_member->select_self(req->conversation_id(), uid);
+                if (m && !m->is_quit()) continue;     // 已是活跃成员，跳过
+                if (m && m->is_quit()) {
+                    // 二次入群
+                    _mysql_member->rejoin(req->conversation_id(), uid,
+                                          ::chatnow::MemberRole::NORMAL,
+                                          auth.user_id,
+                                          ::chatnow::JoinSource::ADMIN_ADD);
+                } else {
+                    // 全新入群
+                    ::chatnow::ConversationMember row(req->conversation_id(), uid,
+                        /*muted=*/false, /*visible=*/true,
+                        ::chatnow::MemberRole::NORMAL, now);
+                    row.inviter_id(auth.user_id);
+                    row.join_source(::chatnow::JoinSource::ADMIN_ADD);
+                    _mysql_member->append(row);
+                }
+            }
+            invalidate_members_cache_(req->conversation_id());
+        });
+    }
+
+    void RemoveMembers(::google::protobuf::RpcController* base_cntl,
+                       const ::chatnow::conversation::RemoveMembersReq* req,
+                       ::chatnow::conversation::RemoveMembersRsp* rsp,
+                       ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto role = role_of_(req->conversation_id(), auth.user_id);
+            if (role != ::chatnow::MemberRole::OWNER && role != ::chatnow::MemberRole::ADMIN)
+                throw ServiceError(::chatnow::error::kConversationNoPermission,
+                                   "owner/admin only");
+            int removed = 0;
+            for (int i = 0; i < req->member_ids_size(); ++i) {
+                const auto& uid = req->member_ids(i);
+                if (uid == auth.user_id)
+                    throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                       "cannot remove self");
+                auto target = _mysql_member->select_self(req->conversation_id(), uid);
+                if (!target || target->is_quit()) continue;
+                if (target->role() == ::chatnow::MemberRole::OWNER)
+                    throw ServiceError(::chatnow::error::kConversationNoPermission,
+                                       "owner cannot be removed");
+                _mysql_member->set_quit(req->conversation_id(), uid);
+                ++removed;
+            }
+            if (removed > 0) invalidate_members_cache_(req->conversation_id());
+        });
+    }
+
+    void TransferOwner(::google::protobuf::RpcController* base_cntl,
+                       const ::chatnow::conversation::TransferOwnerReq* req,
+                       ::chatnow::conversation::TransferOwnerRsp* rsp,
+                       ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            if (role_of_(req->conversation_id(), auth.user_id) != ::chatnow::MemberRole::OWNER)
+                throw ServiceError(::chatnow::error::kConversationNoPermission, "owner only");
+            auto target = _mysql_member->select_self(req->conversation_id(), req->new_owner_id());
+            if (!target || target->is_quit())
+                throw ServiceError(::chatnow::error::kConversationNotMember,
+                                   "new owner must be a member");
+            _mysql_member->update_role(req->conversation_id(), req->new_owner_id(),
+                                       ::chatnow::MemberRole::OWNER);
+            _mysql_member->update_role(req->conversation_id(), auth.user_id,
+                                       ::chatnow::MemberRole::ADMIN);
+            auto c = _mysql_conv->select(req->conversation_id());
+            if (c) { c->owner_id(req->new_owner_id()); _mysql_conv->update(c); }
+        });
+    }
+
+    void ChangeMemberRole(::google::protobuf::RpcController* base_cntl,
+                          const ::chatnow::conversation::ChangeMemberRoleReq* req,
+                          ::chatnow::conversation::ChangeMemberRoleRsp* rsp,
+                          ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            if (role_of_(req->conversation_id(), auth.user_id) != ::chatnow::MemberRole::OWNER)
+                throw ServiceError(::chatnow::error::kConversationNoPermission, "owner only");
+            using ProtoRole = ::chatnow::conversation::MemberRole;
+            if (req->role() == ProtoRole::OWNER)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "use TransferOwner to assign OWNER");
+            auto target = _mysql_member->select_self(req->conversation_id(), req->target_user_id());
+            if (!target || target->is_quit())
+                throw ServiceError(::chatnow::error::kConversationNotMember, "target not in conversation");
+            if (target->role() == ::chatnow::MemberRole::OWNER)
+                throw ServiceError(::chatnow::error::kConversationNoPermission,
+                                   "cannot change OWNER's role");
+            // proto MemberRole: MEMBER=0, ADMIN=1, OWNER=2
+            // ODB MemberRole:    NORMAL=0, ADMIN=1, OWNER=2
+            // 数值对应，但 proto MEMBER 与 ODB NORMAL 名字不同
+            ::chatnow::MemberRole target_role =
+                (req->role() == ProtoRole::ADMIN) ? ::chatnow::MemberRole::ADMIN
+                                                  : ::chatnow::MemberRole::NORMAL;
+            _mysql_member->update_role(req->conversation_id(), req->target_user_id(), target_role);
         });
     }
 
