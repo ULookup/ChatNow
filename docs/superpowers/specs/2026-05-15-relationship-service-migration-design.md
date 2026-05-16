@@ -279,3 +279,113 @@ private:
 - Gateway HTTP 路径从 `/service/friend/*` 改为 `/service/relationship/*`（与其它服务路径统一切换时一起做）
 - `HandleFriendRequest` 申请被拒后冷静期错误码细化（若产品需要区分"已是好友"/"已 PENDING"/"冷静期内"）
 - `BlockUser` 是否扩展到屏蔽消息推送 / 拦截会话邀请等更"微信式"的语义（当前明确不做）
+
+---
+
+## 11. 实施记录（2026-05-15 / 2026-05-16）
+
+> **给下一位接手 Agent 的速读区。** 本节记录代码已完成到什么程度、什么没验证、什么阻塞了哪一步、哪些约束必须遵守。
+
+### 11.1 状态总览
+
+| 类别 | 状态 |
+|---|---|
+| 全部 9 个 RPC 代码 | ✅ 已落（写在 `relationship/source/relationship_server.h`） |
+| user_block 表 + DAO | ✅ 已落 |
+| Gateway 6 handler 切换 + 服务名 rename | ✅ 已落 |
+| 旧 `friend/` 目录 + `proto/friend.proto` | ✅ 已删 |
+| docker-compose | ✅ 已 rename `friend_server` → `relationship_server` |
+| **`relationship_server` 编译验证** | ❌ **未做**（用户在 T4 后明确要求"不用编译验证，只完成代码"） |
+| **集成验收（启动 + curl）** | ❌ **未做**（依赖编译通过，先不跑） |
+| spec §7 验收清单 | 7/10 已通过（编译/启动相关 3 项待补） |
+
+### 11.2 commit 序列（按时间序）
+
+base：`2b38e89`（docs commit，含本 spec + plan + README 修订）
+
+```
+628bb40  proto(relationship): 删除业务体鉴权字段（user_id/session_id），event_id 改非 optional   T1
+3f0620c  odb: 新增 user_block 表（单向拉黑）                                                     T2
+e8f3a0e  dao: 新增 UserBlockTable，覆盖拉黑场景的 6 个查询/写入接口                              T3
+53fb592  infra(transmite): 删除已不存在的 test client target                                     hotfix
+c64c5bf  fix(test): test_auth_context 用 in-place 填充替代 return-by-value                       hotfix
+e4ff9d3  test(user_block): 简化占位文件注释（不再宣称做签名验证）                                 T3 nit
+693d500  relationship: 新建服务目录骨架 + Server/Builder/main，对齐 Identity 模式                T4
+c0b6896  proto(relationship): 加 option cc_generic_services = true                               T1 漏补
+9f102bd  fix(etcd): Registry 析构调用 leaserevoke（etcd-cpp-api 实际方法名）                     hotfix
+54aaace  relationship: 实现 4 个读取类 RPC（ListFriends/SearchFriends/ListPending/ListBlocked）  T5
+115249d  relationship: 实现写入类 RPC（SendFriend/Remove/Block/Unblock）+ 错误码补全              T6
+724da46  relationship: 实现 HandleFriendRequest（同意分支调 Conversation.CreateConversation）   T7
+ae72c7d  gateway: 6 个 friend handler 切到 RelationshipService 新 stub + 服务名重命名            T8
+2a3435e  cleanup: 删除旧 friend/ 目录 + proto/friend.proto + 旧配置                              T9
+```
+
+### 11.3 三个横切 hotfix 的来由
+
+不是本 spec 范围，但不修就阻塞 T4 build path，**已分别独立 commit**：
+
+1. **`53fb592`** — `transmite/CMakeLists.txt` 引用了 commit `55decee` 删除目录后已不存在的 `test/transmite_client.cc` / `trans_user_client.cc`，导致顶层 `cmake ..` 配置阶段就失败。删除两个死 `add_executable` block。
+2. **`c64c5bf`** — `common/test/test_auth_context.cc` 的 helper 函数 `make_cntl()` 按值返回 `brpc::Controller`，但 `Controller` 持有 `unique_ptr` 成员、不可拷贝/移动，触发 deleted ctor 编译错。改为 `fill_cntl(brpc::Controller&, ...)` in-place 填充。
+3. **`9f102bd`** — `common/infra/etcd.hpp:50` 的 `_client->lease_revoke(_lease_id)` 在 etcd-cpp-api 中并不存在，正确方法名是 `leaserevoke`（无下划线）。所有服务的 Registry 析构 TU 都被这个错误名阻塞编译。
+
+### 11.4 关键设计选择（已被代码固化）
+
+- **proto 业务体不带 `user_id`/`session_id`** —— 与横切 spec §2.8 一致，user_id 走 brpc HTTP metadata（`x-user-id` 等）；服务端 handler 一律 `auto auth = extract_auth(cntl);`，宏 `HANDLE_RPC` 已封好。
+- **HandleFriendRequest fail-soft** —— 同意分支顺序：(1) `friend_apply.update_status(ACCEPTED)` →(2) `relation.insert(uid, pid)` →(3) 调 `ConversationService.CreateConversation`。第 (3) 步任何失败（channel 不可达 / brpc 失败 / 业务 header.success=false）都只记 ERROR + `new_conversation_id` 留空，**不抛 ServiceError**，保持 header.success=true。理由见 spec §5.2。
+- **`UserBlockTable` 单向** —— 一次 `BlockUser` 只写一行 `(blocker, blocked)`；`SearchFriends` 用 `blocked_or_blocking(uid)` 双向集合做 ES 排除；`SendFriendRequest` 只判 `is_blocked(pid, uid)`（对端拉黑了我）。`RemoveFriend` 不动 `user_block`。
+- **Gateway 鉴权 helper 升级** —— 6 个 friend handler 全部改用 `apply_auth_to_brpc(request, cntl, _auth)`（与 Identity handler 同款），不再用旧的 `gateway_setup_trace`。错误响应改写 `header.error_code` + `header.error_message`，不再用 `set_success/set_errmsg`。
+
+### 11.5 ⚠️ 未完成项 / 已知阻塞
+
+#### 11.5.1 编译阻塞依赖：Conversation 服务
+
+- `relationship/CMakeLists.txt` 的 `proto_files` 列了 `conversation/conversation_service.proto`（T7 调 `CreateConversation` 必须）。
+- 但 `proto/conversation/conversation_service.proto` 当前**未做全限定**（直接写 `ResponseHeader` / `PageRequest` / `PageResponse` / `UserInfo` / `MessagePreview`，但这些定义在 `chatnow.common` / `chatnow.message` 包，protoc 找不到）。
+- 同时它**也缺 `option cc_generic_services = true;`**（与本服务 T1 漏补类似）。
+- **用户明确指示**：不为此修 conversation_service.proto。**等 Conversation 服务自己迁移完成后整体编译。**
+
+#### 11.5.2 spec §7 验收清单未跑的 3 条
+
+- 第 1 条：`relationship_server` 启动 + 注册 etcd —— 需要先编译通过
+- 第 9 条：spdlog 结构化输出验证 —— 同上
+- 第 10 条：`build/` 不再生成 `friend_server` target —— 同上
+
+#### 11.5.3 集成测试（plan T10）
+
+按用户指示跳过。当 Conversation 服务迁移完，重新整体 cmake build，再按 plan §T10 跑：
+
+- ListFriends 空 / 有 1 个好友
+- SendFriendRequest → ListPendingRequests → HandleFriendRequest(agree=true) → ListFriends 含对方
+- BlockUser → SendFriendRequest 返回 `kRelationshipBlocked` (2003)
+- UnblockUser 恢复
+- ListBlockedUsers 分页
+
+### 11.6 给下一位 Agent 的接手清单
+
+按优先级：
+
+1. **[最优先] 等 Conversation 服务迁移落地后做整体编译**
+   - 验证 `cmake --build . --target relationship_server` 编译通过
+   - 验证 `cmake --build . --target gateway_server` 编译通过
+   - 任何编译错误：先看 `relationship/source/relationship_server.h` / `gateway/source/gateway_server.h` 中本次新写的代码与生成 pb.h 的字段名对齐情况（特别是 `chatnow::conversation::Conversation` 内部字段名 `conversation_id`，已假设按现 proto 定义）
+
+2. **[第二优先] 启动 + 集成验收**
+   - 按 plan T10 顺序起 etcd / mysql / es，再起 `relationship_server` + `user_server`
+   - 跑 plan T10 列出的 5 个用例
+
+3. **[已知 nit，可选]**
+   - `gateway/source/gateway_server.h` 大约 1003 / 1043 / 1083 行还有 3 个 `ChatSessionService_Stub` 调用错误地用了 `_relationship_service_name`（rename 时一并改名了，但该 channel 选错）。这是**前置已存在的 bug**（迁移前就误写成 `_friend_service_name`），不是本次引入。本次只是把名字 rename 了，没修语义。Conversation 服务迁移时会被修。
+   - `common/test/test_mysql_user_block_compile.cc` 是占位 test，不连真库；DAO 的真实行为验证留给 T10 集成测试。
+
+4. **[绝对不要做]**
+   - 不要为了让编译过去就修改 `proto/conversation/conversation_service.proto`（用户已明确：等 Conversation 团队自己迁）
+   - 不要把 `.vscode/` / `build/` / `third_party/src/` 加进 git（之前 `git add -A` 误带，已用 reset --soft 撤销）
+   - 不要恢复 `friend/` 目录的任何文件
+   - 不要在 README 里再加 P1/P2/B3 这种内部 refactor 编号（用户明确反对，README 是项目架构介绍）
+
+### 11.7 结构性约束（用户在本次会话明确表态）
+
+- **一表一 DAO 文件**（`mysql_user_block.hpp` 单独一个文件，不与 friend_apply / relation 合并）
+- **README.md 是项目架构介绍**，不放 refactor 阶段编号、迁移进度、内部 milestone 标识
+- **本次只动 Relationship 迁移**，不动其它服务（即使发现其它服务有 proto 不全限定 / 缺 option 等问题，记录在文档里、留给那个服务自己的迁移）
+- **不要编译验证**（此约束在 T4 后下达，本次工作 T5-T9 均未跑 build）
