@@ -107,7 +107,7 @@ public:
                 const std::string &user_service_name,
                 const std::string &transmite_service_name,
                 const std::string &message_service_name,
-                const std::string &friend_service_name,
+                const std::string &relationship_service_name,
                 const std::string &chatsession_service_name,
                 const std::string &push_service_name = "/service/push_service")
         : _jwt_codec(jwt_codec),
@@ -119,7 +119,7 @@ public:
         _user_service_name(user_service_name),
         _transmite_service_name(transmite_service_name),
         _message_service_name(message_service_name),
-        _friend_service_name(friend_service_name),
+        _relationship_service_name(relationship_service_name),
         _chatsession_service_name(chatsession_service_name),
         _push_service_name(push_service_name),
         _http_port(http_port)
@@ -665,43 +665,39 @@ private:
     }
     void GetFriendList(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 取出http请求正文，将正文进行反序列化
-        GetFriendListReq req;
-        GetFriendListRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::relationship::ListFriendsReq req;
+        ::chatnow::relationship::ListFriendsRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取好友列表请求正文反序列化失败");
-            return err_response("获取好友列表请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ListFriendsReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ListFriendsReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
-            return;  // 401 已写
+            return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_relationship_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 relationship 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service unavailable");
         }
-        FriendService_Stub stub(channel.get());
+        ::chatnow::relationship::RelationshipService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetFriendList(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.ListFriends(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} ListFriends 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service rpc failed");
         }
-        //4. 得到好友子服务的响应后，将响应进行序列化作为http响应正文
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
 
     std::shared_ptr<GetUserInfoRsp> _GetUserInfo(const std::string &rid, const std::string &uid) {
@@ -734,110 +730,99 @@ private:
 
     void FriendAdd(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        // 好友申请的业务处理中，好友子服务只是在数据库创建了申请事件
-        // 网关需要做的事件：当好友子服务将业务处理完毕后，如果处理成功 -- 需要通知被申请方
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        FriendAddReq req;
-        FriendAddRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::relationship::SendFriendReq req;
+        ::chatnow::relationship::SendFriendRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("申请好友请求正文反序列化失败");
-            return err_response("申请好友请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SendFriendReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SendFriendReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_relationship_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 relationship 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service unavailable");
         }
-        FriendService_Stub stub(channel.get());
+        ::chatnow::relationship::RelationshipService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.FriendAdd(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.SendFriendRequest(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SendFriendRequest 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service rpc failed");
         }
-        //4. 业务处理成功 → 向被申请人推送 FRIEND_ADD_APPLY_NOTIFY（通过 Push 服务，多实例可达）
-        if(rsp.success()) {
-            auto user_rsp = _GetUserInfo(req.request_id(), *uid);
-            if(!user_rsp) {
-                LOG_ERROR("请求ID - {} 获取当前客户端用户信息失败", req.request_id());
-                return err_response("获取当前客户端用户信息失败");
+        // 业务成功 → 向被申请人推送 FRIEND_ADD_APPLY_NOTIFY
+        if (rsp.header().success()) {
+            auto user_rsp = _GetUserInfo(req.request_id(), _auth.user_id);
+            if (!user_rsp) {
+                LOG_ERROR("rid={} 获取当前客户端用户信息失败", req.request_id());
+                return err_response(::chatnow::error::kSystemInternalError, "get user info failed");
             }
             NotifyMessage notify;
             notify.set_notify_type(NotifyType::FRIEND_ADD_APPLY_NOTIFY);
             notify.mutable_friend_add_apply()->mutable_user_info()->CopyFrom(user_rsp->user_info());
             _pushNotify(req.respondent_id(), notify, req.request_id());
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void FriendAddProcess(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //好友申请处理
-        //1. 反序列化请求正文，提取要素：登录会话ID，处理结果，申请人
-        FriendAddProcessReq req;
-        FriendAddProcessRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::relationship::HandleFriendReq req;
+        ::chatnow::relationship::HandleFriendRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("好友申请处理请求正文反序列化失败");
-            return err_response("好友申请处理请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("HandleFriendReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse HandleFriendReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_relationship_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 relationship 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service unavailable");
         }
-        FriendService_Stub stub(channel.get());
+        ::chatnow::relationship::RelationshipService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.FriendAddProcess(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.HandleFriendRequest(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} HandleFriendRequest 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service rpc failed");
         }
 
-
-        if(rsp.success()) {
-            auto process_user_rsp = _GetUserInfo(req.request_id(), *uid);
-            if(!process_user_rsp) {
-                LOG_ERROR("请求ID - {} 获取用户信息失败", req.request_id());
-                return err_response("获取用户信息失败");
+        if (rsp.header().success()) {
+            auto process_user_rsp = _GetUserInfo(req.request_id(), _auth.user_id);
+            if (!process_user_rsp) {
+                LOG_ERROR("rid={} 获取处理人信息失败", req.request_id());
+                return err_response(::chatnow::error::kSystemInternalError, "get user info failed");
             }
             auto apply_user_rsp = _GetUserInfo(req.request_id(), req.apply_user_id());
-            if(!apply_user_rsp) {
-                LOG_ERROR("请求ID - {} 获取用户信息失败", req.request_id());
-                return err_response("获取用户信息失败");
+            if (!apply_user_rsp) {
+                LOG_ERROR("rid={} 获取申请人信息失败", req.request_id());
+                return err_response(::chatnow::error::kSystemInternalError, "get user info failed");
             }
-            //4. 将处理结果给申请人推送（无条件，Push 服务负责离线兜底）
+            // 4. 将处理结果给申请人推送（无条件，Push 服务负责离线兜底）
             {
                 NotifyMessage notify;
                 notify.set_notify_type(NotifyType::FRIEND_ADD_PROCESS_NOTIFY);
@@ -846,158 +831,146 @@ private:
                 process_result->set_agree(req.agree());
                 _pushNotify(req.apply_user_id(), notify, req.request_id());
             }
-            //5. 若同意 → 双向推送会话创建通知
-            if(req.agree()) {
-                // 5.1 给申请人：会话信息为处理人信息
+            // 5. 若同意 → 双向推送会话创建通知
+            if (req.agree() && rsp.has_new_conversation_id()) {
+                const std::string& cid = rsp.new_conversation_id();
+                // 5.1 给申请人：会话名 / 头像 = 处理人信息
                 NotifyMessage notify;
                 notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
                 auto chat_session = notify.mutable_new_chat_session_info();
-                chat_session->mutable_chat_session_info()->set_single_chat_friend_id(*uid);
-                chat_session->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
+                chat_session->mutable_chat_session_info()->set_single_chat_friend_id(_auth.user_id);
+                chat_session->mutable_chat_session_info()->set_chat_session_id(cid);
                 chat_session->mutable_chat_session_info()->set_chat_session_name(process_user_rsp->user_info().nickname());
                 chat_session->mutable_chat_session_info()->set_avatar(process_user_rsp->user_info().avatar());
                 _pushNotify(req.apply_user_id(), notify, req.request_id());
 
-                // 5.2 给处理人：会话信息为申请人信息
+                // 5.2 给处理人：会话名 / 头像 = 申请人信息
                 NotifyMessage notify2;
                 notify2.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
                 auto chat_session2 = notify2.mutable_new_chat_session_info();
                 chat_session2->mutable_chat_session_info()->set_single_chat_friend_id(req.apply_user_id());
-                chat_session2->mutable_chat_session_info()->set_chat_session_id(rsp.new_session_id());
+                chat_session2->mutable_chat_session_info()->set_chat_session_id(cid);
                 chat_session2->mutable_chat_session_info()->set_chat_session_name(apply_user_rsp->user_info().nickname());
                 chat_session2->mutable_chat_session_info()->set_avatar(apply_user_rsp->user_info().avatar());
-                _pushNotify(*uid, notify2, req.request_id());
+                _pushNotify(_auth.user_id, notify2, req.request_id());
             }
         }
-        //6. 对客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void FriendRemove(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        FriendRemoveReq req;
-        FriendRemoveRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::relationship::RemoveFriendReq req;
+        ::chatnow::relationship::RemoveFriendRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("删除好友请求正文反序列化失败");
-            return err_response("删除好友请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("RemoveFriendReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse RemoveFriendReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_relationship_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 relationship 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service unavailable");
         }
-        FriendService_Stub stub(channel.get());
+        ::chatnow::relationship::RelationshipService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.FriendRemove(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.RemoveFriend(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} RemoveFriend 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service rpc failed");
         }
-        //4. 业务成功 → 向被删除人推送 FRIEND_REMOVE_NOTIFY（多实例可达）
-        if(rsp.success()) {
+        // 业务成功 → 向被删除人推送 FRIEND_REMOVE_NOTIFY
+        if (rsp.header().success()) {
             NotifyMessage notify;
             notify.set_notify_type(NotifyType::FRIEND_REMOVE_NOTIFY);
-            notify.mutable_friend_remove()->set_user_id(*uid);
+            notify.mutable_friend_remove()->set_user_id(_auth.user_id);
             _pushNotify(req.peer_id(), notify, req.request_id());
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void FriendSearch(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        FriendSearchReq req;
-        FriendSearchRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::relationship::SearchFriendsReq req;
+        ::chatnow::relationship::SearchFriendsRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("用户搜索请求正文反序列化失败");
-            return err_response("用户搜索请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SearchFriendsReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SearchFriendsReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_relationship_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 relationship 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service unavailable");
         }
-        FriendService_Stub stub(channel.get());
+        ::chatnow::relationship::RelationshipService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.FriendSearch(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.SearchFriends(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SearchFriends 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void GetPendingFriendEventList(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetPendingFriendEventListReq req;
-        GetPendingFriendEventListRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::relationship::ListPendingReq req;
+        ::chatnow::relationship::ListPendingRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取待处理好友申请请求正文反序列化失败");
-            return err_response("获取待处理好友申请请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ListPendingReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ListPendingReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_relationship_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 relationship 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service unavailable");
         }
-        FriendService_Stub stub(channel.get());
+        ::chatnow::relationship::RelationshipService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetPendingFriendEventList(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.ListPendingRequests(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} ListPendingRequests 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "relationship service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void GetChatSessionList(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
@@ -1022,7 +995,7 @@ private:
         }
         req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
+        auto channel = _mm_channels->choose(_relationship_service_name);
         if(!channel) {
             LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
             return err_response("未找到可提供业务的好友子服务节点");
@@ -1062,7 +1035,7 @@ private:
         }
         req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
+        auto channel = _mm_channels->choose(_relationship_service_name);
         if(!channel) {
             LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
             return err_response("未找到可提供业务的好友子服务节点");
@@ -1102,7 +1075,7 @@ private:
         }
         req.set_user_id(_auth.user_id);
         //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_friend_service_name);
+        auto channel = _mm_channels->choose(_relationship_service_name);
         if(!channel) {
             LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
             return err_response("未找到可提供业务的好友子服务节点");
@@ -2193,7 +2166,7 @@ private:
     std::string _user_service_name;
     std::string _transmite_service_name;
     std::string _message_service_name;
-    std::string _friend_service_name;
+    std::string _relationship_service_name;
     std::string _chatsession_service_name;
     std::string _push_service_name;
     ServiceManager::ptr _mm_channels;
@@ -2232,7 +2205,7 @@ public:
                             const std::string &user_service_name,
                             const std::string &transmite_service_name,
                             const std::string &message_service_name,
-                            const std::string &friend_service_name,
+                            const std::string &relationship_service_name,
                             const std::string &chatsession_service_name,
                             const std::string &push_service_name = "/service/push_service")
     {
@@ -2241,7 +2214,7 @@ public:
         _user_service_name = user_service_name;
         _transmite_service_name = transmite_service_name;
         _message_service_name = message_service_name;
-        _friend_service_name = friend_service_name;
+        _relationship_service_name = relationship_service_name;
         _chatsession_service_name = chatsession_service_name;
         _push_service_name = push_service_name;
 
@@ -2251,7 +2224,7 @@ public:
         _mm_channels->declared(_user_service_name);
         _mm_channels->declared(_transmite_service_name);
         _mm_channels->declared(_message_service_name);
-        _mm_channels->declared(_friend_service_name);
+        _mm_channels->declared(_relationship_service_name);
         _mm_channels->declared(_chatsession_service_name);
         _mm_channels->declared(_push_service_name);
 
@@ -2292,7 +2265,7 @@ public:
                                                                 _user_service_name,
                                                                 _transmite_service_name,
                                                                 _message_service_name,
-                                                                _friend_service_name,
+                                                                _relationship_service_name,
                                                                 _chatsession_service_name,
                                                                 _push_service_name);
         return server;
@@ -2309,7 +2282,7 @@ private:
     std::string _user_service_name;
     std::string _transmite_service_name;
     std::string _message_service_name;
-    std::string _friend_service_name;
+    std::string _relationship_service_name;
     std::string _chatsession_service_name;
     std::string _push_service_name;
     ServiceManager::ptr _mm_channels;
