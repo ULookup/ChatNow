@@ -34,6 +34,12 @@ inline constexpr int32_t kRelationshipNotFriends       = 2002;
 inline constexpr int32_t kRelationshipBlocked          = 2003;
 inline constexpr int32_t kRelationshipRequestPending   = 2004;
 
+// 3000-3999 会话（与 proto/common/error.proto 同步）
+inline constexpr int32_t kConversationNotFound         = 3001;
+inline constexpr int32_t kConversationNotMember        = 3002;
+inline constexpr int32_t kConversationNoPermission     = 3003;
+inline constexpr int32_t kConversationMemberLimit      = 3004;
+
 // 5000-5999 媒体（P4，与 proto/common/error.proto 同步）
 inline constexpr int32_t kMediaFileTooLarge        = 5001;
 inline constexpr int32_t kMediaUnsupportedFormat   = 5002;
