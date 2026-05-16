@@ -1,4 +1,5 @@
 #include "message_server.h"
+#include <gflags/gflags.h>
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
@@ -13,9 +14,8 @@ DEFINE_int32(listen_port, 10005, "RPC服务器监听端口");
 DEFINE_int32(rpc_timeout, -1, "RPC调用超时时间");
 DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
 
-DEFINE_string(file_service, "/service/file_service", "文件管理子服务名称");
-DEFINE_string(user_service, "/service/user_service", "用户管理子服务名称");
-DEFINE_string(chatsession_service, "/service/chatsession_service", "会话管理子服务名称");
+DEFINE_string(identity_service, "/service/identity_service", "Identity 服务发现路径");
+DEFINE_string(media_service, "/service/media_service", "Media 服务发现路径");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
 DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
@@ -56,18 +56,33 @@ int main(int argc, char *argv[])
     google::ParseCommandLineFlags(&argc, &argv, true);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
-    chatnow::MessageServerBuilder msb;
-    msb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
+    chatnow::message::MessageServerBuilder msb;
+    msb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
+                          FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     msb.set_reaper_owner(FLAGS_access_host + ":" + std::to_string(::getpid()));
-    msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue_db, FLAGS_mq_msg_queue_es, FLAGS_mq_db_binding_key, FLAGS_mq_es_binding_key);
-    msb.make_push_publisher(FLAGS_mq_push_exchange, FLAGS_mq_push_queue, FLAGS_mq_push_binding_key);
-    msb.make_es_publisher(FLAGS_mq_es_exchange, FLAGS_mq_es_queue, FLAGS_mq_es_binding_key);
-    msb.make_es_index_subscriber(FLAGS_mq_es_exchange, FLAGS_mq_es_queue, FLAGS_mq_es_binding_key);
+    msb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host,
+                       FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue_db,
+                       FLAGS_mq_msg_queue_es, FLAGS_mq_db_binding_key,
+                       FLAGS_mq_es_binding_key);
+    msb.make_push_publisher(FLAGS_mq_push_exchange, FLAGS_mq_push_queue,
+                            FLAGS_mq_push_binding_key);
+    msb.make_es_publisher(FLAGS_mq_es_exchange, FLAGS_mq_es_queue,
+                          FLAGS_mq_es_binding_key);
+    msb.make_es_index_subscriber(FLAGS_mq_es_exchange, FLAGS_mq_es_queue,
+                                   FLAGS_mq_es_binding_key);
     msb.make_es_object({FLAGS_es_host});
-    msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
-    msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service, FLAGS_user_service, FLAGS_chatsession_service);
-    msb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
-    msb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
+    msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host,
+                          FLAGS_mysql_db, FLAGS_mysql_cset,
+                          static_cast<uint16_t>(FLAGS_mysql_port),
+                          FLAGS_mysql_pool_count);
+    msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service,
+                              FLAGS_identity_service, FLAGS_media_service);
+    msb.make_rpc_object(static_cast<uint16_t>(FLAGS_listen_port),
+                        static_cast<uint32_t>(FLAGS_rpc_timeout),
+                        static_cast<uint8_t>(FLAGS_rpc_threads));
+    msb.make_registry_object(FLAGS_registry_host,
+                             FLAGS_base_service + FLAGS_instance_name,
+                             FLAGS_access_host);
 
     auto server = msb.build();
     server->start();
