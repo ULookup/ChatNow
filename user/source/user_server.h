@@ -239,6 +239,88 @@ public:
         }
     }
 
+    void Register(::google::protobuf::RpcController* controller,
+                  const ::chatnow::identity::RegisterReq* request,
+                  ::chatnow::identity::RegisterRsp* response,
+                  ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* header = response->mutable_header();
+        header->set_request_id(request->request_id());
+        try {
+            std::string user_id;
+            std::string nickname;
+            std::string phone;
+
+            if (request->has_username_pwd()) {
+                const auto& cred = request->username_pwd();
+                nickname = request->nickname();
+                if (!nickname_check(nickname)) {
+                    throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                       "nickname invalid");
+                }
+                if (!password_check(cred.password())) {
+                    throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                       "password invalid");
+                }
+                auto existing = _mysql_user->select_by_nickname(nickname);
+                if (existing) {
+                    throw ServiceError(::chatnow::error::kAuthUserAlreadyExists,
+                                       "nickname already taken");
+                }
+                user_id = uuid();
+                std::string hash = auth::hash_password(cred.password());
+                auto user = std::make_shared<User>(user_id, nickname, hash);
+                if (!_mysql_user->insert(user)) {
+                    throw ServiceError(::chatnow::error::kSystemInternalError,
+                                       "db insert failed");
+                }
+                _es_user->append_data(user_id, "", phone, nickname, "", "");
+            } else if (request->has_phone_code()) {
+                throw ServiceError(::chatnow::error::kNotImplemented,
+                                   "phone_code register not yet supported");
+            } else {
+                throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                   "no valid credential provided");
+            }
+
+            // 注册即登录：签发 JWT
+            std::string device_id = "default_device";
+            std::string access_jti  = auth::JwtCodec::random_jti();
+            std::string refresh_jti = auth::JwtCodec::random_jti();
+            std::string access_tok  = _jwt_codec->sign_access(user_id, device_id, access_jti);
+            std::string refresh_tok = _jwt_codec->sign_refresh(user_id, device_id, refresh_jti);
+            _jwt_store->put_active_refresh(user_id, device_id,
+                                           refresh_jti, _jwt_codec->refresh_ttl_sec());
+
+            auto* tokens = response->mutable_tokens();
+            tokens->set_access_token(access_tok);
+            tokens->set_refresh_token(refresh_tok);
+            tokens->set_access_expires_in_sec(_jwt_codec->access_ttl_sec());
+            tokens->set_refresh_expires_in_sec(_jwt_codec->refresh_ttl_sec());
+
+            auto* uinfo = response->mutable_user_info();
+            uinfo->set_user_id(user_id);
+            uinfo->set_nickname(nickname);
+
+            response->set_user_id(user_id);
+            header->set_success(true);
+            header->set_error_code(::chatnow::common::OK);
+            LOG_INFO("Register OK rid={} uid={}", request->request_id(), user_id);
+        } catch (const ServiceError& e) {
+            header->set_success(false);
+            header->set_error_code(e.code());
+            header->set_error_message(e.message());
+            LOG_WARN("Register 失败 rid={} code={} msg={}",
+                     request->request_id(), e.code(), e.message());
+        } catch (const std::exception& e) {
+            header->set_success(false);
+            header->set_error_code(::chatnow::error::kSystemInternalError);
+            header->set_error_message("internal error");
+            LOG_ERROR("Register 异常 rid={}: {}", request->request_id(), e.what());
+        }
+    }
+
 private:
     std::shared_ptr<UserTable>          _mysql_user;
     std::shared_ptr<ESUser>             _es_user;
