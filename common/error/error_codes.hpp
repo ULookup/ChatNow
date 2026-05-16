@@ -40,6 +40,12 @@ inline constexpr int32_t kConversationNotMember        = 3002;
 inline constexpr int32_t kConversationNoPermission     = 3003;
 inline constexpr int32_t kConversationMemberLimit      = 3004;
 
+// 4000-4999 消息（与 proto/common/error.proto 同步）
+inline constexpr int32_t kMessageNotFound          = 4001;
+inline constexpr int32_t kMessageRecallTimeout     = 4002;
+inline constexpr int32_t kMessageAlreadyRecalled   = 4003;
+inline constexpr int32_t kMessageContentInvalid    = 4004;
+
 // 5000-5999 媒体（P4，与 proto/common/error.proto 同步）
 inline constexpr int32_t kMediaFileTooLarge        = 5001;
 inline constexpr int32_t kMediaUnsupportedFormat   = 5002;
