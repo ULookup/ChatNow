@@ -1,6 +1,8 @@
 #pragma once
 
 #include <brpc/server.h>
+#include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 #include <memory>
@@ -60,7 +62,9 @@ public:
 
     ~ConversationServiceImpl() override = default;
 
-    // —— 18 个 RPC 占位实现（T10–T14 替换） ——
+    // —— 18 个 RPC 占位实现（T10–T14 逐步替换） ——
+    // T10 已替换：ListConversations / GetConversation / ListMembers /
+    //              SearchConversations / GetMemberIds
     #define _PLACEHOLDER_RPC(Method, Req, Rsp) \
         void Method(::google::protobuf::RpcController* base_cntl, \
                     const ::chatnow::conversation::Req* req, \
@@ -74,8 +78,6 @@ public:
                 ::chatnow::error::kSystemInternalError); \
             rsp->mutable_header()->set_error_message("not implemented"); \
         }
-    _PLACEHOLDER_RPC(ListConversations,  ListConversationsReq,  ListConversationsRsp)
-    _PLACEHOLDER_RPC(GetConversation,    GetConversationReq,    GetConversationRsp)
     _PLACEHOLDER_RPC(CreateConversation, CreateConversationReq, CreateConversationRsp)
     _PLACEHOLDER_RPC(UpdateConversation, UpdateConversationReq, UpdateConversationRsp)
     _PLACEHOLDER_RPC(DismissConversation,DismissConversationReq,DismissConversationRsp)
@@ -83,16 +85,328 @@ public:
     _PLACEHOLDER_RPC(RemoveMembers,      RemoveMembersReq,      RemoveMembersRsp)
     _PLACEHOLDER_RPC(TransferOwner,      TransferOwnerReq,      TransferOwnerRsp)
     _PLACEHOLDER_RPC(ChangeMemberRole,   ChangeMemberRoleReq,   ChangeMemberRoleRsp)
-    _PLACEHOLDER_RPC(ListMembers,        ListMembersReq,        ListMembersRsp)
     _PLACEHOLDER_RPC(SetMute,            SetMuteReq,            SetMuteRsp)
     _PLACEHOLDER_RPC(SetPin,             SetPinReq,             SetPinRsp)
     _PLACEHOLDER_RPC(SetVisible,         SetVisibleReq,         SetVisibleRsp)
     _PLACEHOLDER_RPC(QuitConversation,   QuitConversationReq,   QuitConversationRsp)
     _PLACEHOLDER_RPC(MarkRead,           MarkReadReq,           MarkReadRsp)
     _PLACEHOLDER_RPC(SaveDraft,          SaveDraftReq,          SaveDraftRsp)
-    _PLACEHOLDER_RPC(SearchConversations,SearchConversationsReq,SearchConversationsRsp)
-    _PLACEHOLDER_RPC(GetMemberIds,       GetMemberIdsReq,       GetMemberIdsRsp)
     #undef _PLACEHOLDER_RPC
+
+    // —— 5 个读取类 RPC 实现（T10） ——
+
+    void ListConversations(::google::protobuf::RpcController* base_cntl,
+                           const ::chatnow::conversation::ListConversationsReq* req,
+                           ::chatnow::conversation::ListConversationsRsp* rsp,
+                           ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            // 1. 取我的活跃会话视图（按 pin_time / max_seq / update_time 排序）
+            auto views = _mysql_member->list_ordered_by_user(auth.user_id);
+
+            // 2. PRIVATE 单聊用 peer_user_id 兜底名字 / avatar，先批量取 UserInfo
+            std::vector<std::string> peer_uids;
+            for (auto &v : views) {
+                if (v.peer_user_id) peer_uids.push_back(*v.peer_user_id);
+            }
+            std::unordered_map<std::string, ::chatnow::common::UserInfo> peer_map;
+            (void)fetch_user_infos_(cntl, req->request_id(), peer_uids, peer_map);
+
+            // 3. 转 proto
+            for (auto &v : views) {
+                if (!v.visible) continue;                         // 隐藏会话不返回
+                if (v.status == ConversationStatus::DISMISSED) continue;
+                auto* c = rsp->add_conversations();
+                c->set_conversation_id(v.conversation_id);
+                c->set_type(static_cast<::chatnow::conversation::ConversationType>(v.conversation_type));
+                if (v.conversation_name) {
+                    c->set_name(*v.conversation_name);
+                } else if (v.peer_user_id) {
+                    auto it = peer_map.find(*v.peer_user_id);
+                    if (it != peer_map.end()) c->set_name(it->second.nickname());
+                }
+                if (v.avatar_id) c->set_avatar_url(avatar_url_of_(*v.avatar_id));
+                c->set_created_at_ms(_to_ms(v.create_time));
+                c->set_member_count(v.member_count);
+                c->set_status(static_cast<::chatnow::conversation::ConversationStatus>(v.status));
+
+                // last_message：fail-soft（Message 不可达就留空）
+                ::chatnow::message::MessagePreview preview;
+                if (fetch_last_message_(cntl, req->request_id(), v.conversation_id,
+                                        v.last_read_seq, preview)) {
+                    c->mutable_last_message()->CopyFrom(preview);
+                }
+
+                // self：用 view 字段拼一个临时 ConversationMember 复用 fill_self
+                ConversationMember m;
+                m.user_id(auth.user_id);
+                m.conversation_id(v.conversation_id);
+                m.role(v.role);
+                m.muted(v.muted);
+                m.visible(v.visible);
+                if (v.pin_time) m.pin_time(*v.pin_time);
+                m.last_read_seq(v.last_read_seq);
+                m.last_ack_seq(v.last_ack_seq);
+                m.join_time(v.join_time);
+                if (v.draft) m.draft(*v.draft);
+                fill_self_member_info_(m, v.max_seq, c->mutable_self());
+            }
+            rsp->mutable_page()->set_has_more(false);
+            rsp->mutable_page()->set_total_count(static_cast<int32_t>(rsp->conversations_size()));
+        });
+    }
+
+    void GetConversation(::google::protobuf::RpcController* base_cntl,
+                         const ::chatnow::conversation::GetConversationReq* req,
+                         ::chatnow::conversation::GetConversationRsp* rsp,
+                         ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto c = _mysql_conv->select(req->conversation_id());
+            if (!c)
+                throw ServiceError(::chatnow::error::kConversationNotFound,
+                                   "conversation not found");
+            if (!require_member_(req->conversation_id(), auth.user_id))
+                throw ServiceError(::chatnow::error::kConversationNotMember,
+                                   "not a member");
+
+            auto* out = rsp->mutable_conversation();
+            out->set_conversation_id(c->conversation_id());
+            out->set_type(static_cast<::chatnow::conversation::ConversationType>(c->conversation_type()));
+            out->set_name(c->conversation_name());
+            if (!c->avatar_id().empty()) out->set_avatar_url(avatar_url_of_(c->avatar_id()));
+            if (!c->description().empty()) out->set_description(c->description());
+            out->set_created_at_ms(_to_ms(c->create_time()));
+            out->set_member_count(c->member_count());
+            out->set_status(static_cast<::chatnow::conversation::ConversationStatus>(c->status()));
+
+            // last_message：fail-soft
+            auto self = _mysql_member->select_self(req->conversation_id(), auth.user_id);
+            unsigned long after = self ? self->last_read_seq() : 0UL;
+            ::chatnow::message::MessagePreview preview;
+            if (fetch_last_message_(cntl, req->request_id(),
+                                    req->conversation_id(), after, preview)) {
+                out->mutable_last_message()->CopyFrom(preview);
+            }
+            if (self) fill_self_member_info_(*self, c->max_seq(), out->mutable_self());
+        });
+    }
+
+    void ListMembers(::google::protobuf::RpcController* base_cntl,
+                     const ::chatnow::conversation::ListMembersReq* req,
+                     ::chatnow::conversation::ListMembersRsp* rsp,
+                     ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            if (!require_member_(req->conversation_id(), auth.user_id))
+                throw ServiceError(::chatnow::error::kConversationNotMember,
+                                   "not a member");
+            // DAO 没有 list_active_members(cid)；用 members(cid) + 批量 select(cid, uids)
+            // 拼出活跃成员的全行数据（members() 已经过滤 is_quit=true）。
+            auto uids = _mysql_member->members(req->conversation_id());
+            auto rows = _mysql_member->select(req->conversation_id(), uids);
+
+            std::unordered_map<std::string, ::chatnow::common::UserInfo> umap;
+            (void)fetch_user_infos_(cntl, req->request_id(), uids, umap);
+
+            for (auto &m : rows) {
+                if (m.is_quit()) continue;            // 防御：批量 select 含已退群行
+                auto* item = rsp->add_members();
+                auto it = umap.find(m.user_id());
+                if (it != umap.end()) item->mutable_user_info()->CopyFrom(it->second);
+                else                  item->mutable_user_info()->set_user_id(m.user_id());
+                item->set_role(static_cast<::chatnow::conversation::MemberRole>(m.role()));
+                item->set_join_time_ms(_to_ms(m.join_time()));
+            }
+            rsp->mutable_page()->set_has_more(false);
+            rsp->mutable_page()->set_total_count(rsp->members_size());
+        });
+    }
+
+    void SearchConversations(::google::protobuf::RpcController* base_cntl,
+                             const ::chatnow::conversation::SearchConversationsReq* req,
+                             ::chatnow::conversation::SearchConversationsRsp* rsp,
+                             ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto cid_hits = _es_conv->search(req->search_key(), std::nullopt, 50);
+            if (cid_hits.empty()) return;
+            // 仅返回 caller 是成员的会话
+            auto convs = _mysql_conv->select(cid_hits);
+            for (auto &c : convs) {
+                if (!require_member_(c.conversation_id(), auth.user_id)) continue;
+                if (c.status() == ConversationStatus::DISMISSED)         continue;
+                auto* out = rsp->add_conversations();
+                out->set_conversation_id(c.conversation_id());
+                out->set_type(static_cast<::chatnow::conversation::ConversationType>(c.conversation_type()));
+                out->set_name(c.conversation_name());
+                if (!c.avatar_id().empty()) out->set_avatar_url(avatar_url_of_(c.avatar_id()));
+                out->set_member_count(c.member_count());
+                out->set_status(static_cast<::chatnow::conversation::ConversationStatus>(c.status()));
+            }
+        });
+    }
+
+    void GetMemberIds(::google::protobuf::RpcController* base_cntl,
+                      const ::chatnow::conversation::GetMemberIdsReq* req,
+                      ::chatnow::conversation::GetMemberIdsRsp* rsp,
+                      ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            // 1. 优先走 Redis 缓存（list 返回 vector<string>）
+            auto cached = _members_cache->list(req->conversation_id());
+            if (!cached.empty()) {
+                if (auth.user_id != "__system__"
+                    && std::find(cached.begin(), cached.end(), auth.user_id) == cached.end())
+                    throw ServiceError(::chatnow::error::kConversationNotMember,
+                                       "not a member");
+                for (auto &uid : cached) rsp->add_member_ids(uid);
+                return;
+            }
+            // 2. 缓存未命中：查 DB + warm
+            auto uids = _mysql_member->members(req->conversation_id());
+            _members_cache->warm(req->conversation_id(), uids);
+
+            if (auth.user_id != "__system__"
+                && std::find(uids.begin(), uids.end(), auth.user_id) == uids.end())
+                throw ServiceError(::chatnow::error::kConversationNotMember,
+                                   "not a member");
+            for (auto &uid : uids) rsp->add_member_ids(uid);
+        });
+    }
+
+private:
+    // —— 内部辅助（T10 引入；T11–T14 复用） ——
+
+    static int64_t _to_ms(const boost::posix_time::ptime &t) {
+        static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
+        if (t.is_not_a_date_time()) return 0;
+        return (t - epoch).total_milliseconds();
+    }
+
+    /* brief: 批量取 UserInfo（identity 不可达时 fail-soft：返回 false，调用方按需降级） */
+    bool fetch_user_infos_(brpc::Controller* in_cntl, const std::string& rid,
+                           const std::vector<std::string>& uids,
+                           std::unordered_map<std::string, ::chatnow::common::UserInfo>& out)
+    {
+        if (uids.empty()) return true;
+        auto channel = _mm_channels->choose(_identity_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} identity 子服务节点不可达 svc={}", rid, _identity_service_name);
+            return false;
+        }
+        ::chatnow::identity::IdentityService_Stub stub(channel.get());
+        ::chatnow::identity::GetMultiUserInfoReq  ireq;
+        ::chatnow::identity::GetMultiUserInfoRsp  irsp;
+        ireq.set_request_id(rid);
+        for (auto &u : uids) ireq.add_users_id(u);
+        brpc::Controller out_cntl;
+        ::chatnow::auth::forward_auth_metadata(in_cntl, &out_cntl);
+        stub.GetMultiUserInfo(&out_cntl, &ireq, &irsp, nullptr);
+        if (out_cntl.Failed()) {
+            LOG_ERROR("rid={} GetMultiUserInfo brpc 失败: {}", rid, out_cntl.ErrorText());
+            return false;
+        }
+        if (!irsp.header().success()) {
+            LOG_ERROR("rid={} GetMultiUserInfo 业务失败: code={} msg={}",
+                      rid, irsp.header().error_code(), irsp.header().error_message());
+            return false;
+        }
+        for (auto &kv : irsp.users_info()) out.insert({kv.first, kv.second});
+        return true;
+    }
+
+    /* brief: 调 MessageService.SyncMessages(after_seq, limit=1) 取 last_message。
+     *  - fail-soft：失败 / 不可达 / 0 条返回 false，调用方留空 last_message
+     *  - Message 服务未迁前编译期会因 SyncMessages stub 缺生成代码失败 —
+     *    spec §7 验收 #2 已记录为预期阻塞 */
+    bool fetch_last_message_(brpc::Controller* in_cntl, const std::string& rid,
+                             const std::string& cid, unsigned long after_seq,
+                             ::chatnow::message::MessagePreview& out)
+    {
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) return false;
+        ::chatnow::message::MessageService_Stub stub(channel.get());
+        ::chatnow::message::SyncMessagesReq  mreq;
+        ::chatnow::message::SyncMessagesRsp  mrsp;
+        mreq.set_request_id(rid);
+        mreq.set_conversation_id(cid);
+        mreq.set_after_seq(after_seq);
+        mreq.set_limit(1);
+        brpc::Controller out_cntl;
+        ::chatnow::auth::forward_auth_metadata(in_cntl, &out_cntl);
+        stub.SyncMessages(&out_cntl, &mreq, &mrsp, nullptr);
+        if (out_cntl.Failed() || !mrsp.header().success() || mrsp.messages_size() == 0) {
+            return false;
+        }
+        // Message → MessagePreview 字段映射（content_preview 由 Message 服务生成，
+        // 本服务这一路只返回结构化字段，preview 文本留空由前端兜底）。
+        const auto& m = mrsp.messages(0);
+        out.set_message_id(m.message_id());
+        out.set_sender_id(m.sender_id());
+        out.set_message_type(m.content().type());
+        out.set_sent_at_ms(m.created_at_ms());
+        out.set_status(m.status());
+        return true;
+    }
+
+    /* brief: 是否为活跃成员（已退群视为非成员） */
+    bool require_member_(const std::string& cid, const std::string& uid) {
+        auto m = _mysql_member->select_self(cid, uid);
+        return m && !m->is_quit();
+    }
+
+    /* brief: 取角色；已退群 / 不存在统一返回 NORMAL（调用方再做权限判定） */
+    MemberRole role_of_(const std::string& cid, const std::string& uid) {
+        auto m = _mysql_member->select_self(cid, uid);
+        if (!m || m->is_quit()) return MemberRole::NORMAL;
+        return m->role();
+    }
+
+    /* brief: 失效成员缓存（DAO 写后调用，确保下次 GetMemberIds 重建）
+     *  - Members 缓存 API 是 invalidate(ssid)，不是 del() */
+    void invalidate_members_cache_(const std::string& cid) {
+        _members_cache->invalidate(cid);
+    }
+
+    /* brief: 单聊会话 ID 规则：p_<min(uid,pid)>_<max(uid,pid)> */
+    static std::string private_id_of_(const std::string& a, const std::string& b) {
+        const std::string& lo = (a < b) ? a : b;
+        const std::string& hi = (a < b) ? b : a;
+        return std::string("p_") + lo + "_" + hi;
+    }
+
+    /* brief: avatar_file_id → public URL */
+    std::string avatar_url_of_(const std::string& file_id) const {
+        return _cfg.public_url_prefix + "/group_avatar/" + file_id;
+    }
+
+    /* brief: ConversationMember + max_seq → SelfMemberInfo */
+    void fill_self_member_info_(const ConversationMember& m,
+                                unsigned long max_seq,
+                                ::chatnow::conversation::SelfMemberInfo* out)
+    {
+        out->set_role(static_cast<::chatnow::conversation::MemberRole>(m.role()));
+        out->set_joined_at_ms(_to_ms(m.join_time()));
+        out->set_is_muted(m.muted());
+        out->set_is_pinned(m.is_pinned());
+        if (m.is_pinned()) out->set_pin_time_ms(_to_ms(m.pin_time()));
+        out->set_is_visible(m.visible());
+        out->set_last_read_seq(m.last_read_seq());
+        out->set_unread_count(max_seq > m.last_read_seq()
+                              ? max_seq - m.last_read_seq() : 0);
+        if (m.has_draft()) out->set_draft(m.draft());
+    }
 
 private:
     ESConversation::ptr           _es_conv;
