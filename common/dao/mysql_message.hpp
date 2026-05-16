@@ -92,6 +92,89 @@ public:
         return res;
     }
 
+    /* brief: 把消息软删为 RECALLED 状态；status=0→1 race-safe；返回是否更新成功 */
+    bool update_status_to_recalled(unsigned long mid) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == mid &&
+                                         query::status == MessageStatus::NORMAL));
+            auto it = r.begin();
+            if(it == r.end()) {
+                trans.commit();
+                return false;
+            }
+            Message m(*it);
+            m.status(MessageStatus::REVOKED);
+            m.content("");
+            m.revoke_time(boost::posix_time::microsec_clock::universal_time());
+            _db->update(m);
+            trans.commit();
+            return true;
+        } catch(std::exception &e) {
+            LOG_ERROR("update_status_to_recalled mid={} failed: {}", mid, e.what());
+            return false;
+        }
+    }
+
+    /* brief: 取会话内 max(seq_id)；SyncMessages latest_seq + SeqGen 回填 */
+    unsigned long select_max_seq_by_conversation(const std::string &cid) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            std::shared_ptr<Message> m(_db->query_one<Message>(
+                (query::session_id == cid) + " ORDER BY " + query::seq_id + " DESC"));
+            trans.commit();
+            return m ? m->seq_id() : 0UL;
+        } catch(std::exception &e) {
+            LOG_ERROR("select_max_seq_by_conversation cid={} failed: {}", cid, e.what());
+            return 0UL;
+        }
+    }
+
+    /* brief: 取 [before_seq) 历史消息；按 seq_id DESC 排序，limit 条；过滤已删除 */
+    std::vector<Message> select_history(const std::string &cid,
+                                        unsigned long before_seq,
+                                        int limit) {
+        std::vector<Message> res;
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            odb::result<Message> r(_db->query<Message>(
+                (query::session_id == cid &&
+                 query::seq_id < before_seq &&
+                 query::status != MessageStatus::DELETED) +
+                "ORDER BY " + query::seq_id + " DESC LIMIT " + std::to_string(limit)));
+            for(auto it = r.begin(); it != r.end(); ++it) res.push_back(*it);
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("select_history cid={} before_seq={}: {}", cid, before_seq, e.what());
+        }
+        return res;
+    }
+
+    /* brief: 取 (after_seq, ...] 之后的消息；按 seq_id ASC 排序，limit 条；过滤已删除 */
+    std::vector<Message> select_after(const std::string &cid,
+                                      unsigned long after_seq,
+                                      int limit) {
+        std::vector<Message> res;
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            odb::result<Message> r(_db->query<Message>(
+                (query::session_id == cid &&
+                 query::seq_id > after_seq &&
+                 query::status != MessageStatus::DELETED) +
+                "ORDER BY " + query::seq_id + " ASC LIMIT " + std::to_string(limit)));
+            for(auto it = r.begin(); it != r.end(); ++it) res.push_back(*it);
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("select_after cid={} after_seq={}: {}", cid, after_seq, e.what());
+        }
+        return res;
+    }
+
     /* brief: 全局消息 ID 查询（跨会话引用 / 转发回查） */
     std::shared_ptr<Message> select_by_id(unsigned long message_id) {
         std::shared_ptr<Message> res;
