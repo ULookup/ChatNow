@@ -318,8 +318,24 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "PinMessage not implemented");
+            auto role = conv_role_(req->conversation_id(), auth.user_id);
+            if (role != MemberRole::OWNER && role != MemberRole::ADMIN)
+                throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
+                                              "only OWNER/ADMIN can pin");
+            auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
+            if (!msg || msg->session_id() != req->conversation_id())
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
+            if (_mysql_pin->count_by_conversation(req->conversation_id()) >= kPinLimit)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "pin limit exceeded (10)");
+
+            if (!_mysql_pin->insert(req->conversation_id(),
+                                    static_cast<unsigned long>(req->message_id()),
+                                    auth.user_id))
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError, "pin insert failed");
+
+            publish_pin_notify_(req->conversation_id(), req->message_id(),
+                                auth.user_id, true);
         });
     }
 
@@ -329,8 +345,16 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "UnpinMessage not implemented");
+            auto role = conv_role_(req->conversation_id(), auth.user_id);
+            if (role != MemberRole::OWNER && role != MemberRole::ADMIN)
+                throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
+                                              "only OWNER/ADMIN can unpin");
+            if (!_mysql_pin->remove(req->conversation_id(),
+                                    static_cast<unsigned long>(req->message_id())))
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError, "unpin failed");
+
+            publish_pin_notify_(req->conversation_id(), req->message_id(),
+                                auth.user_id, false);
         });
     }
 
@@ -340,8 +364,19 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "ListPinnedMessages not implemented");
+            require_member_(req->conversation_id(), auth.user_id);
+            auto mids = _mysql_pin->list_by_conversation(req->conversation_id(), kPinLimit);
+            if (mids.empty()) return;
+            auto db_msgs = _mysql_msg->select_by_ids(mids);
+            std::vector<unsigned long> out_mids;
+            for (auto &m : db_msgs) {
+                if (m.status() == MessageStatus::DELETED) continue;
+                auto *out = rsp->add_messages();
+                convert_db_message_to_proto_(m, out);
+                out_mids.push_back(m.message_id());
+            }
+            fill_reactions_for_messages_(out_mids, auth.user_id, rsp->mutable_messages());
+            for (auto &m : *rsp->mutable_messages()) m.set_is_pinned(true);
         });
     }
 
