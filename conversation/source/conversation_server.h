@@ -78,9 +78,6 @@ public:
                 ::chatnow::error::kSystemInternalError); \
             rsp->mutable_header()->set_error_message("not implemented"); \
         }
-    _PLACEHOLDER_RPC(CreateConversation, CreateConversationReq, CreateConversationRsp)
-    _PLACEHOLDER_RPC(UpdateConversation, UpdateConversationReq, UpdateConversationRsp)
-    _PLACEHOLDER_RPC(DismissConversation,DismissConversationReq,DismissConversationRsp)
     _PLACEHOLDER_RPC(AddMembers,         AddMembersReq,         AddMembersRsp)
     _PLACEHOLDER_RPC(RemoveMembers,      RemoveMembersReq,      RemoveMembersRsp)
     _PLACEHOLDER_RPC(TransferOwner,      TransferOwnerReq,      TransferOwnerRsp)
@@ -88,10 +85,186 @@ public:
     _PLACEHOLDER_RPC(SetMute,            SetMuteReq,            SetMuteRsp)
     _PLACEHOLDER_RPC(SetPin,             SetPinReq,             SetPinRsp)
     _PLACEHOLDER_RPC(SetVisible,         SetVisibleReq,         SetVisibleRsp)
-    _PLACEHOLDER_RPC(QuitConversation,   QuitConversationReq,   QuitConversationRsp)
     _PLACEHOLDER_RPC(MarkRead,           MarkReadReq,           MarkReadRsp)
     _PLACEHOLDER_RPC(SaveDraft,          SaveDraftReq,          SaveDraftRsp)
     #undef _PLACEHOLDER_RPC
+
+    // —— 4 个会话生命周期 RPC（T11） ——
+
+    void CreateConversation(::google::protobuf::RpcController* base_cntl,
+                            const ::chatnow::conversation::CreateConversationReq* req,
+                            ::chatnow::conversation::CreateConversationRsp* rsp,
+                            ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            const auto type_p = req->type();
+            using ::chatnow::conversation::ConversationType;
+            if (type_p == ConversationType::PRIVATE && req->member_ids_size() != 1)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "private requires exactly 1 peer");
+            if (type_p == ConversationType::GROUP && req->member_ids_size() == 0)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "group needs initial members");
+
+            std::string cid;
+            if (type_p == ConversationType::PRIVATE) {
+                const auto& peer = req->member_ids(0);
+                cid = private_id_of_(auth.user_id, peer);
+                if (_mysql_conv->exists(cid)) {
+                    rsp->mutable_conversation()->set_conversation_id(cid);
+                    rsp->mutable_conversation()->set_type(type_p);
+                    return;        // 幂等
+                }
+            } else {
+                cid = std::string("g_") + chatnow::uuid();
+            }
+
+            ::chatnow::ConversationType ent_type =
+                (type_p == ConversationType::PRIVATE) ? ::chatnow::ConversationType::PRIVATE
+              : (type_p == ConversationType::GROUP)   ? ::chatnow::ConversationType::GROUP
+              :                                          ::chatnow::ConversationType::CHANNEL;
+
+            int member_total = 1 + req->member_ids_size();
+            ::chatnow::Conversation ent(
+                cid,
+                req->has_name() ? req->name() : std::string(),
+                ent_type,
+                boost::posix_time::microsec_clock::universal_time(),
+                member_total,
+                ::chatnow::ConversationStatus::NORMAL);
+            if (type_p == ConversationType::PRIVATE)
+                ent.peer_user_id(req->member_ids(0));
+            if (type_p == ConversationType::GROUP) ent.owner_id(auth.user_id);
+            // avatar_url 字段语义为 avatar_file_id：直接落库存 file_id，
+            // 出口才通过 avatar_url_of_ 拼成 URL。
+            if (req->has_avatar_url())
+                ent.avatar_id(req->avatar_url());
+            if (req->has_description()) ent.description(req->description());
+
+            if(!_mysql_conv->insert(ent))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "insert conversation failed");
+
+            // 成员行（OWNER + 其它）
+            auto now = boost::posix_time::microsec_clock::universal_time();
+            std::vector<::chatnow::ConversationMember> rows;
+            rows.reserve(member_total);
+            // caller
+            ::chatnow::MemberRole owner_role = (type_p == ConversationType::GROUP)
+                ? ::chatnow::MemberRole::OWNER
+                : ::chatnow::MemberRole::NORMAL;
+            rows.emplace_back(cid, auth.user_id, /*muted=*/false, /*visible=*/true, owner_role, now);
+            // peers
+            for (int i = 0; i < req->member_ids_size(); ++i) {
+                rows.emplace_back(cid, req->member_ids(i),
+                                  /*muted=*/false, /*visible=*/true,
+                                  ::chatnow::MemberRole::NORMAL, now);
+            }
+            // 用 append_after_create：批量入群且不重复刷 member_count
+            if(!_mysql_member->append_after_create(rows))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "insert members failed");
+            invalidate_members_cache_(cid);
+            (void)_es_conv->append_data(ent);
+
+            // 回填响应
+            auto* out = rsp->mutable_conversation();
+            out->set_conversation_id(cid);
+            out->set_type(type_p);
+            out->set_name(ent.conversation_name());
+            if (!ent.avatar_id().empty())
+                out->set_avatar_url(avatar_url_of_(ent.avatar_id()));
+            out->set_member_count(member_total);
+            out->set_status(::chatnow::conversation::ConversationStatus::CONVERSATION_NORMAL);
+            out->set_created_at_ms(_to_ms(ent.create_time()));
+        });
+    }
+
+    void UpdateConversation(::google::protobuf::RpcController* base_cntl,
+                            const ::chatnow::conversation::UpdateConversationReq* req,
+                            ::chatnow::conversation::UpdateConversationRsp* rsp,
+                            ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto role = role_of_(req->conversation_id(), auth.user_id);
+            if (role != ::chatnow::MemberRole::OWNER && role != ::chatnow::MemberRole::ADMIN)
+                throw ServiceError(::chatnow::error::kConversationNoPermission,
+                                   "owner/admin only");
+            auto c = _mysql_conv->select(req->conversation_id());
+            if (!c)
+                throw ServiceError(::chatnow::error::kConversationNotFound,
+                                   "not found");
+            if (req->has_name())          c->conversation_name(req->name());
+            // avatar_url 字段语义为 avatar_file_id：原样落库 file_id
+            if (req->has_avatar_url())    c->avatar_id(req->avatar_url());
+            if (req->has_description())   c->description(req->description());
+            if (req->has_announcement())  c->announcement(req->announcement());
+            if(!_mysql_conv->update(c))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "update failed");
+            (void)_es_conv->append_data(*c);
+
+            auto* out = rsp->mutable_conversation();
+            out->set_conversation_id(c->conversation_id());
+            out->set_type(static_cast<::chatnow::conversation::ConversationType>(c->conversation_type()));
+            out->set_name(c->conversation_name());
+            if (!c->avatar_id().empty())
+                out->set_avatar_url(avatar_url_of_(c->avatar_id()));
+            if (!c->description().empty()) out->set_description(c->description());
+            out->set_member_count(c->member_count());
+            out->set_status(static_cast<::chatnow::conversation::ConversationStatus>(c->status()));
+            out->set_created_at_ms(_to_ms(c->create_time()));
+        });
+    }
+
+    void DismissConversation(::google::protobuf::RpcController* base_cntl,
+                             const ::chatnow::conversation::DismissConversationReq* req,
+                             ::chatnow::conversation::DismissConversationRsp* rsp,
+                             ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            if (role_of_(req->conversation_id(), auth.user_id) != ::chatnow::MemberRole::OWNER)
+                throw ServiceError(::chatnow::error::kConversationNoPermission, "owner only");
+            if(!_mysql_conv->update_status(req->conversation_id(),
+                                           ::chatnow::ConversationStatus::DISMISSED))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "update_status failed");
+            (void)_es_conv->remove(req->conversation_id());
+            invalidate_members_cache_(req->conversation_id());
+            // 推送 CONVERSATION_DISMISSED_NOTIFY 留待 Push 接入；本期 fail-soft 不推
+        });
+    }
+
+    void QuitConversation(::google::protobuf::RpcController* base_cntl,
+                          const ::chatnow::conversation::QuitConversationReq* req,
+                          ::chatnow::conversation::QuitConversationRsp* rsp,
+                          ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto role = role_of_(req->conversation_id(), auth.user_id);
+            if (role == ::chatnow::MemberRole::OWNER) {
+                throw ServiceError(::chatnow::error::kConversationNoPermission,
+                                   "owner must transfer first");
+            }
+            if (!require_member_(req->conversation_id(), auth.user_id))
+                throw ServiceError(::chatnow::error::kConversationNotMember,
+                                   "not a member");
+            if(!_mysql_member->set_quit(req->conversation_id(), auth.user_id))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "set_quit failed");
+            invalidate_members_cache_(req->conversation_id());
+            // set_quit 内部已经维护 member_count（_update_session_member_count(-1)），
+            // 不需要再 _mysql_conv->update。
+        });
+    }
 
     // —— 5 个读取类 RPC 实现（T10） ——
 
