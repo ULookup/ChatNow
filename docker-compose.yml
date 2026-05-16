@@ -105,6 +105,24 @@ services:
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
       /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200 -c "/im/bin/relationship_server -flagfile=/im/conf/relationship_server.conf"
+  conversation_server:
+    build: ./conversation
+    container_name: conversation_server-service
+    volumes:
+      - ./conf/conversation_server.conf:/im/conf/conversation_server.conf
+      - ./middle/data/logs:/var/lib/logs:rw
+      - ./middle/data/data:/var/lib/data:rw
+      - ./entrypoint.sh:/im/bin/entrypoint.sh
+    ports:
+      - 10007:10007
+    restart: always
+    depends_on:
+      - etcd
+      - mysql
+      - redis
+      - elasticsearch
+    entrypoint:
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,9200 -c "/im/bin/conversation_server -flagfile=/im/conf/conversation_server.conf"
   gateway_server:
     build: ./gateway
     container_name: gateway_server-service

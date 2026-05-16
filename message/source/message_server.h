@@ -5,7 +5,7 @@
 #include "dao/data_redis.hpp"
 #include "dao/mysql_message.hpp"
 #include "dao/mysql_user_timeline.hpp"
-#include "dao/mysql_chat_session_member.hpp"
+#include "dao/mysql_conversation_member.hpp"
 #include "infra/etcd.hpp"
 #include "infra/logger.hpp"
 #include "utils/utils.hpp"
@@ -56,7 +56,7 @@ public:
                         _db(mysql_client),
                         _mysql_usertimeline_table(std::make_shared<UserTimeLineTable>(mysql_client)),
                         _mysql_message_table(std::make_shared<MessageTable>(mysql_client)),
-                        _mysql_member_table(std::make_shared<ChatSessionMemberTable>(mysql_client)),
+                        _mysql_member_table(std::make_shared<ConversationMemberTable>(mysql_client)),
                         _mq_subscriber(mq_subscriber),
                         _es_subscriber(es_subscriber),
                         _db_settings(db_settings),
@@ -1019,7 +1019,7 @@ private:
     std::shared_ptr<odb::core::database> _db;
     MessageTable::ptr _mysql_message_table;
     UserTimeLineTable::ptr _mysql_usertimeline_table;
-    ChatSessionMemberTable::ptr _mysql_member_table;
+    ConversationMemberTable::ptr _mysql_member_table;
     ESMessage::ptr _es_client;
     Subscriber::ptr _mq_subscriber;
     Subscriber::ptr _es_subscriber;

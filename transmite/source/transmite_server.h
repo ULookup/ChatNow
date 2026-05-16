@@ -33,7 +33,7 @@ class TransmiteServiceImpl : public chatnow::MsgTransmitService
 {
 public:
     TransmiteServiceImpl(const std::string &user_service_name,
-                        const std::string &chatsession_service_name,
+                        const std::string &conversation_service_name,
                         const std::string &message_service_name,
                         const ServiceManager::ptr &channels,
                         const std::string &exchange_name,
@@ -44,7 +44,7 @@ public:
                         const Members::ptr &members_cache,
                         const RateLimiter::ptr &rate_limiter)
                         : _user_service_name(user_service_name),
-                        _chatsession_service_name(chatsession_service_name),
+                        _conversation_service_name(conversation_service_name),
                         _message_service_name(message_service_name),
                         _mm_channels(channels),
                         _exchange_name(exchange_name),
@@ -167,27 +167,28 @@ public:
         user_stub.GetUserInfo(&user_cntl, &user_req, &user_rsp, brpc::DoNothing());
 
         // 成员列表未命中缓存：RPC 拉取
-        GetMemberIdListRsp session_rsp;
+        ::chatnow::conversation::GetMemberIdsRsp session_rsp;
         brpc::Controller session_cntl;
         if(!members_from_cache) {
-            auto session_channel = _mm_channels->choose(_chatsession_service_name);
+            auto session_channel = _mm_channels->choose(_conversation_service_name);
             if(!session_channel) {
                 brpc::Join(user_cntl.call_id());
-                LOG_ERROR("请求ID: {} - chatsession_service 节点缺失", rid);
+                LOG_ERROR("请求ID: {} - conversation_service 节点缺失", rid);
                 return err_response(rid, "依赖服务节点缺失");
             }
-            ChatSessionService_Stub session_stub(session_channel.get());
-            GetMemberIdListReq session_req;
+            ::chatnow::conversation::ConversationService_Stub session_stub(session_channel.get());
+            ::chatnow::conversation::GetMemberIdsReq session_req;
             session_req.set_request_id(rid);
-            session_req.set_chat_session_id(chat_ssid);
-            session_stub.GetMemberIdList(&session_cntl, &session_req, &session_rsp, brpc::DoNothing());
+            session_req.set_conversation_id(chat_ssid);
+            session_stub.GetMemberIds(&session_cntl, &session_req, &session_rsp, brpc::DoNothing());
             brpc::Join(session_cntl.call_id());
-            if(session_cntl.Failed() || !session_rsp.success()) {
+            if(session_cntl.Failed() || !session_rsp.header().success()) {
                 brpc::Join(user_cntl.call_id());
-                LOG_ERROR("请求ID: {} - 获取群成员失败: {}", rid, session_cntl.ErrorText());
+                LOG_ERROR("请求ID: {} - 获取群成员失败: {} {}", rid,
+                          session_cntl.ErrorText(), session_rsp.header().error_message());
                 return err_response(rid, "获取群成员失败");
             }
-            for(const auto &m : session_rsp.member_id_list()) member_id_list.push_back(m);
+            for(const auto &m : session_rsp.member_ids()) member_id_list.push_back(m);
             // 回填缓存
             if(_members_cache) _members_cache->warm(chat_ssid, member_id_list);
         }
@@ -293,7 +294,7 @@ public:
     }
 private:
     std::string _user_service_name;
-    std::string _chatsession_service_name;
+    std::string _conversation_service_name;
     std::string _message_service_name;
     ServiceManager::ptr _mm_channels;
 
@@ -389,15 +390,15 @@ public:
     void make_discovery_object(const std::string &reg_host,
                             const std::string &base_service_name,
                             const std::string &user_service_name,
-                            const std::string &chatsession_service_name,
+                            const std::string &conversation_service_name,
                             const std::string &message_service_name)
     {
         _user_service_name = user_service_name;
-        _chatsession_service_name = chatsession_service_name;
+        _conversation_service_name = conversation_service_name;
         _message_service_name = message_service_name;
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(_user_service_name);
-        _mm_channels->declared(_chatsession_service_name);
+        _mm_channels->declared(_conversation_service_name);
         _mm_channels->declared(_message_service_name);
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
         auto del_cb = std::bind(&ServiceManager::onServiceOffline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
@@ -478,7 +479,7 @@ public:
         }
         _rpc_server = std::make_shared<brpc::Server>();
         TransmiteServiceImpl *transmite_service = new TransmiteServiceImpl(_user_service_name,
-                                                                        _chatsession_service_name,
+                                                                        _conversation_service_name,
                                                                         _message_service_name,
                                                                         _mm_channels,
                                                                         _exchange_name,
@@ -524,7 +525,7 @@ public:
     }
 private:
     std::string _user_service_name;
-    std::string _chatsession_service_name;
+    std::string _conversation_service_name;
     std::string _message_service_name;
     ServiceManager::ptr _mm_channels;
 
