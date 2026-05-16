@@ -9,7 +9,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/file)
 # speech 子服务在 P4 已并入 media_server（位于 file/）；speech/ 目录已删除。
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/transmite)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/relationship)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/chatsession)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/conversation)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/gateway)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/push)
