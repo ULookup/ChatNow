@@ -68,6 +68,7 @@ public:
     // T11 已替换：CreateConversation / UpdateConversation /
     //              DismissConversation / QuitConversation
     // T12 已替换：AddMembers / RemoveMembers / TransferOwner / ChangeMemberRole
+    // T13 已替换：SetMute / SetPin / SetVisible / SaveDraft
     #define _PLACEHOLDER_RPC(Method, Req, Rsp) \
         void Method(::google::protobuf::RpcController* base_cntl, \
                     const ::chatnow::conversation::Req* req, \
@@ -81,11 +82,7 @@ public:
                 ::chatnow::error::kSystemInternalError); \
             rsp->mutable_header()->set_error_message("not implemented"); \
         }
-    _PLACEHOLDER_RPC(SetMute,            SetMuteReq,            SetMuteRsp)
-    _PLACEHOLDER_RPC(SetPin,             SetPinReq,             SetPinRsp)
-    _PLACEHOLDER_RPC(SetVisible,         SetVisibleReq,         SetVisibleRsp)
     _PLACEHOLDER_RPC(MarkRead,           MarkReadReq,           MarkReadRsp)
-    _PLACEHOLDER_RPC(SaveDraft,          SaveDraftReq,          SaveDraftRsp)
     #undef _PLACEHOLDER_RPC
 
     // —— 4 个会话生命周期 RPC（T11） ——
@@ -590,6 +587,84 @@ public:
                 throw ServiceError(::chatnow::error::kConversationNotMember,
                                    "not a member");
             for (auto &uid : uids) rsp->add_member_ids(uid);
+        });
+    }
+
+    // —— 4 个自身偏好 RPC（T13） ——
+
+    void SetMute(::google::protobuf::RpcController* base_cntl,
+                 const ::chatnow::conversation::SetMuteReq* req,
+                 ::chatnow::conversation::SetMuteRsp* rsp,
+                 ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto m = _mysql_member->select_self(req->conversation_id(), auth.user_id);
+            if (!m || m->is_quit())
+                throw ServiceError(::chatnow::error::kConversationNotMember, "not member");
+            m->muted(req->mute());
+            if(!_mysql_member->update(m))
+                throw ServiceError(::chatnow::error::kSystemInternalError, "update failed");
+            auto c = _mysql_conv->select(req->conversation_id());
+            fill_self_member_info_(*m, c ? c->max_seq() : 0, rsp->mutable_self());
+        });
+    }
+
+    void SetPin(::google::protobuf::RpcController* base_cntl,
+                const ::chatnow::conversation::SetPinReq* req,
+                ::chatnow::conversation::SetPinRsp* rsp,
+                ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto m = _mysql_member->select_self(req->conversation_id(), auth.user_id);
+            if (!m || m->is_quit())
+                throw ServiceError(::chatnow::error::kConversationNotMember, "not member");
+            if (req->pin())
+                m->pin_time(boost::posix_time::microsec_clock::universal_time());
+            else
+                m->unpin();
+            if(!_mysql_member->update(m))
+                throw ServiceError(::chatnow::error::kSystemInternalError, "update failed");
+            auto c = _mysql_conv->select(req->conversation_id());
+            fill_self_member_info_(*m, c ? c->max_seq() : 0, rsp->mutable_self());
+        });
+    }
+
+    void SetVisible(::google::protobuf::RpcController* base_cntl,
+                    const ::chatnow::conversation::SetVisibleReq* req,
+                    ::chatnow::conversation::SetVisibleRsp* rsp,
+                    ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            auto m = _mysql_member->select_self(req->conversation_id(), auth.user_id);
+            if (!m || m->is_quit())
+                throw ServiceError(::chatnow::error::kConversationNotMember, "not member");
+            m->visible(req->visible());
+            if(!_mysql_member->update(m))
+                throw ServiceError(::chatnow::error::kSystemInternalError, "update failed");
+            auto c = _mysql_conv->select(req->conversation_id());
+            fill_self_member_info_(*m, c ? c->max_seq() : 0, rsp->mutable_self());
+        });
+    }
+
+    void SaveDraft(::google::protobuf::RpcController* base_cntl,
+                   const ::chatnow::conversation::SaveDraftReq* req,
+                   ::chatnow::conversation::SaveDraftRsp* rsp,
+                   ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            if(!_mysql_member->update_draft(req->conversation_id(), auth.user_id, req->draft()))
+                throw ServiceError(::chatnow::error::kConversationNotMember, "not member or draft update failed");
+            auto m = _mysql_member->select_self(req->conversation_id(), auth.user_id);
+            auto c = _mysql_conv->select(req->conversation_id());
+            if (m) fill_self_member_info_(*m, c ? c->max_seq() : 0, rsp->mutable_self());
         });
     }
 
