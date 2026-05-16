@@ -16,7 +16,7 @@
  *   3. ES status 0 = NORMAL（正常）；REVOKED/DELETED 不参与全文检索
  *      append_data() 写入前应在调用方判断 status
  *   4. search() 全部支持 size 限制，避免一次性全量返回
- *   5. ESChatSession 索引补 update_time 用于按变更时间排序
+ *   5. ESConversation 索引补 update_time 用于按变更时间排序
  *   6. 旧 createIndex 与 create_index 命名混用 — 统一改 create_index
  * ===========================================================================
  */
@@ -24,7 +24,7 @@
 #include "infra/icsearch.hpp"
 #include "user.hxx"
 #include "message.hxx"
-#include "chat_session.hxx"
+#include "conversation.hxx"
 #include <optional>
 
 namespace chatnow
@@ -215,16 +215,16 @@ private:
 // =============================================================================
 // 群名称索引（搜索群、按类型筛选）
 // =============================================================================
-class ESChatSession
+class ESConversation
 {
 public:
-    using ptr = std::shared_ptr<ESChatSession>;
-    explicit ESChatSession(const std::shared_ptr<elasticlient::Client> &client) : _client(client) {}
+    using ptr = std::shared_ptr<ESConversation>;
+    explicit ESConversation(const std::shared_ptr<elasticlient::Client> &client) : _client(client) {}
 
     bool create_index() {
         bool ret = ESIndex(_client, "chat_session")
             .append("chat_session_id",   "keyword", "standard", true)
-            .append("chat_session_name")  // 中文分词
+            .append("chat_session_name")
             .append("chat_session_type", "integer", "standard", false)
             .append("avatar_id",         "keyword", "standard", false)
             .append("status",            "integer", "standard", false)
@@ -238,37 +238,36 @@ public:
         return true;
     }
 
-    bool append_data(const chatnow::ChatSession &cs) {
-        // 把 update_time 转成秒级时间戳便于排序
+    bool append_data(const chatnow::Conversation &c) {
         static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
-        long ts = (cs.update_time() - epoch).total_seconds();
+        long ts = (c.update_time() - epoch).total_seconds();
         bool ret = ESInsert(_client, "chat_session")
-            .append("chat_session_id",   cs.chat_session_id())
-            .append("chat_session_name", cs.chat_session_name())
-            .append("chat_session_type", static_cast<int>(cs.chat_session_type()))
-            .append("avatar_id",         cs.avatar_id())
-            .append("status",            static_cast<int>(cs.status()))
+            .append("chat_session_id",   c.conversation_id())
+            .append("chat_session_name", c.conversation_name())
+            .append("chat_session_type", static_cast<int>(c.conversation_type()))
+            .append("avatar_id",         c.avatar_id())
+            .append("status",            static_cast<int>(c.status()))
             .append("update_time",       ts)
-            .insert(cs.chat_session_id());
+            .insert(c.conversation_id());
         if(!ret) {
-            LOG_ERROR("会话搜索数据插入/更新失败 ssid={}", cs.chat_session_id());
+            LOG_ERROR("会话搜索数据插入/更新失败 cid={}", c.conversation_id());
             return false;
         }
         return true;
     }
 
-    bool remove(const std::string &ssid) {
-        return ESRemove(_client, "chat_session").remove(ssid);
+    bool remove(const std::string &cid) {
+        return ESRemove(_client, "chat_session").remove(cid);
     }
 
     std::vector<std::string> search(const std::string &key,
-                                    std::optional<chatnow::ChatSessionType> type = std::nullopt,
+                                    std::optional<chatnow::ConversationType> type = std::nullopt,
                                     int size = 20)
     {
         std::vector<std::string> res;
         ESSearch builder(_client, "chat_session");
         builder.append_must_match("chat_session_name", key)
-               .append_must_term("status", std::to_string(0)) // 仅正常
+               .append_must_term("status", std::to_string(0))
                .sort_by("update_time", "desc")
                .page(0, size);
         if(type.has_value()) {
