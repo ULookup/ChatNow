@@ -79,6 +79,8 @@ namespace chatnow
 #define TRANSFER_CHAT_SESSION_OWNER "/service/chatsession/transfer_chat_session_owner"//转让群主
 #define MODIFY_MEMBER_PERMISSION    "/service/chatsession/modify_member_permission"   //编辑会话成员权限
 #define MODIFY_CHAT_SESSION_STATUS  "/service/chatsession/modify_chat_session_status" //编辑会话状态
+#define DISMISS_CHAT_SESSION        "/service/chatsession/dismiss_chat_session"       //解散会话（群主/owner）
+#define SAVE_CHAT_SESSION_DRAFT     "/service/chatsession/save_draft"                 //保存会话草稿
 #define SEARCH_CHAT_SESSION         "/service/chatsession/search_chat_session"        //搜索聊天会话
 #define SET_SESSION_MUTED           "/service/chatsession/set_session_muted"          //设置会话免打扰
 #define SET_SESSION_PINNED          "/service/chatsession/set_session_pinned"         //设置会话置顶
@@ -108,7 +110,7 @@ public:
                 const std::string &transmite_service_name,
                 const std::string &message_service_name,
                 const std::string &relationship_service_name,
-                const std::string &chatsession_service_name,
+                const std::string &conversation_service_name,
                 const std::string &push_service_name = "/service/push_service")
         : _jwt_codec(jwt_codec),
         _jwt_store(jwt_store),
@@ -120,7 +122,7 @@ public:
         _transmite_service_name(transmite_service_name),
         _message_service_name(message_service_name),
         _relationship_service_name(relationship_service_name),
-        _chatsession_service_name(chatsession_service_name),
+        _conversation_service_name(conversation_service_name),
         _push_service_name(push_service_name),
         _http_port(http_port)
     {
@@ -167,6 +169,8 @@ public:
         _http_server.Post(TRANSFER_CHAT_SESSION_OWNER,  (httplib::Server::Handler)std::bind(&GatewayServer::TransferChatSessionOwner,  this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(MODIFY_MEMBER_PERMISSION,     (httplib::Server::Handler)std::bind(&GatewayServer::ModifyMemberPermission,    this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(MODIFY_CHAT_SESSION_STATUS,   (httplib::Server::Handler)std::bind(&GatewayServer::ModifyChatSessionStatus,   this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(DISMISS_CHAT_SESSION,         (httplib::Server::Handler)std::bind(&GatewayServer::DismissChatSession,        this, std::placeholders::_1, std::placeholders::_2));
+        _http_server.Post(SAVE_CHAT_SESSION_DRAFT,      (httplib::Server::Handler)std::bind(&GatewayServer::SaveDraft,                 this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(SEARCH_CHAT_SESSION,          (httplib::Server::Handler)std::bind(&GatewayServer::SearchChatSession,         this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(SET_SESSION_MUTED,            (httplib::Server::Handler)std::bind(&GatewayServer::SetSessionMuted,           this, std::placeholders::_1, std::placeholders::_2));
         _http_server.Post(SET_SESSION_PINNED,           (httplib::Server::Handler)std::bind(&GatewayServer::SetSessionPinned,          this, std::placeholders::_1, std::placeholders::_2));
@@ -974,134 +978,112 @@ private:
     }
     void GetChatSessionList(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetChatSessionListReq req;
-        GetChatSessionListRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::ListConversationsReq req;
+        ::chatnow::conversation::ListConversationsRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取聊天会话列表请求正文反序列化失败");
-            return err_response("获取聊天会话列表请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ListConversationsReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ListConversationsReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_relationship_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetChatSessionList(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.ListConversations(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} ListConversations 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void GetChatSessionMember(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetChatSessionMemberReq req;
-        GetChatSessionMemberRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::ListMembersReq req;
+        ::chatnow::conversation::ListMembersRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取聊天会话成员列表请求正文反序列化失败");
-            return err_response("获取聊天会话成员列表请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ListMembersReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ListMembersReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_relationship_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetChatSessionMember(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.ListMembers(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} ListMembers 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void ChatSessionCreate(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        ChatSessionCreateReq req;
-        ChatSessionCreateRsp rsp;
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::CreateConversationReq req;
+        ::chatnow::conversation::CreateConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("创建聊天会话请求正文反序列化失败");
-            return err_response("创建聊天会话请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("CreateConversationReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse CreateConversationReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给好友子服务进行业务处理
-        auto channel = _mm_channels->choose(_relationship_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的好友子服务节点", req.request_id());
-            return err_response("未找到可提供业务的好友子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.ChatSessionCreate(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 好友子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("好友子服务调用失败");
+        stub.CreateConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} CreateConversation 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //4. 业务成功 → 向所有成员推送 CHAT_SESSION_CREATE_NOTIFY（多实例可达）
-        if(rsp.success()) {
-            for(int i = 0; i < req.member_id_list_size(); ++i) {
-                NotifyMessage notify;
-                notify.set_notify_type(NotifyType::CHAT_SESSION_CREATE_NOTIFY);
-                auto chat_session = notify.mutable_new_chat_session_info();
-                chat_session->mutable_chat_session_info()->CopyFrom(rsp.chat_session_info());
-                _pushNotify(req.member_id_list(i), notify, req.request_id());
-            }
-        }
-        //5. 向客户端进行响应
-        rsp.clear_chat_session_info();
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        // T15: 旧 _pushNotify(CHAT_SESSION_CREATE_NOTIFY) 在 Push 链路适配新 Conversation 类型后再补回（spec §11.6.3）。
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void GetHistoryMsg(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
@@ -1479,603 +1461,617 @@ private:
     //========================================================//
     void GetChatSessionDetail(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetChatSessionDetailReq req;
-        GetChatSessionDetailRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::GetConversationReq req;
+        ::chatnow::conversation::GetConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取会话详细信息请求正文反序列化失败");
-            return err_response("获取会话详细信息请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("GetConversationReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse GetConversationReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetChatSessionDetail(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.GetConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} GetConversation 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void SetChatSessionName(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        SetChatSessionNameReq req;
-        SetChatSessionNameRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::UpdateConversationReq req;
+        ::chatnow::conversation::UpdateConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("设置会话名称请求正文反序列化失败");
-            return err_response("设置会话名称请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("UpdateConversationReq(name) 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse UpdateConversationReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.SetChatSessionName(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.UpdateConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} UpdateConversation(name) 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void SetChatSessionAvatar(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        SetChatSessionAvatarReq req;
-        SetChatSessionAvatarRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::UpdateConversationReq req;
+        ::chatnow::conversation::UpdateConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("设置会话头像请求正文反序列化失败");
-            return err_response("设置会话头像请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("UpdateConversationReq(avatar) 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse UpdateConversationReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.SetChatSessionAvatar(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.UpdateConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} UpdateConversation(avatar) 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void AddChatSessionMember(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        AddChatSessionMemberReq req;
-        AddChatSessionMemberRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::AddMembersReq req;
+        ::chatnow::conversation::AddMembersRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("添加会话成员请求正文反序列化失败");
-            return err_response("添加会话成员请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("AddMembersReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse AddMembersReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.AddChatSessionMember(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.AddMembers(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} AddMembers 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void RemoveChatSessionMember(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        RemoveChatSessionMemberReq req;
-        RemoveChatSessionMemberRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::RemoveMembersReq req;
+        ::chatnow::conversation::RemoveMembersRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("移除会话成员请求正文反序列化失败");
-            return err_response("移除会话成员请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("RemoveMembersReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse RemoveMembersReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.RemoveChatSessionMember(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.RemoveMembers(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} RemoveMembers 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void TransferChatSessionOwner(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        TransferChatSessionOwnerReq req;
-        TransferChatSessionOwnerRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::TransferOwnerReq req;
+        ::chatnow::conversation::TransferOwnerRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("转让群主请求正文反序列化失败");
-            return err_response("转让群主请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("TransferOwnerReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse TransferOwnerReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.TransferChatSessionOwner(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.TransferOwner(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} TransferOwner 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void ModifyMemberPermission(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        ModifyMemberPermissionReq req;
-        ModifyMemberPermissionRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::ChangeMemberRoleReq req;
+        ::chatnow::conversation::ChangeMemberRoleRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("编辑会话成员权限请求正文反序列化失败");
-            return err_response("编辑会话成员权限请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("ChangeMemberRoleReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse ChangeMemberRoleReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.ModifyMemberPermission(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.ChangeMemberRole(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} ChangeMemberRole 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
+    // T15: ModifyChatSessionStatus 旧路由保留，语义收窄为「解散会话」(DismissConversation)。
+    //      新枚举只剩 DISMISSED；旧请求里的 status 字段不再有意义，按 DISMISSED 处理即可。
     void ModifyChatSessionStatus(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        ModifyChatSessionStatusReq req;
-        ModifyChatSessionStatusRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::DismissConversationReq req;
+        ::chatnow::conversation::DismissConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("编辑会话成员权限请求正文反序列化失败");
-            return err_response("编辑会话成员权限请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("DismissConversationReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse DismissConversationReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.ModifyChatSessionStatus(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.DismissConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} DismissConversation 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void SearchChatSession(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        SearchChatSessionReq req;
-        SearchChatSessionRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::SearchConversationsReq req;
+        ::chatnow::conversation::SearchConversationsRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("搜索会话请求正文反序列化失败");
-            return err_response("搜索会话请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SearchConversationsReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SearchConversationsReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.SearchChatSession(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.SearchConversations(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SearchConversations 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void SetSessionMuted(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        SetSessionMutedReq req;
-        SetSessionMutedRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::SetMuteReq req;
+        ::chatnow::conversation::SetMuteRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("设置会话免打扰请求正文反序列化失败");
-            return err_response("设置会话免打扰请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SetMuteReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SetMuteReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.SetSessionMuted(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.SetMute(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SetMute 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void SetSessionPinned(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        SetSessionPinnedReq req;
-        SetSessionPinnedRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::SetPinReq req;
+        ::chatnow::conversation::SetPinRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("设置会话置顶请求正文反序列化失败");
-            return err_response("设置会话置顶请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SetPinReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SetPinReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.SetSessionPinned(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.SetPin(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SetPin 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void SetSessionVisible(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        SetSessionVisibleReq req;
-        SetSessionVisibleRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::SetVisibleReq req;
+        ::chatnow::conversation::SetVisibleRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("设置会话隐藏请求正文反序列化失败");
-            return err_response("设置会话隐藏请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SetVisibleReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SetVisibleReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.SetSessionVisible(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.SetVisible(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SetVisible 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void QuitChatSession(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        QuitChatSessionReq req;
-        QuitChatSessionRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::QuitConversationReq req;
+        ::chatnow::conversation::QuitConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("退出会话请求正文反序列化失败");
-            return err_response("退出会话请求正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("QuitConversationReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse QuitConversationReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.QuitChatSession(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.QuitConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} QuitConversation 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void MsgReadAck(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        MsgReadAckReq req;
-        MsgReadAckRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::MarkReadReq req;
+        ::chatnow::conversation::MarkReadRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("确认最新已读消息正文反序列化失败");
-            return err_response("确认最新已读消息正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("MarkReadReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse MarkReadReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.MsgReadAck(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.MarkRead(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} MarkRead 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void GetMemberIdList(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
-        //1. 正文反序列化，提取关键要素：登录会话ID
-        GetMemberIdListReq req;
-        GetMemberIdListRsp rsp;  //给客户端的响应
-        auto err_response = [&req, &rsp, &response](const std::string &errmsg) -> void {
-            rsp.set_success(false);
-            rsp.set_errmsg(errmsg);
-            response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        ::chatnow::conversation::GetMemberIdsReq req;
+        ::chatnow::conversation::GetMemberIdsRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
         };
-        bool ret = req.ParseFromString(request.body);
-        if(ret == false) {
-            LOG_ERROR("获取会话成员ID正文反序列化失败");
-            return err_response("获取会话成员ID正文反序列化失败");
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("GetMemberIdsReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse GetMemberIdsReq failed");
         }
-        //2. JWT 鉴权（横切 spec §2.5）
         chatnow::gateway::AuthInfo _auth;
         if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
                                                  /*whitelisted=*/false, _auth)) {
             return;
         }
-        req.set_user_id(_auth.user_id);
-        //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
-        if(!channel) {
-            LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
-            return err_response("未找到可提供业务的会话管理子服务节点");
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
         }
-        ChatSessionService_Stub stub(channel.get());
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
         brpc::Controller cntl;
-        std::string trace_id = chatnow::gateway::gateway_setup_trace(request, cntl);
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
         response.set_header("X-Trace-Id", trace_id);
-        stub.GetMemberIdList(&cntl, &req, &rsp, nullptr);
-        if(cntl.Failed()) {
-            LOG_ERROR("请求ID - {} 会话管理子服务调用失败: {}", req.request_id(), cntl.ErrorText());
-            return err_response("会话管理子服务调用失败");
+        stub.GetMemberIds(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} GetMemberIds 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
         }
-        //5. 向客户端进行响应
-        response.set_content(rsp.SerializeAsString(), "application/x-protbuf");
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void DismissChatSession(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        ::chatnow::conversation::DismissConversationReq req;
+        ::chatnow::conversation::DismissConversationRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("DismissConversationReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse DismissConversationReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
+        }
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.DismissConversation(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} DismissConversation 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+    }
+    void SaveDraft(const httplib::Request &request, httplib::Response &response) {
+        chatnow::gateway::LogContextScope _trace_scope;
+        ::chatnow::conversation::SaveDraftReq req;
+        ::chatnow::conversation::SaveDraftRsp rsp;
+        auto err_response = [&rsp, &response](int32_t code, const std::string &errmsg) -> void {
+            auto* h = rsp.mutable_header();
+            h->set_success(false);
+            h->set_error_code(code);
+            h->set_error_message(errmsg);
+            response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
+        };
+        if (!req.ParseFromString(request.body)) {
+            LOG_ERROR("SaveDraftReq 反序列化失败");
+            return err_response(::chatnow::error::kSystemInvalidArgument, "parse SaveDraftReq failed");
+        }
+        chatnow::gateway::AuthInfo _auth;
+        if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec, _jwt_store,
+                                                 /*whitelisted=*/false, _auth)) {
+            return;
+        }
+        auto channel = _mm_channels->choose(_conversation_service_name);
+        if (!channel) {
+            LOG_ERROR("rid={} 未找到可提供业务的 conversation 子服务节点", req.request_id());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service unavailable");
+        }
+        ::chatnow::conversation::ConversationService_Stub stub(channel.get());
+        brpc::Controller cntl;
+        std::string trace_id = chatnow::gateway::apply_auth_to_brpc(request, cntl, _auth);
+        response.set_header("X-Trace-Id", trace_id);
+        stub.SaveDraft(&cntl, &req, &rsp, nullptr);
+        if (cntl.Failed()) {
+            LOG_ERROR("rid={} SaveDraft 调用失败: {}", req.request_id(), cntl.ErrorText());
+            return err_response(::chatnow::error::kSystemUnavailable, "conversation service rpc failed");
+        }
+        response.set_content(rsp.SerializeAsString(), "application/x-protobuf");
     }
     void GetOfflineMsg(const httplib::Request &request, httplib::Response &response) {
         chatnow::gateway::LogContextScope _trace_scope;
@@ -2100,7 +2096,7 @@ private:
         }
         req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
+        auto channel = _mm_channels->choose(_conversation_service_name);
         if(!channel) {
             LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
             return err_response("未找到可提供业务的会话管理子服务节点");
@@ -2140,7 +2136,7 @@ private:
         }
         req.set_user_id(_auth.user_id);
         //3. 将请求转发给消息转发子服务进行业务处理
-        auto channel = _mm_channels->choose(_chatsession_service_name);
+        auto channel = _mm_channels->choose(_conversation_service_name);
         if(!channel) {
             LOG_ERROR("请求ID - {} 未找到可提供业务的会话管理子服务节点", req.request_id());
             return err_response("未找到可提供业务的会话管理子服务节点");
@@ -2167,7 +2163,7 @@ private:
     std::string _transmite_service_name;
     std::string _message_service_name;
     std::string _relationship_service_name;
-    std::string _chatsession_service_name;
+    std::string _conversation_service_name;
     std::string _push_service_name;
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discoverer;
@@ -2206,7 +2202,7 @@ public:
                             const std::string &transmite_service_name,
                             const std::string &message_service_name,
                             const std::string &relationship_service_name,
-                            const std::string &chatsession_service_name,
+                            const std::string &conversation_service_name,
                             const std::string &push_service_name = "/service/push_service")
     {
         _speech_service_name = speech_service_name;
@@ -2215,7 +2211,7 @@ public:
         _transmite_service_name = transmite_service_name;
         _message_service_name = message_service_name;
         _relationship_service_name = relationship_service_name;
-        _chatsession_service_name = chatsession_service_name;
+        _conversation_service_name = conversation_service_name;
         _push_service_name = push_service_name;
 
         _mm_channels = std::make_shared<ServiceManager>();
@@ -2225,7 +2221,7 @@ public:
         _mm_channels->declared(_transmite_service_name);
         _mm_channels->declared(_message_service_name);
         _mm_channels->declared(_relationship_service_name);
-        _mm_channels->declared(_chatsession_service_name);
+        _mm_channels->declared(_conversation_service_name);
         _mm_channels->declared(_push_service_name);
 
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
@@ -2266,7 +2262,7 @@ public:
                                                                 _transmite_service_name,
                                                                 _message_service_name,
                                                                 _relationship_service_name,
-                                                                _chatsession_service_name,
+                                                                _conversation_service_name,
                                                                 _push_service_name);
         return server;
     }
@@ -2283,7 +2279,7 @@ private:
     std::string _transmite_service_name;
     std::string _message_service_name;
     std::string _relationship_service_name;
-    std::string _chatsession_service_name;
+    std::string _conversation_service_name;
     std::string _push_service_name;
     ServiceManager::ptr _mm_channels;
     Discovery::ptr _service_discoverer;
