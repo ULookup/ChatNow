@@ -60,5 +60,6 @@ inline constexpr int32_t kSystemInternalError      = 9001;
 inline constexpr int32_t kSystemUnavailable        = 9002;
 inline constexpr int32_t kSystemTimeout            = 9003;
 inline constexpr int32_t kSystemInvalidArgument    = 9004;
+inline constexpr int32_t kNotImplemented           = 9005;
 
 }  // namespace chatnow::error
