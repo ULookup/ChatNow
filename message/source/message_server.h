@@ -386,8 +386,17 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "DeleteMessages not implemented");
+            if (req->message_ids_size() == 0 || req->message_ids_size() > kMaxLimit)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "message_ids size out of range");
+            require_member_(req->conversation_id(), auth.user_id);
+            std::vector<unsigned long> mids;
+            for (int i = 0; i < req->message_ids_size(); ++i)
+                mids.push_back(static_cast<unsigned long>(req->message_ids(i)));
+            int n = _mysql_user_timeline->delete_by_message_ids(
+                auth.user_id, req->conversation_id(), mids);
+            LOG_INFO("DeleteMessages uid={} cid={} n={}", auth.user_id, req->conversation_id(), n);
+            // 不推通知
         });
     }
 
@@ -397,8 +406,10 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "ClearConversation not implemented");
+            require_member_(req->conversation_id(), auth.user_id);
+            int n = _mysql_user_timeline->delete_by_conversation(
+                auth.user_id, req->conversation_id());
+            LOG_INFO("ClearConversation uid={} cid={} n={}", auth.user_id, req->conversation_id(), n);
         });
     }
 
@@ -408,8 +419,10 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "SelectByClientMsgId not implemented");
+            if (req->client_msg_id().empty()) return;
+            auto msg = _mysql_msg->select_by_client_msg(auth.user_id, req->client_msg_id());
+            if (!msg) return;
+            convert_db_message_to_proto_(*msg, rsp->mutable_message());
         });
     }
 
@@ -419,8 +432,15 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "UpdateReadAck not implemented");
+            if (req->seq_id() == 0)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "seq_id required");
+            require_member_(req->conversation_id(), auth.user_id);
+            bool ok = _mysql_member->update_last_ack_seq(
+                req->conversation_id(), auth.user_id, req->seq_id());
+            if (!ok)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
+                                              "update last_ack_seq failed");
         });
     }
 
