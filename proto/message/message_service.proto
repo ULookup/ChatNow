@@ -1,6 +1,8 @@
 syntax = "proto3";
 package chatnow.message;
 
+option cc_generic_services = true;
+
 import "common/envelope.proto";
 import "message/message_types.proto";
 
@@ -29,8 +31,8 @@ message SyncMessagesReq {
     int32 limit = 4;
 }
 message SyncMessagesRsp {
-    ResponseHeader header = 1;
-    repeated Message messages = 2;
+    chatnow.common.ResponseHeader header = 1;
+    repeated chatnow.message.Message messages = 2;
     bool has_more = 3;
     uint64 latest_seq = 4;
 }
@@ -42,8 +44,8 @@ message GetHistoryReq {
     int32 limit = 4;
 }
 message GetHistoryRsp {
-    ResponseHeader header = 1;
-    repeated Message messages = 2;
+    chatnow.common.ResponseHeader header = 1;
+    repeated chatnow.message.Message messages = 2;
     bool has_more = 3;
 }
 
@@ -52,8 +54,8 @@ message GetMessagesByIdReq {
     repeated int64 message_ids = 2;
 }
 message GetMessagesByIdRsp {
-    ResponseHeader header = 1;
-    repeated Message messages = 2;
+    chatnow.common.ResponseHeader header = 1;
+    repeated chatnow.message.Message messages = 2;
 }
 
 message SearchMessagesReq {
@@ -64,8 +66,8 @@ message SearchMessagesReq {
     string cursor = 5;
 }
 message SearchMessagesRsp {
-    ResponseHeader header = 1;
-    repeated Message messages = 2;
+    chatnow.common.ResponseHeader header = 1;
+    repeated chatnow.message.Message messages = 2;
     bool has_more = 3;
     string next_cursor = 4;
 }
@@ -75,29 +77,29 @@ message RecallMessageReq {
     string conversation_id = 2;
     int64 message_id = 3;
 }
-message RecallMessageRsp { ResponseHeader header = 1; }
+message RecallMessageRsp { chatnow.common.ResponseHeader header = 1; }
 
 message AddReactionReq {
     string request_id = 1;
     int64 message_id = 2;
     string emoji = 3;
 }
-message AddReactionRsp { ResponseHeader header = 1; }
+message AddReactionRsp { chatnow.common.ResponseHeader header = 1; }
 
 message RemoveReactionReq {
     string request_id = 1;
     int64 message_id = 2;
     string emoji = 3;
 }
-message RemoveReactionRsp { ResponseHeader header = 1; }
+message RemoveReactionRsp { chatnow.common.ResponseHeader header = 1; }
 
 message GetReactionsReq {
     string request_id = 1;
     int64 message_id = 2;
 }
 message GetReactionsRsp {
-    ResponseHeader header = 1;
-    repeated ReactionGroup reactions = 2;
+    chatnow.common.ResponseHeader header = 1;
+    repeated chatnow.message.ReactionGroup reactions = 2;
 }
 
 message PinMessageReq {
@@ -105,22 +107,22 @@ message PinMessageReq {
     string conversation_id = 2;
     int64 message_id = 3;
 }
-message PinMessageRsp { ResponseHeader header = 1; }
+message PinMessageRsp { chatnow.common.ResponseHeader header = 1; }
 
 message UnpinMessageReq {
     string request_id = 1;
     string conversation_id = 2;
     int64 message_id = 3;
 }
-message UnpinMessageRsp { ResponseHeader header = 1; }
+message UnpinMessageRsp { chatnow.common.ResponseHeader header = 1; }
 
 message ListPinnedReq {
     string request_id = 1;
     string conversation_id = 2;
 }
 message ListPinnedRsp {
-    ResponseHeader header = 1;
-    repeated Message messages = 2;
+    chatnow.common.ResponseHeader header = 1;
+    repeated chatnow.message.Message messages = 2;
 }
 
 message DeleteMessagesReq {
@@ -128,28 +130,26 @@ message DeleteMessagesReq {
     string conversation_id = 2;
     repeated int64 message_ids = 3;
 }
-message DeleteMessagesRsp { ResponseHeader header = 1; }
+message DeleteMessagesRsp { chatnow.common.ResponseHeader header = 1; }
 
 message ClearConversationReq {
     string request_id = 1;
     string conversation_id = 2;
 }
-message ClearConversationRsp { ResponseHeader header = 1; }
+message ClearConversationRsp { chatnow.common.ResponseHeader header = 1; }
 
 message SelectByClientMsgIdReq {
     string request_id = 1;
-    string user_id = 2;
-    string client_msg_id = 3;
+    string client_msg_id = 2;
 }
 message SelectByClientMsgIdRsp {
-    ResponseHeader header = 1;
-    Message message = 2;
+    chatnow.common.ResponseHeader header = 1;
+    chatnow.message.Message message = 2;
 }
 
 message UpdateReadAckReq {
     string request_id = 1;
-    string user_id = 2;
-    string conversation_id = 3;
-    uint64 seq_id = 4;
+    string conversation_id = 2;
+    uint64 seq_id = 3;
 }
-message UpdateReadAckRsp { ResponseHeader header = 1; }
+message UpdateReadAckRsp { chatnow.common.ResponseHeader header = 1; }
