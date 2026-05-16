@@ -1,6 +1,8 @@
 syntax = "proto3";
 package chatnow.push;
 
+option cc_generic_services = true;
+
 import "common/types.proto";
 import "message/message_types.proto";
 
@@ -13,6 +15,9 @@ enum NotifyType {
     MESSAGE_RECALLED_NOTIFY = 5;
     PRESENCE_CHANGE_NOTIFY = 6;
     TYPING_NOTIFY = 7;
+    REACTION_CHANGED_NOTIFY = 8;
+    PIN_CHANGED_NOTIFY = 9;
+    READ_RECEIPT_NOTIFY = 10;
     CLIENT_AUTH = 49;
     MSG_PUSH_ACK = 50;
     CLIENT_HEARTBEAT = 51;
@@ -36,11 +41,11 @@ message NotifyHeartbeat {
     uint64 last_user_seq = 2;
 }
 
-message NotifyFriendAddApply { UserInfo user_info = 1; }
-message NotifyFriendAddProcess { bool agree = 1; UserInfo user_info = 2; }
+message NotifyFriendAddApply { chatnow.UserInfo user_info = 1; }
+message NotifyFriendAddProcess { bool agree = 1; chatnow.UserInfo user_info = 2; }
 message NotifyFriendRemove { string user_id = 1; }
 message NotifyNewConversation { bytes conversation_payload = 1; }
-message NotifyNewMessage { Message message_info = 1; }
+message NotifyNewMessage { chatnow.message.Message message_info = 1; }
 message NotifyMessageRecalled {
     string conversation_id = 1;
     int64 message_id = 2;
@@ -55,10 +60,31 @@ message NotifyTyping {
     bool is_typing = 3;
 }
 
+message NotifyReactionChanged {
+    string conversation_id = 1;
+    int64 message_id = 2;
+    string actor_user_id = 3;
+    string emoji = 4;
+    bool added = 5;
+}
+
+message NotifyPinChanged {
+    string conversation_id = 1;
+    int64 message_id = 2;
+    string actor_user_id = 3;
+    bool is_pinned = 4;
+}
+
+message NotifyReadReceipt {
+    string conversation_id = 1;
+    string reader_user_id = 2;
+    uint64 last_read_seq = 3;
+}
+
 message NotifyMessage {
     optional string notify_event_id = 1;
     NotifyType notify_type = 2;
-    optional string trace_id = 14;             // P8: 推送链路 trace_id 透传
+    optional string trace_id = 14;
     oneof notify_remarks {
         NotifyFriendAddApply friend_add_apply = 3;
         NotifyFriendAddProcess friend_process_result = 4;
@@ -71,5 +97,8 @@ message NotifyMessage {
         NotifyMessageRecalled message_recalled = 11;
         NotifyPresenceChange presence_change = 12;
         NotifyTyping typing = 13;
+        NotifyReactionChanged reaction_changed = 15;
+        NotifyPinChanged pin_changed = 16;
+        NotifyReadReceipt read_receipt = 17;
     }
 }
