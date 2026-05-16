@@ -13,7 +13,7 @@ DEFINE_int32(listen_port, 10003, "RPC服务器监听端口");
 DEFINE_int32(rpc_timeout, -1, "RPC调用超时时间");
 DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
 
-DEFINE_string(file_service, "/service/file_service", "文件管理子服务名称");
+DEFINE_string(media_public_url_prefix, "https://cdn.chatnow.com/public", "头像公开访问 URL 前缀");
 
 DEFINE_string(es_host, "http://127.0.0.1:9200/", "ES搜索引擎服务器URL");
 
@@ -42,17 +42,18 @@ int main(int argc, char *argv[])
     google::ParseCommandLineFlags(&argc, &argv, true);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
-    chatnow::UserServerBuilder usb;
-    usb.make_es_object({FLAGS_es_host});
-    usb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
-    usb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
-    usb.make_jwt_object(FLAGS_auth_config);
-    usb.make_mail_object(FLAGS_mail_user, FLAGS_mail_paswd, FLAGS_mail_host, FLAGS_mail_from);
-    usb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_file_service);
-    usb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
-    usb.make_registry_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
+    chatnow::IdentityServerBuilder isb;
+    isb.make_es_object({FLAGS_es_host});
+    isb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
+    isb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
+    isb.make_jwt_object(FLAGS_auth_config);
+    isb.make_mail_object(FLAGS_mail_user, FLAGS_mail_paswd, FLAGS_mail_host, FLAGS_mail_from);
+    isb.make_media_config(FLAGS_media_public_url_prefix);
+    isb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service);
+    isb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
+    isb.make_registry_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
 
-    auto server = usb.build();
+    auto server = isb.build();
     server->start();
 
     return 0;
