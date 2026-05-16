@@ -37,6 +37,12 @@
 #include "common/dao/data_redis.hpp"
 #include "common/mq/rabbitmq.hpp"
 
+#include <chrono>
+#include <map>
+#include <set>
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/date_time/gregorian/gregorian.hpp>
+
 namespace chatnow::message {
 
 inline constexpr int64_t kRecallTimeoutMs = 120 * 1000;
@@ -87,8 +93,31 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "GetHistory not implemented");
+            if (req->limit() <= 0 || req->limit() > kMaxLimit)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "limit out of range");
+            if (req->before_seq() == 0)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "before_seq must > 0");
+            require_member_(req->conversation_id(), auth.user_id);
+
+            auto db_msgs = _mysql_msg->select_history(req->conversation_id(),
+                                                      req->before_seq(),
+                                                      req->limit() + 1);
+            bool has_more = (static_cast<int>(db_msgs.size()) > req->limit());
+            if (has_more) db_msgs.pop_back();
+
+            std::vector<unsigned long> mids;
+            mids.reserve(db_msgs.size());
+            for (auto &m : db_msgs) {
+                auto *out = rsp->add_messages();
+                convert_db_message_to_proto_(m, out);
+                mids.push_back(m.message_id());
+            }
+            fill_reactions_for_messages_(mids, auth.user_id, rsp->mutable_messages());
+            fill_pin_flag_for_messages_(req->conversation_id(), mids, rsp->mutable_messages());
+
+            rsp->set_has_more(has_more);
         });
     }
 
@@ -98,8 +127,29 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "SyncMessages not implemented");
+            if (req->limit() <= 0 || req->limit() > kMaxLimit)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "limit out of range");
+            require_member_(req->conversation_id(), auth.user_id);
+
+            auto db_msgs = _mysql_msg->select_after(req->conversation_id(),
+                                                     req->after_seq(),
+                                                     req->limit() + 1);
+            bool has_more = (static_cast<int>(db_msgs.size()) > req->limit());
+            if (has_more) db_msgs.pop_back();
+
+            std::vector<unsigned long> mids;
+            mids.reserve(db_msgs.size());
+            for (auto &m : db_msgs) {
+                auto *out = rsp->add_messages();
+                convert_db_message_to_proto_(m, out);
+                mids.push_back(m.message_id());
+            }
+            fill_reactions_for_messages_(mids, auth.user_id, rsp->mutable_messages());
+            fill_pin_flag_for_messages_(req->conversation_id(), mids, rsp->mutable_messages());
+
+            rsp->set_has_more(has_more);
+            rsp->set_latest_seq(_mysql_msg->select_max_seq_by_conversation(req->conversation_id()));
         });
     }
 
@@ -109,8 +159,23 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "GetMessagesById not implemented");
+            if (req->message_ids_size() == 0 || req->message_ids_size() > kMaxLimit)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "message_ids size out of range");
+            std::vector<unsigned long> mids;
+            for (int i = 0; i < req->message_ids_size(); ++i)
+                mids.push_back(static_cast<unsigned long>(req->message_ids(i)));
+            auto db_msgs = _mysql_msg->select_by_ids(mids);
+
+            for (auto &m : db_msgs) {
+                auto self = _mysql_member->select_self(m.session_id(), auth.user_id);
+                if (!self || self->is_quit()) continue;
+                auto *out = rsp->add_messages();
+                convert_db_message_to_proto_(m, out);
+            }
+            std::vector<unsigned long> out_mids;
+            for (auto &m : rsp->messages()) out_mids.push_back(m.message_id());
+            fill_reactions_by_mids_(out_mids, auth.user_id, rsp->mutable_messages());
         });
     }
 
@@ -120,8 +185,22 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "SearchMessages not implemented");
+            if (req->keyword().empty())
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageContentInvalid,
+                                              "keyword empty");
+            if (req->limit() <= 0 || req->limit() > kMaxSearchLimit)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "limit out of range");
+            require_member_(req->conversation_id(), auth.user_id);
+
+            auto es_results = _es_msg->search(req->keyword(), req->conversation_id(),
+                                              req->limit());
+            for (auto &m : es_results) {
+                auto *out = rsp->add_messages();
+                convert_db_message_to_proto_(m, out);
+            }
+            rsp->set_has_more(false);
+            rsp->set_next_cursor("");
         });
     }
 
@@ -265,6 +344,7 @@ private:
 
     /* 要求 auth.user_id 是 cid 的成员，否则抛 kConversationNotMember */
     void require_member_(const std::string &cid, const std::string &uid) {
+        if (uid == kSystemUserId) return;
         auto self = _mysql_member->select_self(cid, uid);
         if (!self || self->is_quit()) {
             throw ::chatnow::ServiceError(
@@ -291,35 +371,89 @@ private:
         out->set_conversation_id(db.session_id());
         out->set_sender_id(db.user_id());
         out->set_seq_id(db.seq_id());
-        out->set_client_msg_id(db.client_msg_id());
-        out->set_created_at_ms(
-            static_cast<int64_t>(boost::posix_time::to_time_t(db.create_time())) * 1000);
-        out->set_content_text(db.content());
-        out->set_status(static_cast<chatnow::message::MessageStatus>(db.status()));
-        out->set_message_type(static_cast<chatnow::message::MessageType>(db.message_type()));
+        if (!db.client_msg_id().empty()) out->set_client_msg_id(db.client_msg_id());
+        out->set_status(static_cast<chatnow::message::MessageStatus>(static_cast<int>(db.status())));
+        out->set_message_type(static_cast<chatnow::message::MessageType>(static_cast<int>(db.message_type())));
+
+        namespace pt = boost::posix_time;
+        pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
+        int64_t ms = (db.create_time() - epoch).total_milliseconds();
+        if (ms < 0) ms = 0;
+        out->set_created_at_ms(ms);
+
+        // content 反序列化：根据 message_type 填充 oneof Content
+        auto *content = out->mutable_content();
+        switch (db.message_type()) {
+            case MessageType::TEXT:
+            case MessageType::STRING:
+                content->set_type(chatnow::message::TEXT);
+                content->mutable_text()->set_text(db.content());
+                break;
+            case MessageType::IMAGE:
+                content->set_type(chatnow::message::IMAGE);
+                content->mutable_image()->set_file_id(db.file_id());
+                break;
+            case MessageType::FILE:
+                content->set_type(chatnow::message::FILE);
+                content->mutable_file()->set_file_id(db.file_id());
+                content->mutable_file()->set_file_name(db.file_name());
+                if (db.file_size() > 0) content->mutable_file()->set_file_size(db.file_size());
+                break;
+            case MessageType::SPEECH:
+                content->set_type(chatnow::message::AUDIO);
+                content->mutable_audio()->set_file_id(db.file_id());
+                break;
+            default:
+                content->set_type(chatnow::message::TEXT);
+                content->mutable_text()->set_text(db.content());
+                break;
+        }
     }
 
-    // ====== reaction / pin 辅助（T11-T14 实现） ======
+    // ====== reaction / pin 辅助 ======
 
     void fill_reactions_for_messages_(const std::vector<unsigned long> &mids,
-                                       const std::string &self_uid,
+                                       const std::string &caller_uid,
                                        ::google::protobuf::RepeatedPtrField<chatnow::message::Message> *msgs) {
-        (void)mids; (void)self_uid; (void)msgs;
-        // T13 实现
+        if (mids.empty() || !_mysql_reaction) return;
+        auto rows = _mysql_reaction->select_by_messages(mids);
+        std::map<unsigned long, std::map<std::string, std::vector<std::string>>> grouped;
+        for (auto &r : rows) grouped[r.message_id][r.emoji].push_back(r.user_id);
+        for (auto &m : *msgs) {
+            auto it = grouped.find(m.message_id());
+            if (it == grouped.end()) continue;
+            for (auto &[emoji, uids] : it->second) {
+                auto *g = m.add_reactions();
+                g->set_emoji(emoji);
+                g->set_count(static_cast<int>(uids.size()));
+                bool self = false;
+                for (size_t i = 0; i < uids.size(); ++i) {
+                    if (uids[i] == caller_uid) self = true;
+                    if (i < 3) g->add_recent_user_ids(uids[i]);
+                }
+                g->set_self_reacted(self);
+            }
+        }
     }
 
     void fill_reactions_by_mids_(const std::vector<unsigned long> &mids,
-                                  const std::string &self_uid,
+                                  const std::string &caller_uid,
                                   ::google::protobuf::RepeatedPtrField<chatnow::message::Message> *msgs) {
-        (void)mids; (void)self_uid; (void)msgs;
-        // T13 实现
+        fill_reactions_for_messages_(mids, caller_uid, msgs);
     }
 
     void fill_pin_flag_for_messages_(const std::string &cid,
                                       const std::vector<unsigned long> &mids,
                                       ::google::protobuf::RepeatedPtrField<chatnow::message::Message> *msgs) {
-        (void)cid; (void)mids; (void)msgs;
-        // T14 实现
+        if (mids.empty() || !_mysql_pin) return;
+        auto pinned = _mysql_pin->list_pinned_in(cid, mids);
+        std::set<unsigned long> pset(pinned.begin(), pinned.end());
+        for (auto &m : *msgs) m.set_is_pinned(pset.count(m.message_id()) > 0);
+    }
+
+    int64_t now_ms_() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
     // ====== notify 发布辅助（fail-soft） ======
