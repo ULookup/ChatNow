@@ -38,7 +38,7 @@ namespace key
     inline constexpr const char* kLastMsg    = "im:last:";          // ssid       -> 最后一条消息预览(JSON)
     inline constexpr const char* kDeviceSet  = "im:dev:";           // uid        -> SET<device_id>
     inline constexpr const char* kReadAck    = "im:read:";          // mid        -> SET<uid>
-    inline constexpr const char* kMembers    = "im:members:";       // ssid       -> SET<user_id>
+    inline constexpr const char* kMembers    = "im:conversation:members:"; // cid -> SET<user_id>
     inline constexpr const char* kRateUser   = "im:rl:user:";       // uid        -> 令牌桶
     inline constexpr const char* kRateSsid   = "im:rl:ssid:";       // ssid       -> 令牌桶
     inline constexpr const char* kOnline     = "im:online:";        // uid        -> SET<push_instance_id>
