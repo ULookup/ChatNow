@@ -84,14 +84,14 @@ services:
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
       /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/file_server -flagfile=/im/conf/file_server.conf"
-  friend_server:
-    build: ./friend
-    container_name: friend_server-service
+  relationship_server:
+    build: ./relationship
+    container_name: relationship_server-service
     volumes:
       #1. 希望容器内的程序能访问宿主机上的文件
       #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/friend_server.conf:/im/conf/friend_server.conf
+      - ./conf/relationship_server.conf:/im/conf/relationship_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -104,7 +104,7 @@ services:
       - elasticsearch
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200 -c "/im/bin/friend_server -flagfile=/im/conf/friend_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200 -c "/im/bin/relationship_server -flagfile=/im/conf/relationship_server.conf"
   gateway_server:
     build: ./gateway
     container_name: gateway_server-service
