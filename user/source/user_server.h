@@ -321,6 +321,148 @@ public:
         }
     }
 
+    void SendVerifyCode(::google::protobuf::RpcController* controller,
+                        const ::chatnow::identity::SendVerifyCodeReq* request,
+                        ::chatnow::identity::SendVerifyCodeRsp* response,
+                        ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* header = response->mutable_header();
+        header->set_request_id(request->request_id());
+        try {
+            if (request->has_email()) {
+                std::string mail = request->email();
+                if (!mail_check(mail)) {
+                    throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                       "email format invalid");
+                }
+                std::string code_id = uuid();
+                std::string code = verifyCode();
+                if (!_mail_client->send(mail, code)) {
+                    throw ServiceError(::chatnow::error::kSystemInternalError,
+                                       "send email failed");
+                }
+                _redis_codes->append(code_id, code);
+                response->set_verify_code_id(code_id);
+            } else if (request->has_phone()) {
+                throw ServiceError(::chatnow::error::kNotImplemented,
+                                   "phone verification not yet supported");
+            } else {
+                throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                   "no destination specified");
+            }
+            header->set_success(true);
+            header->set_error_code(::chatnow::common::OK);
+            LOG_INFO("SendVerifyCode OK rid={}", request->request_id());
+        } catch (const ServiceError& e) {
+            header->set_success(false);
+            header->set_error_code(e.code());
+            header->set_error_message(e.message());
+            LOG_WARN("SendVerifyCode 失败 rid={} code={}",
+                     request->request_id(), e.code());
+        } catch (const std::exception& e) {
+            header->set_success(false);
+            header->set_error_code(::chatnow::error::kSystemInternalError);
+            header->set_error_message("internal error");
+            LOG_ERROR("SendVerifyCode 异常 rid={}: {}", request->request_id(), e.what());
+        }
+    }
+
+    void GetProfile(::google::protobuf::RpcController* controller,
+                    const ::chatnow::identity::GetProfileReq* request,
+                    ::chatnow::identity::GetProfileRsp* response,
+                    ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(controller);
+        HANDLE_RPC(cntl, request, response, {
+            std::string uid = request->has_user_id() ? request->user_id() : auth.user_id;
+            auto user = _mysql_user->select_by_id(uid);
+            if (!user) {
+                throw ServiceError(::chatnow::error::kAuthUserNotFound,
+                                   "user not found: " + uid);
+            }
+            fill_user_info(response->mutable_user_info(), *user);
+        });
+    }
+
+    void UpdateProfile(::google::protobuf::RpcController* controller,
+                       const ::chatnow::identity::UpdateProfileReq* request,
+                       ::chatnow::identity::UpdateProfileRsp* response,
+                       ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(controller);
+        HANDLE_RPC(cntl, request, response, {
+            auto user = _mysql_user->select_by_id(auth.user_id);
+            if (!user) {
+                throw ServiceError(::chatnow::error::kAuthUserNotFound,
+                                   "user not found");
+            }
+            if (request->has_nickname()) {
+                if (!nickname_check(request->nickname())) {
+                    throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
+                                       "nickname invalid");
+                }
+                user->nickname(request->nickname());
+            }
+            if (request->has_bio()) {
+                user->description(request->bio());
+            }
+            if (request->has_avatar_file_id()) {
+                user->avatar_id(request->avatar_file_id());
+            }
+            if (request->has_phone()) {
+                user->phone(request->phone());
+            }
+            if (!_mysql_user->update(user)) {
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "db update failed");
+            }
+            _es_user->append_data(user->user_id(), user->mail(), user->phone(),
+                                  user->nickname(), user->description(),
+                                  user->avatar_id());
+            fill_user_info(response->mutable_user_info(), *user);
+        });
+    }
+
+    void GetMultiUserInfo(::google::protobuf::RpcController* controller,
+                          const ::chatnow::identity::GetMultiUserInfoReq* request,
+                          ::chatnow::identity::GetMultiUserInfoRsp* response,
+                          ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(controller);
+        HANDLE_RPC(cntl, request, response, {
+            std::vector<std::string> id_list;
+            for (int i = 0; i < request->users_id_size(); ++i) {
+                id_list.push_back(request->users_id(i));
+            }
+            auto users = _mysql_user->select_multi_users(id_list);
+            auto* user_map = response->mutable_users_info();
+            for (auto& u : users) {
+                ::chatnow::common::UserInfo ui;
+                fill_user_info(&ui, u);
+                (*user_map)[ui.user_id()] = ui;
+            }
+        });
+    }
+
+    void SearchUsers(::google::protobuf::RpcController* controller,
+                     const ::chatnow::identity::SearchUsersReq* request,
+                     ::chatnow::identity::SearchUsersRsp* response,
+                     ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard rpc_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(controller);
+        HANDLE_RPC(cntl, request, response, {
+            auto users = _es_user->search(request->search_key(), 20);
+            for (auto& u : users) {
+                fill_user_info(response->add_user_info(), u);
+            }
+        });
+    }
+
 private:
     std::shared_ptr<UserTable>          _mysql_user;
     std::shared_ptr<ESUser>             _es_user;
