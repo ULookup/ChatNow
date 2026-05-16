@@ -68,22 +68,22 @@ public:
     // T11 已替换：CreateConversation / UpdateConversation /
     //              DismissConversation / QuitConversation
     // T12 已替换：AddMembers / RemoveMembers / TransferOwner / ChangeMemberRole
-    // T13 已替换：SetMute / SetPin / SetVisible / SaveDraft
-    #define _PLACEHOLDER_RPC(Method, Req, Rsp) \
-        void Method(::google::protobuf::RpcController* base_cntl, \
-                    const ::chatnow::conversation::Req* req, \
-                    ::chatnow::conversation::Rsp* rsp, \
-                    ::google::protobuf::Closure* done) override { \
-            brpc::ClosureGuard done_guard(done); \
-            (void)base_cntl; \
-            rsp->mutable_header()->set_request_id(req->request_id()); \
-            rsp->mutable_header()->set_success(false); \
-            rsp->mutable_header()->set_error_code( \
-                ::chatnow::error::kSystemInternalError); \
-            rsp->mutable_header()->set_error_message("not implemented"); \
-        }
-    _PLACEHOLDER_RPC(MarkRead,           MarkReadReq,           MarkReadRsp)
-    #undef _PLACEHOLDER_RPC
+    // —— MarkRead（T14） ——
+    void MarkRead(::google::protobuf::RpcController* base_cntl,
+                  const ::chatnow::conversation::MarkReadReq* req,
+                  ::chatnow::conversation::MarkReadRsp* rsp,
+                  ::google::protobuf::Closure* done) override
+    {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        HANDLE_RPC(cntl, req, rsp, {
+            if(!require_member_(req->conversation_id(), auth.user_id))
+                throw ServiceError(::chatnow::error::kConversationNotMember, "not member");
+            (void)_mysql_member->update_last_read_seq(req->conversation_id(),
+                                                     auth.user_id, req->last_read_seq());
+            // GROUP READ_RECEIPT_NOTIFY 暂不推（YAGNI），PRIVATE 需要时由 Push 接入
+        });
+    }
 
     // —— 4 个会话生命周期 RPC（T11） ——
 
