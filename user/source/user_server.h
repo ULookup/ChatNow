@@ -17,6 +17,7 @@
 #include "auth/auth_context.hpp"
 #include "auth/jwt_codec.hpp"
 #include "auth/jwt_store.hpp"
+#include "auth/bcrypt_util.hpp"
 #include "auth/auth_config_loader.hpp"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
@@ -36,11 +37,22 @@ class IdentityServiceImpl : public ::chatnow::identity::IdentityService
 {
 public:
     IdentityServiceImpl(const std::shared_ptr<odb::core::database> &mysql_client,
+                        const std::shared_ptr<elasticlient::Client> &es_client,
+                        const std::shared_ptr<sw::redis::Redis> &redis_client,
+                        const std::shared_ptr<MailClient> &mail_client,
                         const std::shared_ptr<auth::JwtCodec> &jwt_codec,
-                        const std::shared_ptr<auth::JwtStore> &jwt_store)
+                        const std::shared_ptr<auth::JwtStore> &jwt_store,
+                        const std::string &media_public_url_prefix)
         : _mysql_user(std::make_shared<UserTable>(mysql_client)),
+          _es_user(std::make_shared<ESUser>(es_client)),
+          _redis_codes(std::make_shared<Codes>(redis_client)),
+          _mail_client(mail_client),
           _jwt_codec(jwt_codec),
-          _jwt_store(jwt_store) {}
+          _jwt_store(jwt_store),
+          _media_public_url_prefix(media_public_url_prefix)
+    {
+        _es_user->create_index();
+    }
 
     ~IdentityServiceImpl() override = default;
 
@@ -54,14 +66,18 @@ public:
         auto* header = response->mutable_header();
         header->set_request_id(request->request_id());
         try {
-            // 1. 凭据校验（P2 仅支持 username_pwd；phone_code 留 P3）
+            // 1. 凭据校验
+            if (request->has_phone_code()) {
+                throw ServiceError(::chatnow::error::kNotImplemented,
+                                   "phone_code login not yet supported");
+            }
             if (!request->has_username_pwd()) {
                 throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
-                                   "phone_code login not supported in P2");
+                                   "no valid credential provided");
             }
             const auto& cred = request->username_pwd();
             auto user = _mysql_user->select_by_nickname(cred.username());
-            if (!user || user->password() != cred.password()) {
+            if (!user || !auth::check_password(cred.password(), user->password())) {
                 throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
                                    "username or password incorrect");
             }
@@ -225,8 +241,57 @@ public:
 
 private:
     std::shared_ptr<UserTable>          _mysql_user;
+    std::shared_ptr<ESUser>             _es_user;
+    std::shared_ptr<Codes>              _redis_codes;
+    std::shared_ptr<MailClient>         _mail_client;
     std::shared_ptr<auth::JwtCodec>     _jwt_codec;
     std::shared_ptr<auth::JwtStore>     _jwt_store;
+    std::string                         _media_public_url_prefix;
+
+    // ---- 输入校验（从旧 UserServiceImpl 搬迁） ----
+    static bool nickname_check(const std::string &nickname) {
+        if (nickname.size() < 3 || nickname.size() > 22) return false;
+        for (char c : nickname) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-'))
+                return false;
+        }
+        return true;
+    }
+
+    static bool password_check(const std::string &password) {
+        if (password.size() < 6 || password.size() > 15) return false;
+        for (char c : password) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '_' || c == '-'))
+                return false;
+        }
+        return true;
+    }
+
+    static bool mail_check(const std::string &mail) {
+        auto at = mail.find('@');
+        auto dot = mail.rfind('.');
+        auto sp = mail.find(' ');
+        return at != std::string::npos && dot != std::string::npos && sp == std::string::npos;
+    }
+
+    // ---- 工具方法 ----
+    std::string uuid() { return utils::uuid(); }
+
+    std::string make_avatar_url(const std::string &avatar_id) {
+        if (avatar_id.empty() || _media_public_url_prefix.empty()) return "";
+        return _media_public_url_prefix + "/" + avatar_id;
+    }
+
+    // ---- UserInfo 组装（后续 RPC 共用） ----
+    void fill_user_info(::chatnow::common::UserInfo *u, const User &user) {
+        u->set_user_id(user.user_id());
+        u->set_nickname(user.nickname());
+        if (!user.description().empty()) u->set_bio(user.description());
+        if (!user.phone().empty()) u->set_phone(user.phone());
+        u->set_avatar_url(make_avatar_url(user.avatar_id()));
+    }
 };
 
 
