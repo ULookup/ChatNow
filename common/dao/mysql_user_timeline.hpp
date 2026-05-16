@@ -282,6 +282,66 @@ public:
         return true;
     }
 
+    /* brief: 批量删除 user_timeline 中指定 message_id 的行（仅删调用方自己的） */
+    int delete_by_message_ids(const std::string &uid,
+                              const std::string &cid,
+                              const std::vector<unsigned long> &mids) {
+        if(mids.empty()) return 0;
+        int n = 0;
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<UserTimeline>;
+            for(auto mid : mids) {
+                n += static_cast<int>(_db->erase_query<UserTimeline>(
+                    query::user_id == uid &&
+                    query::session_id == cid &&
+                    query::message_id == mid));
+            }
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("delete_by_message_ids uid={} cid={} size={}: {}",
+                      uid, cid, mids.size(), e.what());
+        }
+        return n;
+    }
+
+    /* brief: 清空 user_timeline 中该会话所有行（仅删调用方自己的） */
+    int delete_by_conversation(const std::string &uid, const std::string &cid) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<UserTimeline>;
+            int n = static_cast<int>(_db->erase_query<UserTimeline>(
+                query::user_id == uid && query::session_id == cid));
+            trans.commit();
+            return n;
+        } catch(std::exception &e) {
+            LOG_ERROR("delete_by_conversation uid={} cid={}: {}", uid, cid, e.what());
+            return 0;
+        }
+    }
+
+    /* brief: 取所有用户的 max(user_seq)，给 SeqGen 启动回填用 */
+    std::vector<std::pair<std::string, unsigned long>> select_max_user_seq_per_user() {
+        std::vector<std::pair<std::string, unsigned long>> res;
+        try {
+            odb::transaction trans(_db->begin());
+            using view = odb::query<UserTimeline>;
+            odb::result<UserTimeline> r(_db->query<UserTimeline>(
+                "GROUP BY " + view::user_id));
+            std::set<std::string> uids;
+            for(auto it = r.begin(); it != r.end(); ++it) uids.insert(it->user_id());
+            for(const auto &u : uids) {
+                std::shared_ptr<UserTimeline> m(_db->query_one<UserTimeline>(
+                    (view::user_id == u) + " ORDER BY " + view::user_seq + " DESC"));
+                if(m) res.emplace_back(u, m->user_seq());
+            }
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("select_max_user_seq_per_user: {}", e.what());
+        }
+        return res;
+    }
+
     /* brief: 获取所有用户的最大 user_seq（用于启动回填） */
     std::vector<std::pair<std::string, unsigned long>> select_max_user_seq() {
         std::vector<std::pair<std::string, unsigned long>> res;
