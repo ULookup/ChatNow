@@ -210,8 +210,38 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "RecallMessage not implemented");
+            auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
+            if (!msg)
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid not found");
+            if (msg->session_id() != req->conversation_id())
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "cid mismatch");
+            if (msg->status() == MessageStatus::REVOKED)
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageAlreadyRecalled,
+                                              "already recalled");
+            if (msg->status() == MessageStatus::DELETED)
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "deleted");
+
+            auto role = conv_role_(req->conversation_id(), auth.user_id);
+            bool is_admin = (role == MemberRole::OWNER || role == MemberRole::ADMIN);
+            bool is_self  = (msg->user_id() == auth.user_id);
+            namespace pt = boost::posix_time;
+            pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
+            int64_t created_ms = (msg->create_time() - epoch).total_milliseconds();
+            int64_t age_ms = now_ms_() - created_ms;
+            if (!is_admin) {
+                if (!is_self)
+                    throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
+                                                  "not msg author");
+                if (age_ms >= kRecallTimeoutMs)
+                    throw ::chatnow::ServiceError(::chatnow::error::kMessageRecallTimeout,
+                                                  "exceed 120s window");
+            }
+
+            if (!_mysql_msg->update_status_to_recalled(static_cast<unsigned long>(req->message_id())))
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageAlreadyRecalled,
+                                              "race lost or not recallable");
+
+            publish_recalled_notify_(req->conversation_id(), req->message_id());
         });
     }
 
@@ -353,8 +383,9 @@ private:
         }
     }
 
-    /* 查 uid 在 cid 中的角色（OWNER/ADMIN/MEMBER）；非成员抛异常 */
-    int conv_role_(const std::string &cid, const std::string &uid) {
+    /* 查 uid 在 cid 中的角色（OWNER/ADMIN/NORMAL）；非成员抛异常 */
+    MemberRole conv_role_(const std::string &cid, const std::string &uid) {
+        if (uid == kSystemUserId) return MemberRole::OWNER;
         auto self = _mysql_member->select_self(cid, uid);
         if (!self || self->is_quit()) {
             throw ::chatnow::ServiceError(
@@ -458,17 +489,80 @@ private:
 
     // ====== notify 发布辅助（fail-soft） ======
 
-    void publish_recalled_notify_(const std::string &cid, int64_t mid,
+    void publish_recalled_notify_(const std::string &cid, int64_t mid) {
+        if (!_push_publisher) return;
+        chatnow::push::NotifyMessage nm;
+        nm.set_notify_type(chatnow::push::MESSAGE_RECALLED_NOTIFY);
+        nm.mutable_message_recalled()->set_conversation_id(cid);
+        nm.mutable_message_recalled()->set_message_id(mid);
+        std::string payload = nm.SerializeAsString();
+        auto outbox = _push_outbox;
+        try {
+            _push_publisher->publish_confirm(payload, {},
+                [payload, outbox](PublishStatus st, const std::string &err) {
+                    if (st != PublishStatus::Acked && outbox)
+                        outbox->enqueue(payload, static_cast<long long>(time(nullptr)));
+                });
+        } catch (std::exception &e) {
+            LOG_ERROR("publish_recalled_notify exception cid={} mid={}: {}", cid, mid, e.what());
+            if (outbox) outbox->enqueue(payload, static_cast<long long>(time(nullptr)));
+        }
+    }
+
+    void publish_reaction_notify_(const std::string &target_uid,
+                                   const std::string &cid, int64_t mid,
                                    const std::string &actor_uid,
-                                   const std::vector<std::string> &member_ids);
-    void publish_reaction_notify_(const std::string &cid, int64_t mid,
-                                   const std::string &actor_uid,
-                                   const std::string &emoji, bool added);
+                                   const std::string &emoji, bool added) {
+        if (!_push_publisher || target_uid == actor_uid) return;
+        chatnow::push::NotifyMessage nm;
+        nm.set_notify_type(chatnow::push::REACTION_CHANGED_NOTIFY);
+        auto *r = nm.mutable_reaction_changed();
+        r->set_conversation_id(cid);
+        r->set_message_id(mid);
+        r->set_actor_user_id(actor_uid);
+        r->set_emoji(emoji);
+        r->set_added(added);
+        // Reaction 仅推消息发送者，直接调 PushService.PushToUser RPC
+        try {
+            auto channel = _mm_channels ? _mm_channels->choose("push_service") : nullptr;
+            if (!channel) { LOG_WARN("push channel unavailable; skip reaction notify"); return; }
+            chatnow::push::PushService_Stub stub(channel.get());
+            chatnow::push::PushToUserReq preq;
+            preq.set_request_id("reaction-notify");
+            preq.set_user_id(target_uid);
+            *preq.mutable_notify() = nm;
+            chatnow::push::PushToUserRsp prsp;
+            brpc::Controller pcntl;
+            pcntl.set_timeout_ms(500);
+            stub.PushToUser(&pcntl, &preq, &prsp, brpc::DoNothing());
+        } catch (std::exception &e) {
+            LOG_ERROR("publish_reaction_notify exception target={} mid={}: {}", target_uid, mid, e.what());
+        }
+    }
+
     void publish_pin_notify_(const std::string &cid, int64_t mid,
-                              const std::string &actor_uid, bool is_pinned,
-                              const std::vector<std::string> &member_ids);
-    void publish_push_(const std::string &user_id, uint64_t user_seq,
-                       const chatnow::push::NotifyMessage &notify);
+                              const std::string &actor_uid, bool is_pinned) {
+        if (!_push_publisher) return;
+        chatnow::push::NotifyMessage nm;
+        nm.set_notify_type(chatnow::push::PIN_CHANGED_NOTIFY);
+        auto *p = nm.mutable_pin_changed();
+        p->set_conversation_id(cid);
+        p->set_message_id(mid);
+        p->set_actor_user_id(actor_uid);
+        p->set_is_pinned(is_pinned);
+        std::string payload = nm.SerializeAsString();
+        auto outbox = _push_outbox;
+        try {
+            _push_publisher->publish_confirm(payload, {},
+                [payload, outbox](PublishStatus st, const std::string &err) {
+                    if (st != PublishStatus::Acked && outbox)
+                        outbox->enqueue(payload, static_cast<long long>(time(nullptr)));
+                });
+        } catch (std::exception &e) {
+            LOG_ERROR("publish_pin_notify exception cid={} mid={}: {}", cid, mid, e.what());
+            if (outbox) outbox->enqueue(payload, static_cast<long long>(time(nullptr)));
+        }
+    }
 
     // ====== 注入字段 ======
 
