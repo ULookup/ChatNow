@@ -251,8 +251,20 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "AddReaction not implemented");
+            if (req->emoji().empty() || req->emoji().size() > kMaxEmojiBytes)
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageContentInvalid,
+                                              "emoji length invalid");
+            auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
+            if (!msg) throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
+            require_member_(msg->session_id(), auth.user_id);
+            if (!_mysql_reaction->insert(static_cast<unsigned long>(req->message_id()),
+                                         auth.user_id, req->emoji()))
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
+                                              "reaction insert failed");
+
+            publish_reaction_notify_(msg->user_id(), msg->session_id(),
+                                     req->message_id(),
+                                     auth.user_id, req->emoji(), true);
         });
     }
 
@@ -262,8 +274,14 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "RemoveReaction not implemented");
+            if (req->emoji().empty() || req->emoji().size() > kMaxEmojiBytes)
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageContentInvalid, "emoji");
+            auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
+            if (!msg) throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
+            require_member_(msg->session_id(), auth.user_id);
+            if (!_mysql_reaction->remove(static_cast<unsigned long>(req->message_id()),
+                                         auth.user_id, req->emoji()))
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError, "remove failed");
         });
     }
 
@@ -273,8 +291,24 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                          "GetReactions not implemented");
+            auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
+            if (!msg) throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
+            require_member_(msg->session_id(), auth.user_id);
+
+            auto rows = _mysql_reaction->select_by_message(static_cast<unsigned long>(req->message_id()));
+            std::map<std::string, std::vector<std::string>> grouped;
+            for (auto &r : rows) grouped[r.emoji].push_back(r.user_id);
+            for (auto &[emoji, uids] : grouped) {
+                auto *g = rsp->add_reactions();
+                g->set_emoji(emoji);
+                g->set_count(static_cast<int>(uids.size()));
+                bool self = false;
+                for (size_t i = 0; i < uids.size(); ++i) {
+                    if (uids[i] == auth.user_id) self = true;
+                    if (i < 3) g->add_recent_user_ids(uids[i]);
+                }
+                g->set_self_reacted(self);
+            }
         });
     }
 
@@ -676,6 +710,7 @@ public:
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(_identity_service_name);
         _mm_channels->declared(_media_service_name);
+        _mm_channels->declared("/service/push_service");
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(),
                                 std::placeholders::_1, std::placeholders::_2);
         auto del_cb = std::bind(&ServiceManager::onServiceOffline, _mm_channels.get(),
