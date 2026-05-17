@@ -160,7 +160,7 @@ public:
             LOG_ERROR("Push-Consumer: 反序列化 InternalMessage 失败");
             return ConsumeAction::NackDiscard;
         }
-        const auto &msg_info = internal_msg.message_info();
+        const auto &msg_info = internal_msg.message();
 
         std::unordered_map<std::string, unsigned long> uid2seq;
         for (const auto &p : internal_msg.user_seqs()) uid2seq[p.user_id()] = p.user_seq();
@@ -327,9 +327,9 @@ private:
         }
 
         // JWT 验签
-        chatnow::auth::JwtPayload payload;
+        chatnow::auth::JwtClaims claims;
         try {
-            payload = _jwt_codec->verify(auth.access_token());
+            claims = _jwt_codec->verify(auth.access_token());
         } catch (const chatnow::ServiceError &e) {
             LOG_WARN("WS JWT 验签失败: {}", e.what());
             try { conn->close(websocketpp::close::status::unsupported_data,
@@ -337,9 +337,9 @@ private:
             return;
         }
 
-        std::string uid = payload.sub;
-        std::string did = payload.did;
-        std::string jti = payload.jti;
+        std::string uid = claims.sub;
+        std::string did = claims.did;
+        std::string jti = claims.jti;
 
         _connections->insert(conn, uid, did, jti);
         if (_online_route) _online_route->bind(uid, did, _instance_id);
@@ -469,7 +469,7 @@ public:
                         NotifyMessage notify_template;
                         notify_template.set_notify_type(NotifyType::CHAT_MESSAGE_NOTIFY);
                         notify_template.mutable_new_message_info()
-                            ->mutable_message_info()->CopyFrom(internal_msg.message_info());
+                            ->mutable_message_info()->CopyFrom(internal_msg.message());
 
                         for (auto &kv : peer_to_uids) {
                             auto channel = _mm_channels->choose(kv.first);
@@ -477,7 +477,7 @@ public:
                             PushService_Stub stub(channel.get());
                             auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
                             closure->req.set_request_id(
-                                internal_msg.message_info().client_msg_id());
+                                internal_msg.message().client_msg_id());
                             for (const auto &u : kv.second) closure->req.add_user_id_list(u);
                             closure->req.mutable_notify()->CopyFrom(notify_template);
                             for (const auto &up : internal_msg.user_seqs()) {
