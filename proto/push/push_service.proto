@@ -11,6 +11,7 @@ message PushToUserReq {
     string user_id = 2;
     chatnow.push.NotifyMessage notify = 3;
     optional uint64 user_seq = 4;
+    repeated string target_device_ids = 5;   // 空=所有设备；非空=仅指定设备
 }
 message PushToUserRsp {
     chatnow.common.ResponseHeader header = 1;
