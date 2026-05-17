@@ -25,7 +25,7 @@ DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
 DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
 DEFINE_string(mq_user, "root", "MQ 用户");
-DEFINE_string(mq_pswd, "YHY060403", "MQ 密码");
+DEFINE_string(mq_pswd, "", "MQ 密码");
 DEFINE_string(mq_host, "127.0.0.1:5672", "MQ 地址");
 DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送交换机");
 DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列");
@@ -37,7 +37,7 @@ DEFINE_int32(resend_max_age_sec, 5, "未 ack 项入队后等待多少秒视为�
 
 // JWT（开发阶段临时键，后续配置化）
 DEFINE_string(jwt_current_kid, "v1", "JWT 当前 key ID");
-DEFINE_string(jwt_key_v1, "0123456789abcdef0123456789abcdef", "JWT v1 签名密钥 (>=32 字节)");
+DEFINE_string(jwt_key_v1, "", "JWT v1 签名密钥 (>=32 字节)");
 
 int main(int argc, char *argv[])
 {

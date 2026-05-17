@@ -25,6 +25,7 @@
 #include "message/message_service.pb.h"
 #include "message/message_internal.pb.h"
 #include <sw/redis++/redis++.h>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <limits>
@@ -130,6 +131,11 @@ public:
         std::unordered_map<std::string, unsigned long> uid2seq;
         for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
         try {
+            auto auth = ::chatnow::auth::extract_auth(cntl);
+            response->mutable_header()->set_success(true);
+            response->mutable_header()->set_error_code(::chatnow::error::kOK);
+            response->mutable_header()->set_request_id(request->request_id());
+
             const auto &base_notify = request->notify();
             bool is_chat_msg = (base_notify.notify_type() == NotifyType::CHAT_MESSAGE_NOTIFY) &&
                                base_notify.has_new_message_info();
@@ -237,8 +243,9 @@ public:
             for (const auto &did : devices) {
                 std::string peer = _online_route->device_instance(uid, did);
                 if (peer.empty() || peer == _instance_id) continue;
-                peer_to_uids[peer].push_back(uid);
-                break;
+                auto &vec = peer_to_uids[peer];
+                if (std::find(vec.begin(), vec.end(), uid) == vec.end())
+                    vec.push_back(uid);
             }
         }
 
