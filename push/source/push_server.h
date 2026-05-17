@@ -7,6 +7,7 @@
 #include "mq/rabbitmq.hpp"
 #include "mq/trace_headers.hpp"
 #include "log/log_context.hpp"
+#include <brpc/server.h>
 #include "dao/data_redis.hpp"
 #include "auth/auth_context.hpp"
 #include "auth/forward_auth.hpp"
@@ -24,7 +25,6 @@
 #include "message/message_service.pb.h"
 #include "message/message_internal.pb.h"
 #include <sw/redis++/redis++.h>
-#include <brpc/server.h>
 #include <thread>
 #include <chrono>
 #include <limits>
@@ -118,7 +118,6 @@ public:
             response->mutable_header()->set_error_message("internal error");
             LOG_ERROR("rpc_exception what={}", e.what());
         }
-    }
     }
 
     void PushBatch(google::protobuf::RpcController* base_cntl,
