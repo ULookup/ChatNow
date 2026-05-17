@@ -60,11 +60,13 @@ public:
     }
     ~PushServiceImpl() { stop_cross_outbox_reaper(); }
 
-    void PushToUser(google::protobuf::RpcController* controller,
+    void PushToUser(google::protobuf::RpcController* base_cntl,
                     const PushToUserReq* request,
                     PushToUserRsp* response,
                     google::protobuf::Closure* done) override
     {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, request, response, {
             // 若调用方带了 user_seq：覆写 user_seq 到 payload
             std::string payload;
@@ -107,11 +109,13 @@ public:
         });
     }
 
-    void PushBatch(google::protobuf::RpcController* controller,
+    void PushBatch(google::protobuf::RpcController* base_cntl,
                    const PushBatchReq* request,
                    PushBatchRsp* response,
                    google::protobuf::Closure* done) override
     {
+        brpc::ClosureGuard done_guard(done);
+        auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, request, response, {
             std::unordered_map<std::string, unsigned long> uid2seq;
             for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
@@ -582,15 +586,6 @@ private:
     std::atomic<bool> _cross_reaper_running{false};
     std::thread _cross_reaper_thread;
     std::string _cross_reaper_owner;
-    // 本地消息缓存（心跳重传优先命中）
-    struct MsgCacheEntry {
-        std::string key;
-        std::string payload;
-    };
-    std::deque<MsgCacheEntry> _msg_evict_list;
-    std::unordered_map<std::string, decltype(_msg_evict_list)::iterator> _msg_cache;
-    std::mutex _msg_cache_mu;
-    size_t _msg_cache_max_entries = 5000;
 };
 
 class PushServer
