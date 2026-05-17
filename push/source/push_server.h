@@ -70,8 +70,12 @@ public:
         std::unordered_set<std::string> target_dids;
         for (const auto &did : request->target_device_ids()) target_dids.insert(did);
         bool filter_devices = !target_dids.empty();
-        HANDLE_RPC(cntl, request, response, {
-            // 若调用方带了 user_seq：覆写 user_seq 到 payload
+        try {
+            auto auth = ::chatnow::auth::extract_auth(cntl);
+            response->mutable_header()->set_success(true);
+            response->mutable_header()->set_error_code(::chatnow::error::kOK);
+            response->mutable_header()->set_request_id(request->request_id());
+
             std::string payload;
             const auto &notify = request->notify();
             if (request->has_user_seq() &&
@@ -92,7 +96,6 @@ public:
                 if (_local_send(request->user_id(), did, payload) > 0) ++delivered;
             }
 
-            // 设备级 unacked 缓冲
             if (request->has_user_seq() && _unacked) {
                 std::string payload_b64 = _utils_base64_encode(payload);
                 long long now_ts = static_cast<long long>(time(nullptr));
@@ -104,7 +107,18 @@ public:
             }
 
             response->set_online_device_count(delivered);
-        });
+        } catch (const ::chatnow::ServiceError& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(e.code());
+            response->mutable_header()->set_error_message(e.message());
+            LOG_WARN("rpc_failed code={} msg={}", e.code(), e.message());
+        } catch (const std::exception& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemInternalError);
+            response->mutable_header()->set_error_message("internal error");
+            LOG_ERROR("rpc_exception what={}", e.what());
+        }
+    }
     }
 
     void PushBatch(google::protobuf::RpcController* base_cntl,
@@ -116,7 +130,7 @@ public:
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         std::unordered_map<std::string, unsigned long> uid2seq;
         for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
-        HANDLE_RPC(cntl, request, response, {
+        try {
             const auto &base_notify = request->notify();
             bool is_chat_msg = (base_notify.notify_type() == NotifyType::CHAT_MESSAGE_NOTIFY) &&
                                base_notify.has_new_message_info();
@@ -148,7 +162,17 @@ public:
                 }
             }
             response->set_online_count(total);
-        });
+        } catch (const ::chatnow::ServiceError& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(e.code());
+            response->mutable_header()->set_error_message(e.message());
+            LOG_WARN("rpc_failed code={} msg={}", e.code(), e.message());
+        } catch (const std::exception& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemInternalError);
+            response->mutable_header()->set_error_message("internal error");
+            LOG_ERROR("rpc_exception what={}", e.what());
+        }
     }
 
     ConsumeAction onPushMessage(const char *body, size_t sz, bool redelivered) {
