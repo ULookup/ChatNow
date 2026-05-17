@@ -1,4 +1,5 @@
 #include "push_server.h"
+#include "auth/jwt_codec.hpp"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
@@ -34,12 +35,23 @@ DEFINE_string(mq_push_binding_key, "push", "推送绑定键");
 DEFINE_int32(resend_batch, 50, "心跳触发未 ack 重传的批量上限");
 DEFINE_int32(resend_max_age_sec, 5, "未 ack 项入队后等待多少秒视为可重传");
 
+// JWT（开发阶段临时键，后续配置化）
+DEFINE_string(jwt_current_kid, "v1", "JWT 当前 key ID");
+DEFINE_string(jwt_key_v1, "0123456789abcdef0123456789abcdef", "JWT v1 签名密钥 (>=32 字节)");
+
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
-    chatnow::PushServerBuilder psb;
+    chatnow::push::PushServerBuilder psb;
+    // JWT config（开发阶段临时键）
+    chatnow::auth::JwtConfig jwt_cfg;
+    jwt_cfg.current_kid = FLAGS_jwt_current_kid;
+    jwt_cfg.keys[jwt_cfg.current_kid] = FLAGS_jwt_key_v1;
+    jwt_cfg.access_ttl_sec = 7200;
+    psb.make_jwt_object(jwt_cfg);
+
     psb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
                           FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     psb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host,
