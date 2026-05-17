@@ -41,7 +41,7 @@ namespace key
     inline constexpr const char* kMembers    = "im:conversation:members:"; // cid -> SET<user_id>
     inline constexpr const char* kRateUser   = "im:rl:user:";       // uid        -> 令牌桶
     inline constexpr const char* kRateSsid   = "im:rl:ssid:";       // ssid       -> 令牌桶
-    inline constexpr const char* kOnline     = "im:online:";        // uid        -> SET<push_instance_id>
+    inline constexpr const char* kOnline     = "im:online:";        // uid        -> HASH { device_id: instance_id }
     inline constexpr const char* kPushRoute  = "im:push:route:";    // uid        -> push_instance_id (单设备)
     inline constexpr const char* kUnacked    = "im:unack:";         // uid        -> Sorted Set<msg_id, ts>
     inline constexpr const char* kPushOutbox     = "im:push:outbox";       // 全局 Sorted Set<serialized_payload, ts> 投递失败兜底
@@ -63,7 +63,7 @@ inline constexpr std::chrono::seconds kCodeTtl(60 * 5);             // 验证码
 inline constexpr std::chrono::seconds kLastMsgTtl(24 * 3600);       // 最近消息预览 24 小时
 inline constexpr std::chrono::seconds kReadAckTtl(24 * 3600);       // 已读暂存 24 小时
 inline constexpr std::chrono::seconds kMembersTtl(30 * 60);         // 成员缓存 30 分钟
-inline constexpr std::chrono::seconds kOnlineTtl(60);               // 在线路由 60s（依赖心跳续期）
+inline constexpr std::chrono::seconds kOnlineTtl(120);              // 在线路由 120s（依赖心跳续期）
 inline constexpr std::chrono::seconds kUnackedTtl(7 * 24 * 3600);   // 未 ack 重传缓冲 7 天
 
 
@@ -433,37 +433,50 @@ public:
     using ptr = std::shared_ptr<OnlineRoute>;
     OnlineRoute(const std::shared_ptr<sw::redis::Redis> &c) : _c(c) {}
 
-    /* brief: 用户在某 Push 实例上线 */
-    void bind(const std::string &uid, const std::string &push_instance,
+    /* brief: 设备上线 — HSET uid did instance */
+    void bind(const std::string &uid, const std::string &device_id,
+              const std::string &push_instance,
               std::chrono::seconds ttl = kOnlineTtl) {
         try {
             std::string k = key::kOnline + uid;
-            _c->sadd(k, push_instance);
+            _c->hset(k, device_id, push_instance);
             _c->expire(k, ttl);
         } catch(std::exception &e) {
-            LOG_ERROR("OnlineRoute.bind 失败 {}-{}: {}", uid, push_instance, e.what());
+            LOG_ERROR("OnlineRoute.bind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what());
         }
     }
-    /* brief: 心跳续期（每 N 秒由 push 实例对所有持连用户调用） */
+    /* brief: 心跳续期（续整个 uid 的 HASH） */
     void touch(const std::string &uid, std::chrono::seconds ttl = kOnlineTtl) {
         try { _c->expire(key::kOnline + uid, ttl); }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
     }
-    /* brief: 用户在某实例下线 */
-    void unbind(const std::string &uid, const std::string &push_instance) {
-        try { _c->srem(key::kOnline + uid, push_instance); }
-        catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}: {}", uid, push_instance, e.what()); }
+    /* brief: 设备下线 — HDEL uid did */
+    void unbind(const std::string &uid, const std::string &device_id,
+                const std::string &push_instance) {
+        try { _c->hdel(key::kOnline + uid, device_id); }
+        catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what()); }
     }
-    /* brief: 取用户当前在哪些 Push 实例上有活跃连接 */
-    std::vector<std::string> instances(const std::string &uid) {
+    /* brief: 取用户所有在线设备 → device_id 列表 */
+    std::vector<std::string> devices(const std::string &uid) {
         std::vector<std::string> res;
-        try { _c->smembers(key::kOnline + uid, std::inserter(res, res.end())); }
-        catch(std::exception &e) { LOG_ERROR("OnlineRoute.instances 失败 {}: {}", uid, e.what()); }
+        try {
+            _c->hkeys(key::kOnline + uid, std::back_inserter(res));
+        } catch(std::exception &e) { LOG_ERROR("OnlineRoute.devices 失败 {}: {}", uid, e.what()); }
         return res;
+    }
+    /* brief: 取设备所在 Push 实例 */
+    std::string device_instance(const std::string &uid, const std::string &device_id) {
+        try {
+            auto v = _c->hget(key::kOnline + uid, device_id);
+            return v ? *v : "";
+        } catch(std::exception &e) {
+            LOG_ERROR("OnlineRoute.device_instance 失败 {}-{}: {}", uid, device_id, e.what());
+            return "";
+        }
     }
     /* brief: 是否有任意在线设备 */
     bool online(const std::string &uid) {
-        try { return _c->scard(key::kOnline + uid) > 0; }
+        try { return _c->hlen(key::kOnline + uid) > 0; }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.online 失败 {}: {}", uid, e.what()); return false; }
     }
 private:
@@ -739,65 +752,94 @@ public:
     using ptr = std::shared_ptr<UnackedPush>;
     UnackedPush(const std::shared_ptr<sw::redis::Redis> &c) : _c(c) {}
 
-    /* brief: 入待重传队列（score = 服务端时间戳秒级） */
-    void push(const std::string &uid, unsigned long user_seq,
+    static std::string key_for(const std::string &uid, const std::string &device_id) {
+        return std::string(key::kUnacked) + uid + ":" + device_id;
+    }
+
+    /* brief: 入待重传队列（per-device，存 payload_b64 直接用） */
+    void push(const std::string &uid, const std::string &device_id,
+              unsigned long user_seq, const std::string &payload_b64,
               long long score_ts, std::chrono::seconds ttl = kUnackedTtl) {
         try {
-            std::string k = key::kUnacked + uid;
-            _c->zadd(k, std::to_string(user_seq), static_cast<double>(score_ts));
+            std::string k = key_for(uid, device_id);
+            std::string member = std::to_string(user_seq) + ":" + payload_b64;
+            _c->zadd(k, member, static_cast<double>(score_ts));
             _c->expire(k, ttl);
         } catch(std::exception &e) {
-            LOG_ERROR("UnackedPush.push 失败 {}: {}", uid, e.what());
+            LOG_ERROR("UnackedPush.push 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
         }
     }
-    /* brief: 客户端 ACK 后移除 */
-    void ack(const std::string &uid, unsigned long user_seq) {
-        try { _c->zrem(key::kUnacked + uid, std::to_string(user_seq)); }
-        catch(std::exception &e) { LOG_ERROR("UnackedPush.ack 失败 {}: {}", uid, e.what()); }
+    /* brief: 客户端 ACK 后移除（per-device） */
+    void ack(const std::string &uid, const std::string &device_id,
+             unsigned long user_seq) {
+        try {
+            std::string k = key_for(uid, device_id);
+            std::string prefix = std::to_string(user_seq) + ":";
+            using namespace sw::redis;
+            auto cursor = 0LL;
+            while (true) {
+                std::vector<std::pair<std::string, double>> items;
+                cursor = _c->zscan(k, cursor, prefix + "*", 1LL, std::back_inserter(items));
+                for (const auto &item : items) {
+                    _c->zrem(k, item.first);
+                }
+                if (cursor == 0) break;
+            }
+        } catch(std::exception &e) {
+            LOG_ERROR("UnackedPush.ack 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
+        }
     }
-    /* brief: 取所有"成熟可重传"的 user_seq（按时间升序，仅查询不修改）
-     *  - max_age_sec：仅返回入队时间 ≤ now - max_age_sec 的项（避免立即重传刚入队的）
-     *  - limit：最多返回 limit 条
-     */
-    std::vector<std::string> peek_due(const std::string &uid,
-                                      long limit = 100,
-                                      long max_age_sec = 5) {
-        std::vector<std::string> res;
+    /* brief: 取"成熟可重传"的项（per-device，返回 user_seq+payload 对） */
+    std::vector<std::pair<unsigned long, std::string>> peek_due(
+            const std::string &uid, const std::string &device_id,
+            long limit = 100, long max_age_sec = 5) {
+        std::vector<std::pair<unsigned long, std::string>> res;
         if(limit <= 0) return res;
         try {
+            std::string k = key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
             using namespace sw::redis;
-            _c->zrangebyscore(key::kUnacked + uid,
+            std::vector<std::string> raw;
+            _c->zrangebyscore(k,
                               BoundedInterval<double>(0, static_cast<double>(now - max_age_sec),
                                                        BoundType::CLOSED),
                               LimitOptions{0, limit},
-                              std::back_inserter(res));
+                              std::back_inserter(raw));
+            for (const auto &s : raw) {
+                auto pos = s.find(':');
+                if (pos == std::string::npos) continue;
+                unsigned long seq = std::stoull(s.substr(0, pos));
+                res.emplace_back(seq, s.substr(pos + 1));
+            }
         } catch(std::exception &e) {
-            LOG_ERROR("UnackedPush.peek_due 失败 {}: {}", uid, e.what());
+            LOG_ERROR("UnackedPush.peek_due 失败 {}-{}-{}: {}", uid, device_id, e.what());
         }
         return res;
     }
-
-    /* brief: 触发重发后把这批 user_seq 的 score 重置为 now（推迟下次重传时机）
-     *  - 用 ZADD XX 仅当存在时才更新；若客户端已 ack，zrem 已经删除，本调用 no-op
-     *  - 配合 peek_due 使用：peek_due → 实际重发 → bump_score 推迟同批的下次重发
-     */
-    void bump_score(const std::string &uid,
-                    const std::vector<std::string> &user_seqs,
+    /* brief: 重发后推迟这批 user_seq 的下次重发时机 + 续期 TTL */
+    void bump_score(const std::string &uid, const std::string &device_id,
+                    const std::vector<unsigned long> &user_seqs,
                     std::chrono::seconds ttl = kUnackedTtl) {
         if(user_seqs.empty()) return;
         try {
-            std::string k = key::kUnacked + uid;
+            std::string k = key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
-            using namespace sw::redis;
-            std::vector<std::pair<std::string, double>> items;
-            items.reserve(user_seqs.size());
-            for(const auto &s : user_seqs) items.emplace_back(s, static_cast<double>(now));
-            _c->zadd(k, items.begin(), items.end(), UpdateType::EXIST);
-            // 续期 key TTL，避免长期未 ack 项随整 key 7 天到期消失
+            for (unsigned long seq : user_seqs) {
+                std::string prefix = std::to_string(seq) + ":";
+                using namespace sw::redis;
+                auto cursor = 0LL;
+                while (true) {
+                    std::vector<std::pair<std::string, double>> items;
+                    cursor = _c->zscan(k, cursor, prefix + "*", 1LL, std::back_inserter(items));
+                    for (const auto &item : items) {
+                        _c->zadd(k, item.first, static_cast<double>(now), UpdateType::EXIST);
+                    }
+                    if (cursor == 0) break;
+                }
+            }
             _c->expire(k, ttl);
         } catch(std::exception &e) {
-            LOG_ERROR("UnackedPush.bump_score 失败 {}: {}", uid, e.what());
+            LOG_ERROR("UnackedPush.bump_score 失败 {}-{}-{}: {}", uid, device_id, e.what());
         }
     }
 
