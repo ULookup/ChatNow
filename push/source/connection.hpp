@@ -5,6 +5,7 @@
 #include "infra/logger.hpp"
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace chatnow
 {
@@ -12,10 +13,10 @@ namespace chatnow
 typedef websocketpp::server<websocketpp::config::asio> server_t;
 
 /**
- * Push 服务的连接表（单实例内存，多实例间通过 Redis OnlineRoute 协调路由）。
- * 区别于 Gateway 旧版：
- *   - 多设备：一个 uid 可以挂多个 conn（同一个用户多端登录）
- *   - 增加最后心跳时间戳，便于 reaper 定期清理僵尸连接
+ * Push 服务连接表 — 设备级路由。
+ *   - _uid_device_connections: uid → device_id → set<conn_ptr>
+ *   - _conn_clients:           conn → Client{uid, device_id, jwt_jti, last_active_ts, send_mu}
+ *   - 同一 (uid, device_id) 有新连接时关闭旧连接
  */
 class Connection
 {
@@ -24,114 +25,132 @@ public:
 
     struct Client {
         std::string uid;
-        std::string ssid;
         std::string device_id;
-        long last_active_ts {0};   // 心跳更新
-        // M2: per-conn 发送串行化锁。websocketpp::connection::send 不是线程安全，
-        //     MQ 消费线程 / brpc IO 线程 / WS asio 线程多源并发 send 会撕帧。
-        //     用 shared_ptr 让 Connection 拷贝/move 安全，所有持有同一 conn 的拷贝共享同一把锁。
+        std::string jwt_jti;
+        long last_active_ts {0};
         std::shared_ptr<std::mutex> send_mu {std::make_shared<std::mutex>()};
     };
 
     Connection() = default;
     ~Connection() = default;
 
+    /* brief: 插入连接。同 (uid, device_id) 已有则关闭旧连接后替换 */
     void insert(const server_t::connection_ptr &conn,
                 const std::string &uid,
-                const std::string &ssid,
-                const std::string &device_id)
+                const std::string &device_id,
+                const std::string &jwt_jti)
     {
         std::unique_lock<std::mutex> lock(_mutex);
-        _uid_connections[uid].insert(conn);
-        Client c{uid, ssid, device_id, now_sec()};
+        // 关闭同一设备的旧连接
+        auto dit = _uid_device_connections.find(uid);
+        if (dit != _uid_device_connections.end()) {
+            auto vdit = dit->second.find(device_id);
+            if (vdit != dit->second.end()) {
+                for (const auto &old_conn : vdit->second) {
+                    try { old_conn->close(websocketpp::close::status::normal, "new device login"); }
+                    catch(...) {}
+                    _conn_clients.erase(old_conn);
+                }
+                vdit->second.clear();
+            }
+        }
+        _uid_device_connections[uid][device_id].insert(conn);
+        Client c{uid, device_id, jwt_jti, now_sec()};
         _conn_clients[conn] = std::move(c);
-        LOG_DEBUG("Connection.insert {} uid={} ssid={} device={}",
-                  (size_t)conn.get(), uid, ssid, device_id);
+        LOG_DEBUG("Connection.insert {} uid={} device={}",
+                  (size_t)conn.get(), uid, device_id);
     }
 
-    /* brief: 取该 uid 在本实例上的所有连接 */
-    std::vector<server_t::connection_ptr> connections(const std::string &uid) {
+    /* brief: 取指定设备的连接 */
+    std::vector<server_t::connection_ptr> connections(const std::string &uid,
+                                                      const std::string &device_id) {
         std::unique_lock<std::mutex> lock(_mutex);
         std::vector<server_t::connection_ptr> res;
-        auto it = _uid_connections.find(uid);
-        if(it == _uid_connections.end()) return res;
-        res.reserve(it->second.size());
-        for(const auto &c : it->second) res.push_back(c);
+        auto dit = _uid_device_connections.find(uid);
+        if (dit == _uid_device_connections.end()) return res;
+        auto vdit = dit->second.find(device_id);
+        if (vdit == dit->second.end()) return res;
+        res.reserve(vdit->second.size());
+        for (const auto &c : vdit->second) res.push_back(c);
         return res;
     }
 
     bool client(const server_t::connection_ptr &conn,
-                std::string &uid, std::string &ssid, std::string &device_id) {
+                std::string &uid, std::string &device_id, std::string &jti) {
         std::unique_lock<std::mutex> lock(_mutex);
         auto it = _conn_clients.find(conn);
-        if(it == _conn_clients.end()) return false;
+        if (it == _conn_clients.end()) return false;
         uid = it->second.uid;
-        ssid = it->second.ssid;
         device_id = it->second.device_id;
+        jti = it->second.jwt_jti;
         return true;
     }
 
-    /* brief: 取该 conn 的发送串行化锁；连接已不存在则返回 nullptr */
     std::shared_ptr<std::mutex> send_mutex(const server_t::connection_ptr &conn) {
         std::unique_lock<std::mutex> lock(_mutex);
         auto it = _conn_clients.find(conn);
-        if(it == _conn_clients.end()) return nullptr;
+        if (it == _conn_clients.end()) return nullptr;
         return it->second.send_mu;
     }
 
     void touch(const server_t::connection_ptr &conn) {
         std::unique_lock<std::mutex> lock(_mutex);
         auto it = _conn_clients.find(conn);
-        if(it != _conn_clients.end()) it->second.last_active_ts = now_sec();
+        if (it != _conn_clients.end()) it->second.last_active_ts = now_sec();
     }
 
     void remove(const server_t::connection_ptr &conn) {
         std::unique_lock<std::mutex> lock(_mutex);
         auto it = _conn_clients.find(conn);
-        if(it == _conn_clients.end()) return;
+        if (it == _conn_clients.end()) return;
         const std::string &uid = it->second.uid;
-        auto uc = _uid_connections.find(uid);
-        if(uc != _uid_connections.end()) {
-            uc->second.erase(conn);
-            if(uc->second.empty()) _uid_connections.erase(uc);
+        const std::string &did = it->second.device_id;
+        auto dit = _uid_device_connections.find(uid);
+        if (dit != _uid_device_connections.end()) {
+            auto vdit = dit->second.find(did);
+            if (vdit != dit->second.end()) {
+                vdit->second.erase(conn);
+                if (vdit->second.empty()) dit->second.erase(vdit);
+            }
+            if (dit->second.empty()) _uid_device_connections.erase(dit);
         }
         _conn_clients.erase(it);
     }
 
-    /* brief: 收集本实例所有在线 uid（路由表续约用） */
     std::vector<std::string> online_uids() {
         std::unique_lock<std::mutex> lock(_mutex);
         std::vector<std::string> res;
-        res.reserve(_uid_connections.size());
-        for(const auto &p : _uid_connections) res.push_back(p.first);
+        res.reserve(_uid_device_connections.size());
+        for (const auto &p : _uid_device_connections) res.push_back(p.first);
         return res;
     }
 
-    /* brief: 清理僵尸连接：last_active_ts 超过 ttl 秒未更新 → 移除
-     *  - close handler 已经在大多数场景清理；reaper 是最后的安全网
-     *  - 返回被清理的 (uid, conn) 列表，调用方可同步 unbind 路由
-     */
     std::vector<std::pair<std::string, server_t::connection_ptr>> reap(long ttl_sec) {
         std::vector<std::pair<std::string, server_t::connection_ptr>> reaped;
         long now = now_sec();
         std::unique_lock<std::mutex> lock(_mutex);
-        for(auto it = _conn_clients.begin(); it != _conn_clients.end(); ) {
-            if(now - it->second.last_active_ts > ttl_sec) {
-                const std::string uid = it->second.uid;
-                auto conn = it->first;
-                auto uc = _uid_connections.find(uid);
-                if(uc != _uid_connections.end()) {
-                    uc->second.erase(conn);
-                    if(uc->second.empty()) _uid_connections.erase(uc);
+        for (auto cit = _conn_clients.begin(); cit != _conn_clients.end(); ) {
+            if (now - cit->second.last_active_ts > ttl_sec) {
+                const std::string uid = cit->second.uid;
+                auto conn = cit->first;
+                auto dit = _uid_device_connections.find(uid);
+                if (dit != _uid_device_connections.end()) {
+                    auto vdit = dit->second.find(cit->second.device_id);
+                    if (vdit != dit->second.end()) {
+                        vdit->second.erase(conn);
+                        if (vdit->second.empty()) dit->second.erase(vdit);
+                    }
+                    if (dit->second.empty()) _uid_device_connections.erase(dit);
                 }
                 reaped.emplace_back(uid, conn);
-                it = _conn_clients.erase(it);
+                cit = _conn_clients.erase(cit);
             } else {
-                ++it;
+                ++cit;
             }
         }
         return reaped;
     }
+
 private:
     static long now_sec() {
         using namespace std::chrono;
@@ -140,7 +159,8 @@ private:
 
     std::mutex _mutex;
     std::unordered_map<std::string,
-        std::unordered_set<server_t::connection_ptr>> _uid_connections;
+        std::unordered_map<std::string,
+            std::unordered_set<server_t::connection_ptr>>> _uid_device_connections;
     std::unordered_map<server_t::connection_ptr, Client> _conn_clients;
 };
 
