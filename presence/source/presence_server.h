@@ -45,10 +45,10 @@ public:
 
         // SCAN 找出该 uid 的所有 device key
         std::vector<std::string> device_keys;
-        auto cursor = 0LL;
+        auto cursor = 0ULL;
         while (true) {
             std::vector<std::string> batch;
-            std::tie(cursor, std::ignore) = _redis->scan(
+            cursor = _redis->scan(
                 cursor, "im:presence:device:" + uid + ":*", 100,
                 std::back_inserter(batch));
             device_keys.insert(device_keys.end(), batch.begin(), batch.end());
@@ -65,21 +65,12 @@ public:
         auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-        // pipeline 批量取每个 device 的 state / platform / last_active
-        auto pipe = _redis->pipeline();
-        for (auto& k : device_keys) {
-            pipe.hget(k, "state");
-            pipe.hget(k, "platform");
-            pipe.hget(k, "last_active_at_ms");
-        }
-        auto results = pipe.exec();
-
         int best_rank = 999;
         int64_t best_active_ms = 0;
-        for (size_t i = 0; i < device_keys.size(); ++i) {
-            auto state_opt = results[i * 3 + 0].template get<sw::redis::OptionalString>();
-            auto plat_opt  = results[i * 3 + 1].template get<sw::redis::OptionalString>();
-            auto last_opt  = results[i * 3 + 2].template get<sw::redis::OptionalString>();
+        for (auto& key : device_keys) {
+            auto state_opt = _redis->hget(key, "state");
+            auto plat_opt  = _redis->hget(key, "platform");
+            auto last_opt  = _redis->hget(key, "last_active_at_ms");
 
             if (!state_opt) continue;
 
@@ -93,7 +84,7 @@ public:
             }
 
             // 提取 device_id
-            std::string did = device_keys[i];
+            std::string did = key;
             auto pos = did.rfind(':');
             if (pos != std::string::npos) did = did.substr(pos + 1);
 
@@ -142,10 +133,10 @@ public:
     // 获取所有有订阅关系的在线 uid（从 sub 集合中提取）
     std::vector<std::string> subscribed_uids() {
         std::vector<std::string> result;
-        auto cursor = 0LL;
+        auto cursor = 0ULL;
         while (true) {
             std::vector<std::string> batch;
-            std::tie(cursor, std::ignore) = _redis->scan(
+            cursor = _redis->scan(
                 cursor, "im:presence:sub:*", 1000, std::back_inserter(batch));
             for (auto& k : batch) {
                 auto pos = k.find("im:presence:sub:");
@@ -358,15 +349,16 @@ private:
             return;
         }
 
-        NotifyMessage notify;
-        notify.set_notify_type(NotifyType::PRESENCE_CHANGE_NOTIFY);
+        ::chatnow::push::NotifyMessage notify;
+        notify.set_notify_type(::chatnow::push::NotifyType::PRESENCE_CHANGE_NOTIFY);
         auto* pc = notify.mutable_presence_change();
         pc->set_user_id(uid);
         pc->set_state(PresenceState_Name(p.aggregated_state()));
 
         for (const auto& sub_uid : subs) {
-            PushService_Stub stub(channel.get());
-            auto* closure = new SelfDeleteRpcClosure<PushToUserReq, PushToUserRsp>();
+            ::chatnow::push::PushService_Stub stub(channel.get());
+            auto* closure = new SelfDeleteRpcClosure<::chatnow::push::PushToUserReq,
+                                                      ::chatnow::push::PushToUserRsp>();
             closure->req.set_user_id(sub_uid);
             closure->req.mutable_notify()->CopyFrom(notify);
             stub.PushToUser(&closure->cntl, &closure->req, &closure->rsp, closure);

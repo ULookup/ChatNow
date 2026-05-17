@@ -27,14 +27,14 @@ int main(int argc, char *argv[])
         fmt::format("tcp://{}:{}/{}", FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db));
 
     // 服务发现
-    auto channels = std::make_shared<ServiceManager>();
+    auto channels = std::make_shared<chatnow::ServiceManager>();
     channels->declared(FLAGS_push_service);
-    auto put_cb = std::bind(&ServiceManager::onServiceOnline, channels.get(),
+    auto put_cb = std::bind(&chatnow::ServiceManager::onServiceOnline, channels.get(),
                             std::placeholders::_1, std::placeholders::_2);
-    auto del_cb = std::bind(&ServiceManager::onServiceOffline, channels.get(),
+    auto del_cb = std::bind(&chatnow::ServiceManager::onServiceOffline, channels.get(),
                             std::placeholders::_1, std::placeholders::_2);
-    auto discovery = std::make_shared<Discovery>(FLAGS_registry_host, FLAGS_base_service,
-                                                  put_cb, del_cb);
+    auto discovery = std::make_shared<chatnow::Discovery>(FLAGS_registry_host, FLAGS_base_service,
+                                                           put_cb, del_cb);
 
     // Presence 服务实例
     auto impl = std::make_shared<chatnow::presence::PresenceServiceImpl>(
@@ -66,7 +66,7 @@ int main(int argc, char *argv[])
     }
 
     // 注册到 etcd
-    auto reg = std::make_shared<Registry>(FLAGS_registry_host);
+    auto reg = std::make_shared<chatnow::Registry>(FLAGS_registry_host);
     reg->registry(FLAGS_base_service + "/" + std::to_string(FLAGS_listen_port),
                   fmt::format("{}:{}", "0.0.0.0", FLAGS_listen_port));
 

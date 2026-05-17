@@ -8,6 +8,7 @@ set(proto_files
     common/types.proto
     common/error.proto
     common/envelope.proto
+    message/message_types.proto
     presence/presence_service.proto
     push/push_service.proto
     push/notify.proto
@@ -39,7 +40,7 @@ add_executable(${target} ${src_files} ${proto_srcs})
 target_link_libraries(${target} -lgflags -lspdlog
     -lfmt -lbrpc -lssl -lcrypto
     -lprotobuf -lleveldb -letcd-cpp-api
-    -lcurl -lhiredis -lredis++ -lpthread -lboost_system)
+    -lcurl -lhiredis -lredis++ -lpthread -lboost_system -lcpprest)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)

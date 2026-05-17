@@ -13,6 +13,8 @@
 #include "gateway_trace.hpp"
 #include "auth/jwt_codec.hpp"
 #include "auth/jwt_store.hpp"
+#include "auth/auth_config_loader.hpp"
+#include "utils/brpc_closure.hpp"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
 
@@ -190,7 +192,7 @@ private:
 
     // ====== Push 通知辅助 ======
 
-    void push_notify(const std::string& target_uid, const NotifyMessage& notify);
+    void push_notify(const std::string& target_uid, const ::chatnow::push::NotifyMessage& notify);
 
     // ====== 成员变量 ======
 
@@ -381,9 +383,9 @@ inline void GatewayServer::register_routes() {
         &msg::MessageService_Stub::ClearConversation);
 
     // ====== Transmite ======
-    route<tx::TransmiteService_Stub, tx::SendMessageReq, tx::SendMessageRsp>(
+    route<tx::MsgTransmitService_Stub, tx::SendMessageReq, tx::SendMessageRsp>(
         "/service/transmite/send", _transmite_svc, GatewayAuth::JWT_REQUIRED,
-        &tx::TransmiteService_Stub::SendMessage, 1000);
+        &tx::MsgTransmitService_Stub::SendMessage, 1000);
 
     // ====== Media ======
     route<med::MediaService_Stub, med::ApplyUploadReq, med::ApplyUploadRsp>(
@@ -428,18 +430,19 @@ inline void GatewayServer::register_routes() {
 // ====== push_notify 实现 ======
 
 inline void GatewayServer::push_notify(const std::string& target_uid,
-                                        const NotifyMessage& notify) {
+                                        const ::chatnow::push::NotifyMessage& notify) {
     auto channel = _channels->choose(_push_svc);
     if (!channel) {
         LOG_WARN("Push 服务不可用，通知未下发 uid={}", target_uid);
         return;
     }
-    PushService_Stub stub(channel.get());
-    auto* closure = new SelfDeleteRpcClosure<PushToUserReq, PushToUserRsp>();
+    ::chatnow::push::PushService_Stub stub(channel.get());
+    auto* closure = new SelfDeleteRpcClosure<::chatnow::push::PushToUserReq,
+                                              ::chatnow::push::PushToUserRsp>();
     closure->req.set_user_id(target_uid);
     closure->req.mutable_notify()->CopyFrom(notify);
     std::string uid_copy = target_uid;
-    closure->on_done = [uid_copy](brpc::Controller* c, const PushToUserRsp&) {
+    closure->on_done = [uid_copy](brpc::Controller* c, const ::chatnow::push::PushToUserRsp&) {
         if (c->Failed()) {
             LOG_WARN("PushToUser 失败 uid={}: {}", uid_copy, c->ErrorText());
         }
