@@ -455,7 +455,7 @@ public:
         _redis_host = host; _redis_port = port; _redis_db = db; _redis_keep_alive = keep_alive;
     }
     void make_jwt_object(const std::string& auth_config_path) {
-        _auth_config_path = auth_config_path;
+        _jwt_config = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
     }
     void make_discovery_object(const std::string& reg_host, const std::string& base,
                                const std::string& identity, const std::string& relationship,
@@ -473,10 +473,7 @@ public:
     GatewayServer::ptr build() {
         auto redis = std::make_shared<sw::redis::Redis>(
             fmt::format("tcp://{}:{}/{}", _redis_host, _redis_port, _redis_db));
-        auto loader = std::make_shared<::chatnow::auth::AuthConfigLoader>(_auth_config_path);
-        loader->load();
-        auto jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(
-            loader->key_map(), loader->current_kid());
+        auto jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(_jwt_config);
         auto jwt_store = std::make_shared<::chatnow::auth::JwtStore>(redis);
 
         auto discovery = std::make_shared<Discovery>(_reg_host, _base);
@@ -499,7 +496,7 @@ public:
 
 private:
     std::string _redis_host; int _redis_port = 6379, _redis_db = 0; bool _redis_keep_alive = true;
-    std::string _auth_config_path;
+    ::chatnow::auth::JwtConfig _jwt_config;
     std::string _reg_host, _base;
     std::string _identity_svc, _relationship_svc, _conversation_svc;
     std::string _message_svc, _transmite_svc, _media_svc, _presence_svc, _push_svc;
