@@ -19,6 +19,7 @@
 #include "conversation/conversation_service.pb.h"
 #include "message/message_types.pb.h"
 #include "message/message_service.pb.h"
+#include "message/message_internal.pb.h"
 #include "transmite/transmite_service.pb.h"
 #include <brpc/server.h>
 #include <butil/logging.h>
@@ -32,7 +33,7 @@ namespace chatnow
 // 大群门限：>= LARGE_GROUP_THRESHOLD 时启用读扩散，仅写 message 主表
 inline constexpr size_t LARGE_GROUP_THRESHOLD = 200;
 
-class TransmiteServiceImpl : public chatnow::MsgTransmitService
+class TransmiteServiceImpl : public chatnow::transmite::MsgTransmitService
 {
 public:
     TransmiteServiceImpl(const std::string &identity_service_name,
@@ -59,210 +60,214 @@ public:
                         _rate_limiter(rate_limiter) {}
     ~TransmiteServiceImpl() = default;
 
-    void GetTransmitTarget(google::protobuf::RpcController *controller,
-                        const ::chatnow::NewMessageReq *request,
-                        ::chatnow::GetTransmitTargetRsp *response,
-                        ::google::protobuf::Closure *done)
+    void SendMessage(google::protobuf::RpcController *controller,
+                const ::chatnow::transmite::SendMessageReq *request,
+                ::chatnow::transmite::SendMessageRsp *response,
+                ::google::protobuf::Closure *done)
     {
         brpc::ClosureGuard rpc_guard(done);
-        auto err_response = [response](const std::string &rid, const std::string &err_msg) -> void {
-            response->set_request_id(rid);
-            response->set_success(false);
-            response->set_errmsg(err_msg);
+
+        auto err_response = [response](const std::string &rid, int32_t code, const std::string &msg) {
+            response->mutable_header()->set_request_id(rid);
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(code);
+            response->mutable_header()->set_error_message(msg);
         };
-        // 从请求中获取：用户ID，所属会话ID，消息内容
+
+        // ① 从 metadata 提取 user_id（替代旧 request->user_id()）
+        chatnow::auth::AuthContext auth;
+        try {
+            auth = chatnow::auth::extract_auth(static_cast<brpc::Controller*>(controller));
+        } catch (const chatnow::ServiceError &e) {
+            err_response(request->request_id(), e.code(), e.what());
+            return;
+        }
+        std::string uid = auth.user_id;
         std::string rid = request->request_id();
-        std::string uid = request->user_id();
-        std::string chat_ssid = request->chat_session_id();
+        std::string chat_ssid = request->conversation_id();
         const std::string &client_msg_id = request->client_msg_id();
 
-        // ============ 步骤 0: 入参合法性校验（文件类型必须前置上传，body 仅带 file_id） ============
-        const auto &content = request->message();
-        switch(content.message_type()) {
-            case MessageType::IMAGE:
-                if(content.image_message().file_id().empty()) {
+        // ② 文件消息必须前置上传（body 仅带 file_id）
+        const auto &content = request->content();
+        switch (content.type()) {
+            case chatnow::message::MessageType::IMAGE:
+                if (content.image().file_id().empty()) {
                     LOG_ERROR("请求ID: {} - IMAGE 消息缺少 file_id（应客户端前置上传）", rid);
-                    return err_response(rid, "请先上传图片再发送");
+                    return err_response(rid, chatnow::error::kSystemInvalidArgument, "请先上传图片再发送");
                 }
                 break;
-            case MessageType::FILE:
-                if(content.file_message().file_id().empty()) {
+            case chatnow::message::MessageType::FILE:
+                if (content.file().file_id().empty()) {
                     LOG_ERROR("请求ID: {} - FILE 消息缺少 file_id（应客户端前置上传）", rid);
-                    return err_response(rid, "请先上传文件再发送");
+                    return err_response(rid, chatnow::error::kSystemInvalidArgument, "请先上传文件再发送");
                 }
                 break;
-            case MessageType::SPEECH:
-                if(content.speech_message().file_id().empty()) {
-                    LOG_ERROR("请求ID: {} - SPEECH 消息缺少 file_id", rid);
-                    return err_response(rid, "请先上传语音再发送");
+            case chatnow::message::MessageType::AUDIO:
+                if (content.audio().file_id().empty()) {
+                    LOG_ERROR("请求ID: {} - AUDIO 消息缺少 file_id", rid);
+                    return err_response(rid, chatnow::error::kSystemInvalidArgument, "请先上传语音再发送");
                 }
                 break;
-            default: break;
+            default:
+                break;
         }
 
-        // ============ 步骤 1: 客户端幂等去重 ============
-        // 命中 client_msg_id 索引则直接返回旧消息，绕过雪花/seq/MQ
-        if(!client_msg_id.empty()) {
+        // ③ 客户端幂等去重（命中 client_msg_id 索引则直接返回旧消息）
+        if (!client_msg_id.empty()) {
             auto msg_channel = _mm_channels->choose(_message_service_name);
-            if(msg_channel) {
-                MsgStorageService_Stub stub(msg_channel.get());
-                SelectByClientMsgReq dup_req;
-                SelectByClientMsgRsp dup_rsp;
+            if (msg_channel) {
+                chatnow::message::MessageService_Stub stub(msg_channel.get());
+                chatnow::message::SelectByClientMsgIdReq dup_req;
+                chatnow::message::SelectByClientMsgIdRsp dup_rsp;
                 brpc::Controller dup_cntl;
                 dup_req.set_request_id(rid);
-                dup_req.set_user_id(uid);
                 dup_req.set_client_msg_id(client_msg_id);
-                stub.SelectByClientMsg(&dup_cntl, &dup_req, &dup_rsp, nullptr);
-                if(!dup_cntl.Failed() && dup_rsp.success() && dup_rsp.exists()) {
+                stub.SelectByClientMsgId(&dup_cntl, &dup_req, &dup_rsp, nullptr);
+                if (!dup_cntl.Failed() && dup_rsp.header().success()) {
                     LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
-                    response->set_request_id(rid);
-                    response->set_success(true);
+                    response->mutable_header()->set_request_id(rid);
+                    response->mutable_header()->set_success(true);
                     response->mutable_message()->CopyFrom(dup_rsp.message());
-                    // 幂等返回不带 target_id_list（避免重复推送）
                     return;
                 }
             } else {
-                LOG_WARN("请求ID: {} - message_service 不可用，跳过幂等检查", rid);
+                LOG_WARN("请求ID: {} - message_service 不可用，跳过幂等检查（fail-open）", rid);
             }
         }
 
-        // ============ 步骤 1.5: 限流（用户级 + 会话级） ============
-        // 实现：基于 INCR + EXPIRE 的固定窗口计数器（简化版）。
-        //   - 阈值语义为"每窗口内最多 N 次"（窗口=60s）
-        //   - 已知缺陷：相邻窗口边界可能放行 ≈2N，对反爬场景不严格；
-        //     生产环境推荐 redis-cell（CL.THROTTLE）或 Lua 令牌桶替换 RateLimiter::allow
-        if(_rate_limiter) {
-            // 用户级：60s 内 600 次（≈10 QPS 平均；爆发可在窗口内集中）
-            if(!_rate_limiter->allow_user(uid, /*max_count=*/600, /*window_sec=*/60)) {
+        // ④ 限流检查（用户级 + 会话级）
+        if (_rate_limiter) {
+            if (!_rate_limiter->allow_user(uid, 600, 60)) {
                 LOG_WARN("请求ID: {} - 用户级限流命中 uid={}", rid, uid);
-                return err_response(rid, "rate_limited");
+                return err_response(rid, chatnow::error::kSystemUnavailable, "rate_limited");
             }
-            // 会话级：60s 内 3000 次（≈50 QPS）
-            if(!_rate_limiter->allow_session(chat_ssid, /*max_count=*/3000, /*window_sec=*/60)) {
+            if (!_rate_limiter->allow_session(chat_ssid, 3000, 60)) {
                 LOG_WARN("请求ID: {} - 会话级限流命中 ssid={}", rid, chat_ssid);
-                return err_response(rid, "rate_limited");
+                return err_response(rid, chatnow::error::kSystemUnavailable, "rate_limited");
             }
         }
 
-        // ============ 步骤 2: 并行 RPC 拿用户信息 + 群成员列表（成员优先走缓存） ============
-        auto user_channel = _mm_channels->choose(_identity_service_name);
-        if(!user_channel) {
-            LOG_ERROR("请求ID: {} - user_service 节点缺失", rid);
-            return err_response(rid, "依赖服务节点缺失");
+        // ⑤ 并行 RPC：Identity.GetProfile（sender 信息）+ Conversation.GetMemberIds（收件人列表）
+        auto identity_channel = _mm_channels->choose(_identity_service_name);
+        if (!identity_channel) {
+            LOG_ERROR("请求ID: {} - identity_service 节点缺失", rid);
+            return err_response(rid, chatnow::error::kSystemUnavailable, "依赖服务暂不可用");
         }
 
         // 成员列表：先查 Redis 缓存，未命中再 RPC + 回填
         std::vector<std::string> member_id_list;
         bool members_from_cache = false;
-        if(_members_cache) {
+        if (_members_cache) {
             member_id_list = _members_cache->list(chat_ssid);
-            if(!member_id_list.empty()) members_from_cache = true;
+            if (!member_id_list.empty()) members_from_cache = true;
         }
 
-        UserService_Stub user_stub(user_channel.get());
-        GetUserInfoReq user_req;
-        GetUserInfoRsp user_rsp;
-        brpc::Controller user_cntl;
-        user_req.set_request_id(rid);
-        user_req.set_user_id(uid);
-
-        // 用户信息 RPC 异步发起
-        user_stub.GetUserInfo(&user_cntl, &user_req, &user_rsp, brpc::DoNothing());
+        chatnow::identity::IdentityService_Stub identity_stub(identity_channel.get());
+        chatnow::identity::GetProfileReq profile_req;
+        chatnow::identity::GetProfileRsp profile_rsp;
+        brpc::Controller profile_cntl;
+        profile_req.set_request_id(rid);
+        profile_req.set_user_id(uid);
+        identity_stub.GetProfile(&profile_cntl, &profile_req, &profile_rsp, brpc::DoNothing());
 
         // 成员列表未命中缓存：RPC 拉取
-        ::chatnow::conversation::GetMemberIdsRsp session_rsp;
-        brpc::Controller session_cntl;
-        if(!members_from_cache) {
-            auto session_channel = _mm_channels->choose(_conversation_service_name);
-            if(!session_channel) {
-                brpc::Join(user_cntl.call_id());
+        ::chatnow::conversation::GetMemberIdsRsp member_rsp;
+        brpc::Controller member_cntl;
+        if (!members_from_cache) {
+            auto conv_channel = _mm_channels->choose(_conversation_service_name);
+            if (!conv_channel) {
+                brpc::Join(profile_cntl.call_id());
                 LOG_ERROR("请求ID: {} - conversation_service 节点缺失", rid);
-                return err_response(rid, "依赖服务节点缺失");
+                return err_response(rid, chatnow::error::kSystemUnavailable, "依赖服务暂不可用");
             }
-            ::chatnow::conversation::ConversationService_Stub session_stub(session_channel.get());
-            ::chatnow::conversation::GetMemberIdsReq session_req;
-            session_req.set_request_id(rid);
-            session_req.set_conversation_id(chat_ssid);
-            session_stub.GetMemberIds(&session_cntl, &session_req, &session_rsp, brpc::DoNothing());
-            brpc::Join(session_cntl.call_id());
-            if(session_cntl.Failed() || !session_rsp.header().success()) {
-                brpc::Join(user_cntl.call_id());
+            ::chatnow::conversation::ConversationService_Stub conv_stub(conv_channel.get());
+            ::chatnow::conversation::GetMemberIdsReq member_req;
+            member_req.set_request_id(rid);
+            member_req.set_conversation_id(chat_ssid);
+            conv_stub.GetMemberIds(&member_cntl, &member_req, &member_rsp, brpc::DoNothing());
+            brpc::Join(member_cntl.call_id());
+            if (member_cntl.Failed() || !member_rsp.header().success()) {
+                brpc::Join(profile_cntl.call_id());
                 LOG_ERROR("请求ID: {} - 获取群成员失败: {} {}", rid,
-                          session_cntl.ErrorText(), session_rsp.header().error_message());
-                return err_response(rid, "获取群成员失败");
+                          member_cntl.ErrorText(), member_rsp.header().error_message());
+                return err_response(rid, chatnow::error::kSystemUnavailable, "获取群成员失败");
             }
-            for(const auto &m : session_rsp.member_ids()) member_id_list.push_back(m);
-            // 回填缓存
-            if(_members_cache) _members_cache->warm(chat_ssid, member_id_list);
+            for (const auto &m : member_rsp.member_ids()) member_id_list.push_back(m);
+            if (_members_cache) _members_cache->warm(chat_ssid, member_id_list);
         }
 
-        brpc::Join(user_cntl.call_id());
-
-        if(user_cntl.Failed() || !user_rsp.success()) {
-            LOG_ERROR("请求ID: {} - 获取用户信息失败: {}", rid, user_cntl.ErrorText());
-            return err_response(rid, "获取用户信息失败");
+        brpc::Join(profile_cntl.call_id());
+        if (profile_cntl.Failed() || !profile_rsp.header().success()) {
+            LOG_ERROR("请求ID: {} - 获取用户信息失败: {}", rid, profile_cntl.ErrorText());
+            return err_response(rid, chatnow::error::kSystemUnavailable, "获取用户信息失败");
         }
-        if(member_id_list.empty()) {
+        if (member_id_list.empty()) {
             LOG_ERROR("请求ID: {} - 会话成员为空 ssid={}", rid, chat_ssid);
-            return err_response(rid, "会话成员为空");
+            return err_response(rid, chatnow::error::kConversationNotFound, "会话已解散或不存在");
         }
 
-        // ============ 步骤 3: 申请 message_id (Snowflake) + session_seq (Redis INCR) ============
+        // ⑥ sender 成员校验（sendMessage 语义要求发送者必须是群成员）
+        bool sender_is_member = false;
+        for (const auto &m : member_id_list) {
+            if (m == uid) { sender_is_member = true; break; }
+        }
+        if (!sender_is_member) {
+            LOG_ERROR("请求ID: {} - sender {} 不在会话 {} 中", rid, uid, chat_ssid);
+            return err_response(rid, chatnow::error::kConversationNotMember, "无发消息权限");
+        }
+
+        // ⑦ 申请 session_seq（Redis INCR）
         unsigned long session_seq = _seq_gen->next_session_seq(chat_ssid);
-        if(session_seq == 0) {
+        if (session_seq == 0) {
             LOG_ERROR("请求ID: {} - 申请 session_seq 失败 ssid={}", rid, chat_ssid);
-            return err_response(rid, "序号生成失败");
+            return err_response(rid, chatnow::error::kSystemUnavailable, "序号生成失败");
         }
 
-        // ============ 步骤 4: 组装 InternalMessage ============
-        InternalMessage internal_msg;
-        MessageInfo* msg_info = internal_msg.mutable_message_info();
+        // ⑧ 组装 InternalMessage
+        chatnow::message::internal::InternalMessage internal_msg;
+        chatnow::message::Message *msg = internal_msg.mutable_message();
 
-        msg_info->set_message_id(_id_generator->Next());
-        msg_info->set_chat_session_id(chat_ssid);
-        msg_info->set_timestamp(time(nullptr));
-        msg_info->mutable_message()->CopyFrom(request->message());
-        msg_info->mutable_sender()->CopyFrom(user_rsp.user_info());
-        msg_info->set_seq_id(session_seq);
-        msg_info->set_client_msg_id(client_msg_id);
+        msg->set_message_id(_id_generator->Next());
+        msg->set_conversation_id(chat_ssid);
+        msg->set_created_at_ms(static_cast<int64_t>(time(nullptr)) * 1000);
+        msg->mutable_content()->CopyFrom(request->content());
+        msg->set_sender_id(uid);
+        msg->set_seq_id(session_seq);
+        msg->set_client_msg_id(client_msg_id);
+        if (request->has_reply_to()) msg->mutable_reply_to()->CopyFrom(request->reply_to());
+        for (const auto &muid : request->mentioned_user_ids()) msg->add_mentioned_user_ids(muid);
+        if (request->has_forward_info()) msg->mutable_forward_info()->CopyFrom(request->forward_info());
 
         // 成员列表
         size_t member_count = member_id_list.size();
         bool is_large = member_count >= LARGE_GROUP_THRESHOLD;
         internal_msg.set_is_large_group(is_large);
-        for (const auto& member_id : member_id_list) {
+        for (const auto &member_id : member_id_list) {
             internal_msg.add_member_id_list(member_id);
         }
 
         // 写扩散群：批量申请 user_seq（pipeline 一次往返）；大群跳过
-        if(!is_large) {
+        if (!is_large) {
             auto user_seqs = _seq_gen->next_user_seq_batch(member_id_list);
-            if(user_seqs.size() != member_id_list.size()) {
+            if (user_seqs.size() != member_id_list.size()) {
                 LOG_ERROR("请求ID: {} - 批量申请 user_seq 失败", rid);
-                return err_response(rid, "用户序号生成失败");
+                return err_response(rid, chatnow::error::kSystemUnavailable, "用户序号生成失败");
             }
-            for(size_t i = 0; i < member_id_list.size(); ++i) {
+            for (size_t i = 0; i < member_id_list.size(); ++i) {
                 auto *pair = internal_msg.add_user_seqs();
                 pair->set_user_id(member_id_list[i]);
                 pair->set_user_seq(user_seqs[i]);
             }
         }
 
-        // ============ 步骤 5: 组装响应 ============
-        response->set_request_id(rid);
-        response->set_message_id(msg_info->message_id());
-        response->set_seq_id(session_seq);
-        response->mutable_message()->CopyFrom(*msg_info);
-        for(const auto& member_id : member_id_list) {
-            response->add_target_id_list(member_id);
-        }
+        // ⑨ 组装响应（仅 message 不暴露 target_id_list）
+        response->mutable_header()->set_request_id(rid);
+        response->mutable_header()->set_success(true);
+        response->mutable_message()->CopyFrom(*msg);
 
-        // 解除 rpc_guard 对 done 的管理权，等 MQ 投递完再 Run
-        google::protobuf::Closure* async_done = rpc_guard.release();
+        // ⑩ MQ publish_confirm（异步回调完成后 Run done）
+        google::protobuf::Closure *async_done = rpc_guard.release();
 
-        // ============ 步骤 6: 投递 MQ ============
-        // 兜底：publish_confirm 同步抛异常 / 提交失败 → 必须保证 done 被调用一次，
-        //       否则 brpc 会泄漏请求并卡到超时。flag + try/catch 双保险。
         std::shared_ptr<std::atomic<bool>> done_called =
             std::make_shared<std::atomic<bool>>(false);
         try {
@@ -270,27 +275,26 @@ public:
             ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
-                [async_done, response, rid, done_called](PublishStatus status, const std::string& msg) {
-                if(done_called->exchange(true)) return;  // 防止重复 Run
-                if(status == PublishStatus::Acked) {
-                    LOG_DEBUG("请求ID: {} - 消息成功投递到 Broker", rid);
-                    response->set_success(true);
-                } else {
-                    LOG_ERROR("请求ID: {} - 消息投递到 Broker 失败: {}", rid, msg);
-                    response->set_success(false);
-                    response->clear_message();
-                    response->clear_target_id_list();
-                    response->set_errmsg("消息投递失败,请重试");
-                }
-                async_done->Run();
-            });
-        } catch(std::exception &e) {
+                [async_done, response, rid, done_called](PublishStatus status, const std::string &mq_msg) {
+                    if (done_called->exchange(true)) return;
+                    if (status == PublishStatus::Acked) {
+                        LOG_DEBUG("请求ID: {} - 消息成功投递到 Broker", rid);
+                    } else {
+                        LOG_ERROR("请求ID: {} - 消息投递到 Broker 失败: {}", rid, mq_msg);
+                        response->mutable_header()->set_success(false);
+                        response->mutable_header()->set_error_code(chatnow::error::kSystemUnavailable);
+                        response->mutable_header()->set_error_message("消息发送失败，请重试");
+                        response->clear_message();
+                    }
+                    async_done->Run();
+                });
+        } catch (std::exception &e) {
             LOG_ERROR("请求ID: {} - publish_confirm 同步异常: {}", rid, e.what());
-            if(!done_called->exchange(true)) {
-                response->set_success(false);
+            if (!done_called->exchange(true)) {
+                response->mutable_header()->set_success(false);
+                response->mutable_header()->set_error_code(chatnow::error::kSystemUnavailable);
+                response->mutable_header()->set_error_message("MQ 不可用");
                 response->clear_message();
-                response->clear_target_id_list();
-                response->set_errmsg("MQ 不可用");
                 async_done->Run();
             }
         }
