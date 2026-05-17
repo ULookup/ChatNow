@@ -36,7 +36,7 @@ message SetPresenceReq {
     optional string custom_status = 4;
 }
 message SetPresenceRsp {
-    ResponseHeader header = 1;
+    chatnow.common.ResponseHeader header = 1;
 }
 
 message GetPresenceReq {
@@ -44,7 +44,7 @@ message GetPresenceReq {
     string user_id = 2;
 }
 message GetPresenceRsp {
-    ResponseHeader header = 1;
+    chatnow.common.ResponseHeader header = 1;
     Presence presence = 2;
 }
 
@@ -53,7 +53,7 @@ message BatchGetPresenceReq {
     repeated string user_ids = 2;
 }
 message BatchGetPresenceRsp {
-    ResponseHeader header = 1;
+    chatnow.common.ResponseHeader header = 1;
     map<string, Presence> presences = 2;
 }
 
@@ -62,14 +62,14 @@ message SubscribeReq {
     string user_id = 2;
     repeated string subscribe_user_ids = 3;
 }
-message SubscribeRsp { ResponseHeader header = 1; }
+message SubscribeRsp { chatnow.common.ResponseHeader header = 1; }
 
 message UnsubscribeReq {
     string request_id = 1;
     string user_id = 2;
     repeated string unsubscribe_user_ids = 3;
 }
-message UnsubscribeRsp { ResponseHeader header = 1; }
+message UnsubscribeRsp { chatnow.common.ResponseHeader header = 1; }
 
 message TypingReq {
     string request_id = 1;
@@ -77,4 +77,4 @@ message TypingReq {
     string conversation_id = 3;
     bool is_typing = 4;
 }
-message TypingRsp { ResponseHeader header = 1; }
+message TypingRsp { chatnow.common.ResponseHeader header = 1; }
