@@ -67,6 +67,9 @@ public:
     {
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        std::unordered_set<std::string> target_dids;
+        for (const auto &did : request->target_device_ids()) target_dids.insert(did);
+        bool filter_devices = !target_dids.empty();
         HANDLE_RPC(cntl, request, response, {
             // 若调用方带了 user_seq：覆写 user_seq 到 payload
             std::string payload;
@@ -81,11 +84,6 @@ public:
             } else {
                 payload = notify.SerializeAsString();
             }
-
-            // 收集目标 device_id 集合
-            std::unordered_set<std::string> target_dids;
-            for (const auto &did : request->target_device_ids()) target_dids.insert(did);
-            bool filter_devices = !target_dids.empty();
 
             int delivered = 0;
             auto devices = _online_route->devices(request->user_id());
@@ -116,10 +114,9 @@ public:
     {
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        std::unordered_map<std::string, unsigned long> uid2seq;
+        for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
         HANDLE_RPC(cntl, request, response, {
-            std::unordered_map<std::string, unsigned long> uid2seq;
-            for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
-
             const auto &base_notify = request->notify();
             bool is_chat_msg = (base_notify.notify_type() == NotifyType::CHAT_MESSAGE_NOTIFY) &&
                                base_notify.has_new_message_info();
