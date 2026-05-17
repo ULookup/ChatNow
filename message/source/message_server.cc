@@ -32,7 +32,6 @@ DEFINE_string(mq_msg_exchange, "chat_msg_exchange", "持久化消息的发布交
 DEFINE_string(mq_msg_queue_db, "msg_queue_db", "持久化DB消息的发布队列名称");
 DEFINE_string(mq_msg_queue_es, "msg_queue_es", "持久化ES消息的发布队列名称");
 DEFINE_string(mq_db_binding_key, "", "持久化DB的绑定键");
-DEFINE_string(mq_es_binding_key, "", "持久化ES的绑定键");
 
 DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送队列的交换机名称（DIRECT）");
 DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列名称");

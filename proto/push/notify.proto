@@ -41,8 +41,8 @@ message NotifyHeartbeat {
     uint64 last_user_seq = 2;
 }
 
-message NotifyFriendAddApply { chatnow.UserInfo user_info = 1; }
-message NotifyFriendAddProcess { bool agree = 1; chatnow.UserInfo user_info = 2; }
+message NotifyFriendAddApply { chatnow.common.UserInfo user_info = 1; }
+message NotifyFriendAddProcess { bool agree = 1; chatnow.common.UserInfo user_info = 2; }
 message NotifyFriendRemove { string user_id = 1; }
 message NotifyNewConversation { bytes conversation_payload = 1; }
 message NotifyNewMessage { chatnow.message.Message message_info = 1; }

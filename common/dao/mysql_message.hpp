@@ -6,7 +6,7 @@
 #include "message-odb.hxx"
 #include <odb/mysql/database.hxx>
 #include <odb/mysql/connection.hxx>
-#include <odb/mysql/statement.hxx>
+#include <mysql/mysql.h>
 
 #include <memory>
 #include <string>
@@ -363,13 +363,20 @@ public:
         try {
             auto &mysql_db = dynamic_cast<odb::mysql::database&>(*_db);
             auto conn = mysql_db.connection();
-            std::unique_ptr<odb::mysql::statement> stmt(
-                conn->create_statement());
-            stmt->execute(
-                "SELECT session_id, MAX(seq_id) AS max_seq FROM message GROUP BY session_id");
-            auto r = stmt->result_set();
-            while(r.next()) {
-                res.emplace_back(r.get_string(1), r.get_unsigned_long(2));
+            MYSQL* handle = conn->handle();
+            if (mysql_query(handle,
+                    "SELECT session_id, MAX(seq_id) AS max_seq FROM message GROUP BY session_id") == 0) {
+                MYSQL_RES* result = mysql_store_result(handle);
+                if (result) {
+                    MYSQL_ROW row;
+                    while ((row = mysql_fetch_row(result))) {
+                        unsigned long* lengths = mysql_fetch_lengths(result);
+                        std::string sid(row[0] ? row[0] : "", row[0] ? lengths[0] : 0);
+                        unsigned long max_seq = row[1] ? strtoul(row[1], nullptr, 10) : 0;
+                        res.emplace_back(std::move(sid), max_seq);
+                    }
+                    mysql_free_result(result);
+                }
             }
         } catch(std::exception &e) {
             LOG_ERROR("获取所有会话最大seq失败: {}", e.what());

@@ -19,23 +19,24 @@
 #include "identity/identity_service.pb.h"
 #include "media/media_service.pb.h"
 
-#include "common/auth/auth_context.hpp"
-#include "common/auth/forward_auth.hpp"
-#include "common/error/handle_rpc.hpp"
-#include "common/error/service_error.hpp"
-#include "common/error/error_codes.hpp"
-#include "common/log/log_context.hpp"
-#include "common/infra/logger.hpp"
-#include "common/infra/etcd.hpp"
-#include "common/infra/channels.hpp"
-#include "common/dao/mysql_message.hpp"
-#include "common/dao/mysql_user_timeline.hpp"
-#include "common/dao/mysql_conversation_member.hpp"
-#include "common/dao/mysql_message_reaction.hpp"
-#include "common/dao/mysql_message_pin.hpp"
-#include "common/dao/data_es.hpp"
-#include "common/dao/data_redis.hpp"
-#include "common/mq/rabbitmq.hpp"
+#include "auth/auth_context.hpp"
+#include "auth/forward_auth.hpp"
+#include "error/handle_rpc.hpp"
+#include "error/service_error.hpp"
+#include "error/error_codes.hpp"
+#include "log/log_context.hpp"
+#include "infra/logger.hpp"
+#include "infra/etcd.hpp"
+#include "mq/channel.hpp"
+#include "dao/mysql_message.hpp"
+#include "dao/mysql_user_timeline.hpp"
+#include "dao/mysql_conversation_member.hpp"
+#include "dao/mysql_message_reaction.hpp"
+#include "dao/mysql_message_pin.hpp"
+#include "dao/data_es.hpp"
+#include "dao/data_redis.hpp"
+#include "mq/rabbitmq.hpp"
+#include "mq/trace_headers.hpp"
 
 #include <chrono>
 #include <map>
@@ -59,7 +60,7 @@ public:
                        const std::string &media_service_name,
                        const ServiceManager::ptr &mm_channels,
                        const MessageTable::ptr &mysql_msg,
-                       const UserTimelineTable::ptr &mysql_user_timeline,
+                       const UserTimeLineTable::ptr &mysql_user_timeline,
                        const ConversationMemberTable::ptr &mysql_member,
                        const MessageReactionTable::ptr &mysql_reaction,
                        const MessagePinTable::ptr &mysql_pin,
@@ -216,10 +217,10 @@ public:
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid not found");
             if (msg->session_id() != req->conversation_id())
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "cid mismatch");
-            if (msg->status() == MessageStatus::REVOKED)
+            if (msg->status() == ::chatnow::MessageStatus::REVOKED)
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageAlreadyRecalled,
                                               "already recalled");
-            if (msg->status() == MessageStatus::DELETED)
+            if (msg->status() == ::chatnow::MessageStatus::DELETED)
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "deleted");
 
             auto role = conv_role_(req->conversation_id(), auth.user_id);
@@ -291,15 +292,18 @@ public:
                       ::google::protobuf::Closure* done) override {
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
+        using EmojiToUsers = std::map<std::string, std::vector<std::string>>;
         HANDLE_RPC(cntl, req, rsp, {
             auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
             if (!msg) throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
             require_member_(msg->session_id(), auth.user_id);
 
             auto rows = _mysql_reaction->select_by_message(static_cast<unsigned long>(req->message_id()));
-            std::map<std::string, std::vector<std::string>> grouped;
+            EmojiToUsers grouped;
             for (auto &r : rows) grouped[r.emoji].push_back(r.user_id);
-            for (auto &[emoji, uids] : grouped) {
+            for (auto &entry : grouped) {
+                const auto &emoji = entry.first;
+                const auto &uids = entry.second;
                 auto *g = rsp->add_reactions();
                 g->set_emoji(emoji);
                 g->set_count(static_cast<int>(uids.size()));
@@ -371,7 +375,7 @@ public:
             auto db_msgs = _mysql_msg->select_by_ids(mids);
             std::vector<unsigned long> out_mids;
             for (auto &m : db_msgs) {
-                if (m.status() == MessageStatus::DELETED) continue;
+                if (m.status() == ::chatnow::MessageStatus::DELETED) continue;
                 auto *out = rsp->add_messages();
                 convert_db_message_to_proto_(m, out);
                 out_mids.push_back(m.message_id());
@@ -464,28 +468,26 @@ public:
         // 提取内容：根据 Content oneof 取文本 / file_id
         std::string file_id, file_name, content_text;
         int64_t file_size = 0;
-        auto msg_type = msg_pb.message_type();
-        if (msg_pb.has_content()) {
-            const auto &ct = msg_pb.content();
-            switch (ct.type()) {
-                case chatnow::message::TEXT:
-                    content_text = ct.text().text();
-                    break;
-                case chatnow::message::IMAGE:
-                    file_id = ct.image().file_id();
-                    break;
-                case chatnow::message::FILE:
-                    file_id = ct.file().file_id();
-                    file_name = ct.file().file_name();
-                    file_size = ct.file().file_size();
-                    break;
-                case chatnow::message::AUDIO:
-                    file_id = ct.audio().file_id();
-                    break;
-                default:
-                    LOG_ERROR("DB-Consumer: 未知消息类型 mid={}", mid);
-                    return ConsumeAction::NackDiscard;
-            }
+        const auto &ct = msg_pb.content();
+        auto msg_type = ct.type();
+        switch (ct.type()) {
+            case chatnow::message::TEXT:
+                content_text = ct.text().text();
+                break;
+            case chatnow::message::IMAGE:
+                file_id = ct.image().file_id();
+                break;
+            case chatnow::message::FILE:
+                file_id = ct.file().file_id();
+                file_name = ct.file().file_name();
+                file_size = ct.file().file_size();
+                break;
+            case chatnow::message::AUDIO:
+                file_id = ct.audio().file_id();
+                break;
+            default:
+                LOG_ERROR("DB-Consumer: 未知消息类型 mid={}", mid);
+                return ConsumeAction::NackDiscard;
         }
 
         if (msg_type != chatnow::message::TEXT && file_id.empty()) {
@@ -496,12 +498,12 @@ public:
         // 组装 Message ODB 实体
         namespace pt = boost::posix_time;
         pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
-        Message msg(mid,
+        ::chatnow::Message msg(mid,
                     msg_pb.conversation_id(),
                     msg_pb.sender_id(),
-                    static_cast<MessageType>(static_cast<int>(msg_type)),
+                    static_cast<::chatnow::MessageType>(static_cast<int>(msg_type)),
                     epoch + boost::posix_time::milliseconds(msg_pb.created_at_ms()),
-                    MessageStatus::NORMAL);
+                    ::chatnow::MessageStatus::NORMAL);
         msg.seq_id(session_seq);
         msg.content(content_text);
         msg.file_id(file_id);
@@ -565,7 +567,7 @@ public:
             es_event.set_content_text(content_text);
             es_event.set_created_at_ms(msg_pb.created_at_ms());
             es_event.set_seq_id(msg_pb.seq_id());
-            es_event.set_message_type(msg_pb.message_type());
+            es_event.set_message_type(msg_type);
 
             std::string es_payload = es_event.SerializeAsString();
             try {
@@ -645,14 +647,14 @@ private:
 
     // ====== 数据转换 ======
 
-    void convert_db_message_to_proto_(const Message &db, chatnow::message::Message *out) {
+    void convert_db_message_to_proto_(const ::chatnow::Message &db, chatnow::message::Message *out) {
         out->set_message_id(db.message_id());
         out->set_conversation_id(db.session_id());
         out->set_sender_id(db.user_id());
         out->set_seq_id(db.seq_id());
         if (!db.client_msg_id().empty()) out->set_client_msg_id(db.client_msg_id());
         out->set_status(static_cast<chatnow::message::MessageStatus>(static_cast<int>(db.status())));
-        out->set_message_type(static_cast<chatnow::message::MessageType>(static_cast<int>(db.message_type())));
+        // message_type 已移至 content.type()，在下方 switch 中统一设置
 
         namespace pt = boost::posix_time;
         pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
@@ -661,24 +663,24 @@ private:
         out->set_created_at_ms(ms);
 
         // content 反序列化：根据 message_type 填充 oneof Content
+        auto msg_type = static_cast<chatnow::message::MessageType>(static_cast<int>(db.message_type()));
         auto *content = out->mutable_content();
         switch (db.message_type()) {
-            case MessageType::TEXT:
-            case MessageType::STRING:
+            case ::chatnow::MessageType::TEXT:
                 content->set_type(chatnow::message::TEXT);
                 content->mutable_text()->set_text(db.content());
                 break;
-            case MessageType::IMAGE:
+            case ::chatnow::MessageType::IMAGE:
                 content->set_type(chatnow::message::IMAGE);
                 content->mutable_image()->set_file_id(db.file_id());
                 break;
-            case MessageType::FILE:
+            case ::chatnow::MessageType::FILE:
                 content->set_type(chatnow::message::FILE);
                 content->mutable_file()->set_file_id(db.file_id());
                 content->mutable_file()->set_file_name(db.file_name());
                 if (db.file_size() > 0) content->mutable_file()->set_file_size(db.file_size());
                 break;
-            case MessageType::SPEECH:
+            case ::chatnow::MessageType::AUDIO:
                 content->set_type(chatnow::message::AUDIO);
                 content->mutable_audio()->set_file_id(db.file_id());
                 break;
@@ -819,7 +821,7 @@ private:
     ServiceManager::ptr _mm_channels;
 
     MessageTable::ptr _mysql_msg;
-    UserTimelineTable::ptr _mysql_user_timeline;
+    UserTimeLineTable::ptr _mysql_user_timeline;
     ConversationMemberTable::ptr _mysql_member;
     MessageReactionTable::ptr _mysql_reaction;
     MessagePinTable::ptr _mysql_pin;
@@ -866,7 +868,7 @@ public:
                            const std::string &cset, uint16_t port, int pool) {
         _odb_db = ODBFactory::create(user, pwd, host, db, cset, port, pool);
         _mysql_msg = std::make_shared<MessageTable>(_odb_db);
-        _mysql_user_timeline = std::make_shared<UserTimelineTable>(_odb_db);
+        _mysql_user_timeline = std::make_shared<UserTimeLineTable>(_odb_db);
         _mysql_member = std::make_shared<ConversationMemberTable>(_odb_db);
         _mysql_reaction = std::make_shared<MessageReactionTable>(_odb_db);
         _mysql_pin = std::make_shared<MessagePinTable>(_odb_db);
@@ -1050,7 +1052,7 @@ private:
         }
         LOG_INFO("开始从 DB 回填 seq 到 Redis...");
         auto msg_table = std::make_shared<MessageTable>(_odb_db);
-        auto timeline_table = std::make_shared<UserTimelineTable>(_odb_db);
+        auto timeline_table = std::make_shared<UserTimeLineTable>(_odb_db);
 
         auto session_seqs = msg_table->select_max_seq_by_session();
         for (const auto &[ssid, max_seq] : session_seqs) {
@@ -1074,7 +1076,7 @@ private:
     Discovery::ptr _service_discovery;
 
     MessageTable::ptr _mysql_msg;
-    UserTimelineTable::ptr _mysql_user_timeline;
+    UserTimeLineTable::ptr _mysql_user_timeline;
     ConversationMemberTable::ptr _mysql_member;
     MessageReactionTable::ptr _mysql_reaction;
     MessagePinTable::ptr _mysql_pin;

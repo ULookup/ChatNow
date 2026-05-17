@@ -31,7 +31,7 @@ endforeach()
 # 3.3 生成ODB框架代码
 # 3.3.1 添加所需的odb映射代码文件名称
 set(odb_path ${CMAKE_CURRENT_SOURCE_DIR}/../odb)
-set(odb_files message.hxx user_timeline.hxx chat_session.hxx chat_session_member.hxx chat_session_view.hxx message_reaction.hxx message_pin.hxx)
+set(odb_files message.hxx user_timeline.hxx conversation.hxx conversation_member.hxx conversation_view.hxx message_reaction.hxx message_pin.hxx)
 # 3.3.2 检查框架代码文件是否已经生成
 set(odb_hxx "")
 set(odb_cxx "")
@@ -65,7 +65,7 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
     -lhiredis -lredis++ -lcpr -lelasticlient -ljsoncpp
-    -lamqpcpp -lev)
+    -lamqpcpp -lev -lmysqlclient)
 
 set(test_client "message_client")
 # 4. 获取源码目录下的所有源码文件
