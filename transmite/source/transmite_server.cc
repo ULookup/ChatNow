@@ -17,7 +17,7 @@ DEFINE_int32(listen_port, 10004, "RPC服务器监听端口");
 DEFINE_int32(rpc_timeout, -1, "RPC调用超时时间");
 DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
 
-DEFINE_string(user_service, "/service/user_service", "用户管理子服务名称");
+DEFINE_string(identity_service, "/service/identity_service", "用户管理子服务名称");
 DEFINE_string(conversation_service, "/service/conversation_service", "会话管理子服务名称");
 DEFINE_string(message_service, "/service/message_service", "消息存储子服务名称（用于幂等查询）");
 
@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     tsb.set_instance_owner(FLAGS_access_host);
     tsb.make_id_generator_object(FLAGS_instance_num, FLAGS_epoch_ms, FLAGS_wait_on_clock_backwards);
     tsb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue, FLAGS_mq_msg_binding_key);
-    tsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_user_service, FLAGS_conversation_service, FLAGS_message_service);
+    tsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_identity_service, FLAGS_conversation_service, FLAGS_message_service);
     tsb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);
     tsb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
 
