@@ -2,6 +2,9 @@ syntax = "proto3";
 package chatnow.presence;
 
 import "common/envelope.proto";
+import "common/types.proto";
+
+option cc_generic_services = true;
 
 enum PresenceState {
     PRESENCE_UNSPECIFIED = 0;
@@ -12,16 +15,21 @@ enum PresenceState {
     INVISIBLE = 5;
 }
 
+message DevicePresence {
+    string device_id = 1;
+    chatnow.common.DevicePlatform platform = 2;
+    PresenceState state = 3;
+    int64 last_active_at_ms = 4;
+}
+
 message Presence {
     string user_id = 1;
-    PresenceState state = 2;
+    PresenceState aggregated_state = 2;
     int64 last_active_at_ms = 3;
-    repeated string active_device_types = 4;
-    optional string custom_status = 5;
+    repeated DevicePresence devices = 4;
 }
 
 service PresenceService {
-    rpc SetPresence(SetPresenceReq) returns (SetPresenceRsp);
     rpc GetPresence(GetPresenceReq) returns (GetPresenceRsp);
     rpc BatchGetPresence(BatchGetPresenceReq) returns (BatchGetPresenceRsp);
     rpc SubscribePresence(SubscribeReq) returns (SubscribeRsp);
@@ -29,19 +37,9 @@ service PresenceService {
     rpc SendTyping(TypingReq) returns (TypingRsp);
 }
 
-message SetPresenceReq {
-    string request_id = 1;
-    string user_id = 2;
-    PresenceState state = 3;
-    optional string custom_status = 4;
-}
-message SetPresenceRsp {
-    chatnow.common.ResponseHeader header = 1;
-}
-
 message GetPresenceReq {
     string request_id = 1;
-    string user_id = 2;
+    string user_id = 2;                  // 查询目标
 }
 message GetPresenceRsp {
     chatnow.common.ResponseHeader header = 1;
@@ -59,22 +57,22 @@ message BatchGetPresenceRsp {
 
 message SubscribeReq {
     string request_id = 1;
-    string user_id = 2;
-    repeated string subscribe_user_ids = 3;
+    repeated string subscribe_user_ids = 2;
+    // subscriber_user_id 从 metadata 取
 }
 message SubscribeRsp { chatnow.common.ResponseHeader header = 1; }
 
 message UnsubscribeReq {
     string request_id = 1;
-    string user_id = 2;
-    repeated string unsubscribe_user_ids = 3;
+    repeated string unsubscribe_user_ids = 2;
+    // subscriber_user_id 从 metadata 取
 }
 message UnsubscribeRsp { chatnow.common.ResponseHeader header = 1; }
 
 message TypingReq {
     string request_id = 1;
-    string user_id = 2;
-    string conversation_id = 3;
-    bool is_typing = 4;
+    string conversation_id = 2;
+    bool is_typing = 3;
+    // user_id、device_id 从 metadata 取
 }
 message TypingRsp { chatnow.common.ResponseHeader header = 1; }
