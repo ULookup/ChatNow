@@ -18,22 +18,27 @@ enum NotifyType {
     REACTION_CHANGED_NOTIFY = 8;
     PIN_CHANGED_NOTIFY = 9;
     READ_RECEIPT_NOTIFY = 10;
+    KICKED_BY_NEW_DEVICE = 11;
+    KICKED_BY_REVOKE = 12;
+    FORCE_LOGOUT = 13;
+    CONVERSATION_DISMISSED_NOTIFY = 14;
     CLIENT_AUTH = 49;
     MSG_PUSH_ACK = 50;
     CLIENT_HEARTBEAT = 51;
 }
 
 message NotifyClientAuth {
-    string session_id = 1;
+    string access_token = 1;
     string device_id = 2;
     optional uint64 last_user_seq = 3;
 }
 
 message NotifyMsgPushAck {
     string user_id = 1;
-    int64 message_id = 2;
-    uint64 user_seq = 3;
-    string conversation_id = 4;
+    string device_id = 2;
+    int64 message_id = 3;
+    uint64 user_seq = 4;
+    string conversation_id = 5;
 }
 
 message NotifyHeartbeat {
@@ -81,6 +86,11 @@ message NotifyReadReceipt {
     uint64 last_read_seq = 3;
 }
 
+message NotifyKicked {
+    NotifyType reason = 1;
+    string message = 2;
+}
+
 message NotifyMessage {
     optional string notify_event_id = 1;
     NotifyType notify_type = 2;
@@ -100,5 +110,6 @@ message NotifyMessage {
         NotifyReactionChanged reaction_changed = 15;
         NotifyPinChanged pin_changed = 16;
         NotifyReadReceipt read_receipt = 17;
+        NotifyKicked kicked = 18;
     }
 }
