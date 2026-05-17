@@ -2,6 +2,10 @@
 
 #include "infra/etcd.hpp"     // 服务注册模块封装
 #include "infra/logger.hpp"   // 日志模块封装
+#include "auth/auth_context.hpp"
+#include "auth/forward_auth.hpp"
+#include "error/error_codes.hpp"
+#include "error/service_error.hpp"
 #include "mq/rabbitmq.hpp"
 #include "mq/channel.hpp"
 #include "mq/trace_headers.hpp"
@@ -9,7 +13,6 @@
 #include "infra/snowflake.hpp"
 #include "dao/data_redis.hpp"
 #include "utils/worker_id.hpp"
-#include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
 #include "identity/identity_service.pb.h"
@@ -32,7 +35,7 @@ inline constexpr size_t LARGE_GROUP_THRESHOLD = 200;
 class TransmiteServiceImpl : public chatnow::MsgTransmitService
 {
 public:
-    TransmiteServiceImpl(const std::string &user_service_name,
+    TransmiteServiceImpl(const std::string &identity_service_name,
                         const std::string &conversation_service_name,
                         const std::string &message_service_name,
                         const ServiceManager::ptr &channels,
@@ -43,7 +46,7 @@ public:
                         const SeqGen::ptr &seq_gen,
                         const Members::ptr &members_cache,
                         const RateLimiter::ptr &rate_limiter)
-                        : _user_service_name(user_service_name),
+                        : _identity_service_name(identity_service_name),
                         _conversation_service_name(conversation_service_name),
                         _message_service_name(message_service_name),
                         _mm_channels(channels),
@@ -142,7 +145,7 @@ public:
         }
 
         // ============ 步骤 2: 并行 RPC 拿用户信息 + 群成员列表（成员优先走缓存） ============
-        auto user_channel = _mm_channels->choose(_user_service_name);
+        auto user_channel = _mm_channels->choose(_identity_service_name);
         if(!user_channel) {
             LOG_ERROR("请求ID: {} - user_service 节点缺失", rid);
             return err_response(rid, "依赖服务节点缺失");
@@ -293,7 +296,7 @@ public:
         }
     }
 private:
-    std::string _user_service_name;
+    std::string _identity_service_name;
     std::string _conversation_service_name;
     std::string _message_service_name;
     ServiceManager::ptr _mm_channels;
@@ -389,15 +392,15 @@ public:
     /* brief: 用于构造服务发现&信道管理客户端对象（含 message_service 用于幂等查询） */
     void make_discovery_object(const std::string &reg_host,
                             const std::string &base_service_name,
-                            const std::string &user_service_name,
+                            const std::string &identity_service_name,
                             const std::string &conversation_service_name,
                             const std::string &message_service_name)
     {
-        _user_service_name = user_service_name;
+        _identity_service_name = identity_service_name;
         _conversation_service_name = conversation_service_name;
         _message_service_name = message_service_name;
         _mm_channels = std::make_shared<ServiceManager>();
-        _mm_channels->declared(_user_service_name);
+        _mm_channels->declared(_identity_service_name);
         _mm_channels->declared(_conversation_service_name);
         _mm_channels->declared(_message_service_name);
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(), std::placeholders::_1, std::placeholders::_2);
@@ -478,7 +481,7 @@ public:
             abort();
         }
         _rpc_server = std::make_shared<brpc::Server>();
-        TransmiteServiceImpl *transmite_service = new TransmiteServiceImpl(_user_service_name,
+        TransmiteServiceImpl *transmite_service = new TransmiteServiceImpl(_identity_service_name,
                                                                         _conversation_service_name,
                                                                         _message_service_name,
                                                                         _mm_channels,
@@ -524,7 +527,7 @@ public:
         return server;
     }
 private:
-    std::string _user_service_name;
+    std::string _identity_service_name;
     std::string _conversation_service_name;
     std::string _message_service_name;
     ServiceManager::ptr _mm_channels;
