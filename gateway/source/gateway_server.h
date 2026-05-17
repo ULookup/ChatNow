@@ -476,16 +476,20 @@ public:
         auto jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(_jwt_config);
         auto jwt_store = std::make_shared<::chatnow::auth::JwtStore>(redis);
 
-        auto discovery = std::make_shared<Discovery>(_reg_host, _base);
         auto channels = std::make_shared<ServiceManager>();
-        channels->add(_identity_svc, discovery);
-        channels->add(_relationship_svc, discovery);
-        channels->add(_conversation_svc, discovery);
-        channels->add(_message_svc, discovery);
-        channels->add(_transmite_svc, discovery);
-        channels->add(_media_svc, discovery);
-        channels->add(_presence_svc, discovery);
-        channels->add(_push_svc, discovery);
+        channels->declared(_identity_svc);
+        channels->declared(_relationship_svc);
+        channels->declared(_conversation_svc);
+        channels->declared(_message_svc);
+        channels->declared(_transmite_svc);
+        channels->declared(_media_svc);
+        channels->declared(_presence_svc);
+        channels->declared(_push_svc);
+        auto put_cb = std::bind(&ServiceManager::onServiceOnline, channels.get(),
+                                std::placeholders::_1, std::placeholders::_2);
+        auto del_cb = std::bind(&ServiceManager::onServiceOffline, channels.get(),
+                                std::placeholders::_1, std::placeholders::_2);
+        auto discovery = std::make_shared<Discovery>(_reg_host, _base, put_cb, del_cb);
 
         return std::make_shared<GatewayServer>(
             _http_port, channels, jwt_codec, jwt_store,
