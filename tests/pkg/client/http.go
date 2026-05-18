@@ -32,24 +32,17 @@ func NewHTTPClient(cfg *Config) *HTTPClient {
 	}
 }
 
-func NewHTTPClientWithAddr(addr string) *HTTPClient {
-	return &HTTPClient{
-		baseURL: "http://" + addr,
-		client:  &http.Client{Timeout: 10 * time.Second},
-	}
-}
-
 // NewRequestID generates a 32-hex-char trace/request ID.
 func NewRequestID() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	rand.Reader.Read(b)
 	return hex.EncodeToString(b)
 }
 
 // NewDeviceID generates a random device ID.
 func NewDeviceID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	rand.Reader.Read(b)
 	return hex.EncodeToString(b)
 }
 

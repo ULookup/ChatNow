@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"chatnow-tests/pkg/client"
-	"chatnow-tests/pkg/fixture"
 	msg "chatnow-tests/proto/chatnow/message"
 	transmite "chatnow-tests/proto/chatnow/transmite"
 )
