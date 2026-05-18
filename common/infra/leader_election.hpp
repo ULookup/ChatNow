@@ -39,8 +39,11 @@ public:
     void stop() {
         _running = false;
         _cv.notify_all();
-        if (_keep_alive) {
-            try { _keep_alive->Cancel(); } catch (...) {}
+        {
+            std::lock_guard<std::mutex> lk(_cv_mu);
+            if (_keep_alive) {
+                try { _keep_alive->Cancel(); } catch (...) {}
+            }
         }
         if (_thread.joinable()) _thread.join();
     }
@@ -66,7 +69,10 @@ private:
                 auto txn_resp = _etcd->txn(txn).get();
 
                 if (txn_resp.is_ok() && txn_resp.value().succeeded()) {
-                    _keep_alive = _etcd->keepalive(lease_id).get();
+                    {
+                        std::lock_guard<std::mutex> lk(_cv_mu);
+                        _keep_alive = _etcd->keepalive(lease_id).get();
+                    }
                     _is_leader = true;
                     if (_on_acquired) _on_acquired();
 

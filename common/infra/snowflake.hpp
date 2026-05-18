@@ -149,7 +149,6 @@ public:
                     LOG_INFO("EtcdWorkIdAllocator: 申请到 worker_id={}", slot);
                     return slot;
                 }
-                if (!election->is_leader()) break;  // lost immediately
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             election->stop();
