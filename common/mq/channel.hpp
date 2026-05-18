@@ -124,7 +124,8 @@ public:
         _follow_services.insert(service_name);
     }
 
-    /* brief: etcd PUT 事件回调 */
+    /* brief: etcd PUT 事件回调。同时用 service_name 和完整 instance 路径做 key：
+     *        choose(service_name) → RR 负载均衡；choose(instance_path) → 直连特定实例。 */
     void onServiceOnline(const std::string &service_instance, const std::string &host) {
         std::string service_name = getServiceName(service_instance);
         ServiceChannel::ptr service;
@@ -141,6 +142,8 @@ public:
             } else {
                 service = it->second;
             }
+            // 同时以完整路径注册，供跨实例直连（如 Push 跨实例转发）
+            _services[service_instance] = service;
         }
         LOG_DEBUG("{}-{} 服务上线新节点", service_name, host);
         service->append(host);

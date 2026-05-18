@@ -8,7 +8,8 @@ DEFINE_int32(listen_port, 9050, "Presence 服务 RPC 监听端口");
 
 DEFINE_string(registry_host, "http://127.0.0.1:2379", "服务注册中心地址");
 DEFINE_string(base_service, "/service", "服务监控根目录");
-DEFINE_string(push_service, "/service/push_service", "Push 子服务名称");
+DEFINE_string(push_service, "/service/push_service", "Push 子服务名称（用于服务发现）");
+DEFINE_string(instance_name, "/presence_service/instance", "Presence 服务实例标识");
 
 DEFINE_string(redis_host, "127.0.0.1", "Redis服务器访问地址");
 DEFINE_int32(redis_port, 6379, "Redis服务器访问端口");
@@ -65,9 +66,9 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // 注册到 etcd
+    // 注册到 etcd（3 层路径，与 getServiceName 兼容）
     auto reg = std::make_shared<chatnow::Registry>(FLAGS_registry_host);
-    reg->registry(FLAGS_base_service + "/" + std::to_string(FLAGS_listen_port),
+    reg->registry(FLAGS_base_service + FLAGS_instance_name,
                   fmt::format("{}:{}", "0.0.0.0", FLAGS_listen_port));
 
     LOG_INFO("Presence 服务已启动 port={}", FLAGS_listen_port);

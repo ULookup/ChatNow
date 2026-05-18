@@ -1,12 +1,13 @@
 # 1. 添加 cmake 版本说明
 cmake_minimum_required(VERSION 3.1.3)
 # 2. 声明工程名称
-project(message_server)
+project(chatnow)
 # 3. 添加子目录
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/message)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/user)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/file)
-# speech 子服务在 P4 已并入 media_server（位于 file/）；speech/ 目录已删除。
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/identity)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/media)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/presence)
+# speech 子服务已并入 media_server（位于 media/）；speech/ 目录已删除。
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/transmite)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/relationship)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/conversation)

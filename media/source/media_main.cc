@@ -5,6 +5,7 @@
 //   4. Aws::InitAPI
 //   5. 用 Builder 组装 MediaServer 并 start
 
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -34,7 +35,7 @@ DEFINE_int32(rpc_threads, 4, "RPC 的 IO 线程数");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL 地址");
 DEFINE_string(mysql_user, "root", "MySQL 用户名");
-DEFINE_string(mysql_pswd, "YHY060403", "MySQL 密码");
+DEFINE_string(mysql_pswd, "", "MySQL 密码 (通过 --mysql_pswd 或 MYSQL_PSWD 环境变量设置)");
 DEFINE_string(mysql_db,   "chatnow", "MySQL 库");
 DEFINE_string(mysql_cset, "utf8mb4", "MySQL 字符集");
 DEFINE_int32 (mysql_port, 0, "MySQL 端口");
@@ -101,6 +102,16 @@ LoadedMediaConf load_media_conf(const std::string& path) {
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
+
+    // 密码优先从环境变量读取，命令行参数次之
+    if (FLAGS_mysql_pswd.empty()) {
+        const char* env = std::getenv("MYSQL_PSWD");
+        if (env && *env) FLAGS_mysql_pswd = env;
+    }
+    if (FLAGS_mysql_pswd.empty()) {
+        std::cerr << "mysql_pswd 必须通过 --mysql_pswd 或环境变量 MYSQL_PSWD 设置" << std::endl;
+        return 1;
+    }
 
     LoadedMediaConf conf;
     try {

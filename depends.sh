@@ -11,25 +11,31 @@ get_depends() {
 }
 
 get_depends ./gateway/build/gateway_server ./gateway/depends
-get_depends ./file/build/file_server ./file/depends
-get_depends ./friend/build/friend_server ./friend/depends
+get_depends ./media/build/media_server ./media/depends
 get_depends ./message/build/message_server ./message/depends
-get_depends ./speech/build/speech_server ./speech/depends
 get_depends ./transmite/build/transmite_server ./transmite/depends
-get_depends ./user/build/user_server ./user/depends
+get_depends ./identity/build/identity_server ./identity/depends
+get_depends ./relationship/build/relationship_server ./relationship/depends
+get_depends ./conversation/build/conversation_server ./conversation/depends
+get_depends ./push/build/push_server ./push/depends
+get_depends ./presence/build/presence_server ./presence/depends
 
 cp /bin/nc ./gateway/
-cp /bin/nc ./file/
-cp /bin/nc ./friend/
+cp /bin/nc ./media/
 cp /bin/nc ./message/
-cp /bin/nc ./speech/
 cp /bin/nc ./transmite/
-cp /bin/nc ./user/
+cp /bin/nc ./identity/
+cp /bin/nc ./relationship/
+cp /bin/nc ./conversation/
+cp /bin/nc ./push/
+cp /bin/nc ./presence/
 
 get_depends /bin/nc ./gateway/depends
-get_depends /bin/nc ./file/depends
-get_depends /bin/nc ./friend/depends
+get_depends /bin/nc ./media/depends
 get_depends /bin/nc ./message/depends
-get_depends /bin/nc ./speech/depends
 get_depends /bin/nc ./transmite/depends
-get_depends /bin/nc ./user/depends
+get_depends /bin/nc ./identity/depends
+get_depends /bin/nc ./relationship/depends
+get_depends /bin/nc ./conversation/depends
+get_depends /bin/nc ./push/depends
+get_depends /bin/nc ./presence/depends

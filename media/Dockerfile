@@ -6,11 +6,9 @@ RUN mkdir -p /im/logs &&\
     mkdir -p /im/data &&\
     mkdir -p /im/conf &&\
     mkdir -p /im/bin
-RUN apt-get update && apt-get install -y ca-certificates
 # 将可执行程序文件，拷贝进入镜像
-COPY ./build/user_server /im/bin
+COPY ./build/media_server /im/bin
 # 将可执行程序依赖，拷贝进入镜像
 COPY ./depends/* /lib/x86_64-linux-gnu/
-COPY ./nc /bin
 # 设置容器的启动默认操作 --- 运行程序
-CMD /im/bin/user_server -flagfile=/im/conf/user_server.conf
+CMD /im/bin/media_server -flagfile=/im/conf/media_server.conf

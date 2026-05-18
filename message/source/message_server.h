@@ -772,19 +772,18 @@ private:
         r->set_actor_user_id(actor_uid);
         r->set_emoji(emoji);
         r->set_added(added);
-        // Reaction 仅推消息发送者，直接调 PushService.PushToUser RPC
+        // Reaction 仅推消息发送者，直接调 PushService.PushToUser RPC（fire-and-forget）
         try {
-            auto channel = _mm_channels ? _mm_channels->choose("push_service") : nullptr;
+            auto channel = _mm_channels ? _mm_channels->choose("/service/push_service") : nullptr;
             if (!channel) { LOG_WARN("push channel unavailable; skip reaction notify"); return; }
             chatnow::push::PushService_Stub stub(channel.get());
-            chatnow::push::PushToUserReq preq;
-            preq.set_request_id("reaction-notify");
-            preq.set_user_id(target_uid);
-            *preq.mutable_notify() = nm;
-            chatnow::push::PushToUserRsp prsp;
-            brpc::Controller pcntl;
-            pcntl.set_timeout_ms(500);
-            stub.PushToUser(&pcntl, &preq, &prsp, brpc::DoNothing());
+            auto *closure = new ::chatnow::SelfDeleteRpcClosure<
+                chatnow::push::PushToUserReq, chatnow::push::PushToUserRsp>();
+            closure->req.set_request_id("reaction-notify");
+            closure->req.set_user_id(target_uid);
+            *closure->req.mutable_notify() = nm;
+            closure->cntl.set_timeout_ms(500);
+            stub.PushToUser(&closure->cntl, &closure->req, &closure->rsp, closure);
         } catch (std::exception &e) {
             LOG_ERROR("publish_reaction_notify exception target={} mid={}: {}", target_uid, mid, e.what());
         }

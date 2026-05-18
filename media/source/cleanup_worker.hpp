@@ -42,6 +42,9 @@ inline constexpr int          kMediaGcLeaseRenewIntervalMs = 200'000;
 
 class CleanupWorker {
 public:
+    CleanupWorker(CleanupWorker&&) = delete;
+    CleanupWorker& operator=(CleanupWorker&&) = delete;
+
     CleanupWorker(std::shared_ptr<S3Client>            s3,
                   std::shared_ptr<odb::core::database> mysql,
                   std::shared_ptr<sw::redis::Redis>    redis,

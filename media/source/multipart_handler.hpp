@@ -49,7 +49,7 @@ public:
           _pri_b(std::move(private_bucket)),
           _presign(presign_seconds) {}
 
-    /* brief: InitMultipartUpload —— 校验 + s3.init_multipart + 落 pending 行 */
+    /* brief: InitMultipartUpload —— 校验 + 去重 + s3.init_multipart + 落 pending 行 */
     void init(const std::string& user_id,
               const ::chatnow::media::InitMultipartReq& req,
               ::chatnow::media::InitMultipartRsp* rsp) {
@@ -66,6 +66,33 @@ public:
         int64_t pending_others = _files->pending_bytes_of_owner(user_id);
         if (qrow.used_bytes() + req.file_size() + pending_others > qrow.quota_bytes()) {
             throw ServiceError(::chatnow::error::kMediaQuotaExceeded, "user quota exceeded");
+        }
+
+        // 去重：若已有 committed blob，复用其 S3 对象，不走 multipart 上传流程
+        if (auto blob = _blobs->select_by_hash(req.content_hash());
+            blob && blob->ref_count() > 0)
+        {
+            auto file_id = next_file_id_hex();
+            MediaFile r;
+            r.file_id(file_id);
+            r.content_hash(req.content_hash());
+            r.bucket(blob->bucket());
+            r.object_key(blob->object_key());
+            r.file_name(req.file_name());
+            r.file_size(req.file_size());
+            r.mime_type(req.mime_type());
+            r.purpose(static_cast<MediaPurpose>(req.purpose()));
+            r.owner_id(user_id);
+            r.uploaded_at(now_ptime());
+            r.status(MediaFileStatus::PENDING);
+            if (!_files->insert(r)) {
+                throw ServiceError(::chatnow::error::kMediaUploadFailed, "media_file insert");
+            }
+            rsp->set_file_id(file_id);
+            // upload_id 留空表示已去重命中，客户端走 CompleteUpload 而非分片完成
+            LOG_INFO("init_multipart_dedup user={} file={} hash={} size={}",
+                     user_id, file_id, req.content_hash(), req.file_size());
+            return;
         }
 
         auto bucket = pick_bucket(req.purpose(), _pub_b, _pri_b);
@@ -174,8 +201,16 @@ public:
             throw ServiceError(::chatnow::error::kMediaHashMismatch, "size mismatch");
         }
 
-        // blob_ref + status + quota
-        if (!_blobs->select_by_hash(file->content_hash())) {
+        // blob_ref + status + quota；若已有 blob 但指向不同 key，则本次是并发重复上传，
+        //    删掉本文件的 S3 对象并复用已有 blob 的 key。
+        if (auto existing = _blobs->select_by_hash(file->content_hash())) {
+            if (existing->object_key() != file->object_key()) {
+                try { _s3->delete_object(file->bucket(), file->object_key()); } catch (...) {}
+                file->bucket(existing->bucket());
+                file->object_key(existing->object_key());
+                _files->update_bucket_key(file->file_id(), existing->bucket(), existing->object_key());
+            }
+        } else {
             MediaBlobRef br;
             br.content_hash(file->content_hash());
             br.bucket(file->bucket());

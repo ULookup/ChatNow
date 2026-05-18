@@ -72,7 +72,12 @@ public:
         for (const auto &did : request->target_device_ids()) target_dids.insert(did);
         bool filter_devices = !target_dids.empty();
         try {
-            auto auth = ::chatnow::auth::extract_auth(cntl);
+            // auth 提取失败不阻塞（PushToUser 不依赖 auth，所有数据来自 request）
+            try {
+                auto auth = ::chatnow::auth::extract_auth(cntl);
+            } catch (const ::chatnow::ServiceError&) {
+                // 内部调用方可能未设置 auth metadata；可接受
+            }
             response->mutable_header()->set_success(true);
             response->mutable_header()->set_error_code(::chatnow::error::kOK);
             response->mutable_header()->set_request_id(request->request_id());
@@ -112,11 +117,13 @@ public:
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(e.code());
             response->mutable_header()->set_error_message(e.message());
+            cntl->SetFailed(e.message());
             LOG_WARN("rpc_failed code={} msg={}", e.code(), e.message());
         } catch (const std::exception& e) {
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(::chatnow::error::kSystemInternalError);
             response->mutable_header()->set_error_message("internal error");
+            cntl->SetFailed("internal error");
             LOG_ERROR("rpc_exception what={}", e.what());
         }
     }
@@ -131,7 +138,9 @@ public:
         std::unordered_map<std::string, unsigned long> uid2seq;
         for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
         try {
-            auto auth = ::chatnow::auth::extract_auth(cntl);
+            try {
+                auto auth = ::chatnow::auth::extract_auth(cntl);
+            } catch (const ::chatnow::ServiceError&) {}
             response->mutable_header()->set_success(true);
             response->mutable_header()->set_error_code(::chatnow::error::kOK);
             response->mutable_header()->set_request_id(request->request_id());
@@ -171,11 +180,13 @@ public:
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(e.code());
             response->mutable_header()->set_error_message(e.message());
+            cntl->SetFailed(e.message());
             LOG_WARN("rpc_failed code={} msg={}", e.code(), e.message());
         } catch (const std::exception& e) {
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(::chatnow::error::kSystemInternalError);
             response->mutable_header()->set_error_message("internal error");
+            cntl->SetFailed("internal error");
             LOG_ERROR("rpc_exception what={}", e.what());
         }
     }
@@ -306,7 +317,7 @@ public:
             }
             if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
 
-            // 异步上报 UpdateReadAck
+            // 异步上报 UpdateReadAck（无入站 RPC context，需手动设置 auth metadata）
             auto channel = _mm_channels->choose(_message_service_name);
             if (!channel) {
                 LOG_WARN("UpdateReadAck: message service 不可达 uid={}", ack.user_id());
@@ -319,6 +330,11 @@ public:
             closure->req.set_request_id(ack.user_id());
             closure->req.set_conversation_id(ack.conversation_id());
             closure->req.set_seq_id(ack.user_seq());
+            // 手动设置 auth headers：WS handler 无入站 RPC context，extract_auth 需这些字段
+            closure->cntl.http_request().SetHeader("x-user-id", ack.user_id());
+            closure->cntl.http_request().SetHeader("x-device-id", ack.device_id());
+            closure->cntl.http_request().SetHeader("x-trace-id", "");
+            closure->cntl.http_request().SetHeader("x-jwt-jti", "");
             closure->on_done = [uid = ack.user_id(), seq = ack.user_seq()]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
                 if (c->Failed()) {

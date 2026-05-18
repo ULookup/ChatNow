@@ -84,6 +84,24 @@ public:
         return res;
     }
 
+    /* brief: 更新 bucket + object_key（并发去重改名时用） */
+    bool update_bucket_key(const std::string& file_id, const std::string& bucket, const std::string& object_key) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<MediaFile>;
+            auto row = _db->query_one<MediaFile>(query::file_id == file_id);
+            if (!row) { trans.commit(); return false; }
+            row->bucket(bucket);
+            row->object_key(object_key);
+            _db->update(*row);
+            trans.commit();
+        } catch (std::exception& e) {
+            LOG_ERROR("media_file update_bucket_key 失败: file_id={} err={}", file_id, e.what());
+            return false;
+        }
+        return true;
+    }
+
     /* brief: 更新 status，调用方在外层完成 ref_count++/quota++ 等业务动作 */
     bool update_status(const std::string& file_id, MediaFileStatus status) {
         try {

@@ -46,7 +46,8 @@ public:
                         const std::shared_ptr<SnowflakeId> &id_generator,
                         const SeqGen::ptr &seq_gen,
                         const Members::ptr &members_cache,
-                        const RateLimiter::ptr &rate_limiter)
+                        const RateLimiter::ptr &rate_limiter,
+                        const std::shared_ptr<sw::redis::Redis> &redis)
                         : _identity_service_name(identity_service_name),
                         _conversation_service_name(conversation_service_name),
                         _message_service_name(message_service_name),
@@ -57,7 +58,8 @@ public:
                         _id_generator(id_generator),
                         _seq_gen(seq_gen),
                         _members_cache(members_cache),
-                        _rate_limiter(rate_limiter) {}
+                        _rate_limiter(rate_limiter),
+                        _redis(redis) {}
     ~TransmiteServiceImpl() = default;
 
     void SendMessage(google::protobuf::RpcController *controller,
@@ -112,26 +114,27 @@ public:
                 break;
         }
 
-        // ③ 客户端幂等去重（命中 client_msg_id 索引则直接返回旧消息）
-        if (!client_msg_id.empty()) {
-            auto msg_channel = _mm_channels->choose(_message_service_name);
-            if (msg_channel) {
-                chatnow::message::MessageService_Stub stub(msg_channel.get());
-                chatnow::message::SelectByClientMsgIdReq dup_req;
-                chatnow::message::SelectByClientMsgIdRsp dup_rsp;
-                brpc::Controller dup_cntl;
-                dup_req.set_request_id(rid);
-                dup_req.set_client_msg_id(client_msg_id);
-                stub.SelectByClientMsgId(&dup_cntl, &dup_req, &dup_rsp, nullptr);
-                if (!dup_cntl.Failed() && dup_rsp.header().success()) {
-                    LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
-                    response->mutable_header()->set_request_id(rid);
-                    response->mutable_header()->set_success(true);
-                    response->mutable_message()->CopyFrom(dup_rsp.message());
-                    return;
+        // ③ 客户端幂等去重：Redis SET NX，命中直接返回（零 RPC）
+        if (!client_msg_id.empty() && _redis) {
+            std::string idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+            try {
+                auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::SET_NX);
+                if (!result) {
+                    // key 已存在 → 重复消息
+                    auto cached = _redis->get(idem_key);
+                    if (cached && cached.value() != "pending") {
+                        LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
+                        response->mutable_header()->set_request_id(rid);
+                        response->mutable_header()->set_success(true);
+                        response->mutable_message()->set_message_id(
+                            std::stoull(cached.value()));
+                        return;
+                    }
+                    LOG_WARN("请求ID: {} - client_msg_id={} 幂等冲突（前一条未完成）", rid, client_msg_id);
+                    return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                 }
-            } else {
-                LOG_WARN("请求ID: {} - message_service 不可用，跳过幂等检查（fail-open）", rid);
+            } catch (std::exception &e) {
+                LOG_WARN("请求ID: {} - Redis 幂等检查异常: {}（fail-open）", rid, e.what());
             }
         }
 
@@ -168,6 +171,7 @@ public:
         brpc::Controller profile_cntl;
         profile_req.set_request_id(rid);
         profile_req.set_user_id(uid);
+        chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &profile_cntl);
         identity_stub.GetProfile(&profile_cntl, &profile_req, &profile_rsp, brpc::DoNothing());
 
         // 成员列表未命中缓存：RPC 拉取
@@ -184,6 +188,7 @@ public:
             ::chatnow::conversation::GetMemberIdsReq member_req;
             member_req.set_request_id(rid);
             member_req.set_conversation_id(chat_ssid);
+            chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &member_cntl);
             conv_stub.GetMemberIds(&member_cntl, &member_req, &member_rsp, brpc::DoNothing());
             brpc::Join(member_cntl.call_id());
             if (member_cntl.Failed() || !member_rsp.header().success()) {
@@ -267,6 +272,12 @@ public:
 
         // ⑩ MQ publish_confirm（异步回调完成后 Run done）
         google::protobuf::Closure *async_done = rpc_guard.release();
+        auto msg_id = msg->message_id();
+        std::string idem_key;
+        if (!client_msg_id.empty() && _redis) {
+            idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+        }
+        auto redis = _redis;  // 捕获 shared_ptr 延长生命周期
 
         std::shared_ptr<std::atomic<bool>> done_called =
             std::make_shared<std::atomic<bool>>(false);
@@ -275,12 +286,21 @@ public:
             ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
-                [async_done, response, rid, done_called](PublishStatus status, const std::string &mq_msg) {
+                [async_done, response, rid, done_called, redis, idem_key, msg_id](PublishStatus status, const std::string &mq_msg) {
                     if (done_called->exchange(true)) return;
                     if (status == PublishStatus::Acked) {
                         LOG_DEBUG("请求ID: {} - 消息成功投递到 Broker", rid);
+                        // 更新幂等 key：pending → 真实 msg_id
+                        if (!idem_key.empty() && redis) {
+                            try { redis->set(idem_key, std::to_string(msg_id), std::chrono::seconds(86400)); }
+                            catch (...) {}
+                        }
                     } else {
                         LOG_ERROR("请求ID: {} - 消息投递到 Broker 失败: {}", rid, mq_msg);
+                        // 投递失败清除幂等 key，允许客户端重试
+                        if (!idem_key.empty() && redis) {
+                            try { redis->del(idem_key); } catch (...) {}
+                        }
                         response->mutable_header()->set_success(false);
                         response->mutable_header()->set_error_code(chatnow::error::kSystemUnavailable);
                         response->mutable_header()->set_error_message("消息发送失败，请重试");
@@ -313,6 +333,7 @@ private:
     SeqGen::ptr _seq_gen;
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
+    std::shared_ptr<sw::redis::Redis> _redis;
 };
 
 class TransmiteServer
@@ -495,7 +516,8 @@ public:
                                                                         _id_generator,
                                                                         _seq_gen,
                                                                         _members_cache,
-                                                                        _rate_limiter);
+                                                                        _rate_limiter,
+                                                                        _redis);
         int ret = _rpc_server->AddService(transmite_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");

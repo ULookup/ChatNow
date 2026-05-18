@@ -15,9 +15,9 @@ DEFINE_int32(log_level, 0, "发布模式下，用于指定日志的输出等级"
 
 DEFINE_string(etcd_host, "http://127.0.0.1:2379", "服务注册中心地址");
 DEFINE_string(base_service, "/service", "服务监控根目录");
-DEFINE_string(user_service, "/service/user_service", "服务监控根目录");
+DEFINE_string(identity_service, "/service/identity_service", "Identity 服务 etcd 路径");
 
-chatnow::ServiceManager::ptr user_channels;
+chatnow::ServiceManager::ptr identity_channels;
 
 chatnow::UserInfo user_info;
 
@@ -25,7 +25,7 @@ std::string login_ssid;
 std::string new_nickname = "亲爱的猪妈妈";
 
 //TEST(用户子服务测试, 用户注册测试) {
-//    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+//    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
 //    ASSERT_TRUE(channel);
 //
 //    chatnow::UserRegisterReq req;
@@ -41,7 +41,7 @@ std::string new_nickname = "亲爱的猪妈妈";
 //}
 
 TEST(用户子服务测试, 用户登录测试) {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::UserLoginReq req;
@@ -58,7 +58,7 @@ TEST(用户子服务测试, 用户登录测试) {
 }
 
 TEST(用户子服务测试, 用户头像测试) {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::SetUserAvatarReq req;
@@ -75,7 +75,7 @@ TEST(用户子服务测试, 用户头像测试) {
 }
 
 TEST(用户子服务测试, 用户签名测试) {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::SetUserDescriptionReq req;
@@ -92,7 +92,7 @@ TEST(用户子服务测试, 用户签名测试) {
 }
 
 TEST(用户子服务测试, 用户昵称测试) {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::SetUserNicknameReq req;
@@ -109,7 +109,7 @@ TEST(用户子服务测试, 用户昵称测试) {
 }
 
 void set_user_avatar(const std::string &uid, const std::string &avatar) {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::SetUserAvatarReq req;
@@ -126,7 +126,7 @@ void set_user_avatar(const std::string &uid, const std::string &avatar) {
 std::string code_id;
 
 void get_code() {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::MailVerifyCodeReq req;
@@ -143,7 +143,7 @@ void get_code() {
 }
 
 TEST(用户子服务测试, 用户信息获取测试) {
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::GetUserInfoReq req;
@@ -166,7 +166,7 @@ TEST(用户子服务测试, 用户信息获取测试) {
 TEST(用户子服务测试, 批量用户信息获取测试) {
     set_user_avatar("用户ID1", "小猪佩奇的头像数据");
     set_user_avatar("用户ID2", "小猪乔治的头像数据");
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::GetMultiUserInfoReq req;
@@ -203,7 +203,7 @@ TEST(用户子服务测试, 批量用户信息获取测试) {
 
 TEST(用户子服务测试, 邮箱注册测试) {
     get_code();
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::MailRegisterReq req;
@@ -224,7 +224,7 @@ TEST(用户子服务测试, 邮箱注册测试) {
 TEST(用户子服务测试, 邮箱登录测试) {
     std::this_thread::sleep_for(std::chrono::seconds(3));
     get_code();
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::MailLoginReq req;
@@ -246,7 +246,7 @@ TEST(用户子服务测试, 邮箱登录测试) {
 
 TEST(用户子服务测试, 邮箱设置测试) {
     get_code();
-    auto channel = user_channels->choose(FLAGS_user_service); //获取通信信道
+    auto channel = identity_channels->choose(FLAGS_identity_service); //获取通信信道
     ASSERT_TRUE(channel);
 
     chatnow::SetUserMailNumberReq req;
@@ -276,10 +276,10 @@ int main(int argc, char *argv[])
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     //1. 先构造 Rpc 信道管理对象
-    user_channels = std::make_shared<chatnow::ServiceManager>();
-    user_channels->declared(FLAGS_user_service);
-    auto put_cb = std::bind(&chatnow::ServiceManager::onServiceOnline, user_channels.get(), std::placeholders::_1, std::placeholders::_2);
-    auto del_cb = std::bind(&chatnow::ServiceManager::onServiceOffline, user_channels.get(), std::placeholders::_1, std::placeholders::_2);
+    identity_channels = std::make_shared<chatnow::ServiceManager>();
+    identity_channels->declared(FLAGS_identity_service);
+    auto put_cb = std::bind(&chatnow::ServiceManager::onServiceOnline, identity_channels.get(), std::placeholders::_1, std::placeholders::_2);
+    auto del_cb = std::bind(&chatnow::ServiceManager::onServiceOffline, identity_channels.get(), std::placeholders::_1, std::placeholders::_2);
     //2. 构造服务发现对象
     chatnow::Discovery::ptr dclient = std::make_shared<chatnow::Discovery>(FLAGS_etcd_host, FLAGS_base_service, put_cb, del_cb);
 

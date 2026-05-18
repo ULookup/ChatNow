@@ -245,8 +245,16 @@ public:
         // 注：单段 PUT 时 ETag 是 md5(body)，client 提供的是 sha256，不强制 etag 比对；
         //     真实内容指纹比对放在 cleanup magic_sniff（Task 25）异步路径。
 
-        // 2) blob_ref upsert + inc
-        if (!_blobs->select_by_hash(file->content_hash())) {
+        // 2) blob_ref upsert + inc；若已有 blob 但指向不同 key，则本次是并发重复上传，
+        //    删掉本文件的 S3 对象并复用已有 blob 的 key。
+        if (auto existing = _blobs->select_by_hash(file->content_hash())) {
+            if (existing->object_key() != file->object_key()) {
+                try { _s3->delete_object(file->bucket(), file->object_key()); } catch (...) {}
+                file->bucket(existing->bucket());
+                file->object_key(existing->object_key());
+                _files->update_bucket_key(file->file_id(), existing->bucket(), existing->object_key());
+            }
+        } else {
             MediaBlobRef br;
             br.content_hash(file->content_hash());
             br.bucket(file->bucket());

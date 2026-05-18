@@ -3,7 +3,7 @@
 /**
  * MediaServer + MediaServerBuilder + MediaServiceImpl
  * ---
- * 仿 user_server.h 的 Builder 模式。组件构造顺序：
+ * 仿 identity_server.h 的 Builder 模式。组件构造顺序：
  *   make_mysql_object → make_redis_object → make_s3_object →
  *   make_media_config（加载 conf/media.json） →
  *   make_registry_object → make_rpc_object → build → start
@@ -259,7 +259,7 @@ public:
           _rpc_server(std::move(server)),
           _worker(std::move(worker)) {}
 
-    ~MediaServer() { if (_worker) _worker->stop(); }
+    ~MediaServer() = default;  // CleanupWorker 析构函数自行 stop
 
     void start() {
         if (_worker) _worker->start();
@@ -293,8 +293,7 @@ public:
         _s3 = std::make_shared<S3Client>(o);
     }
 
-    void make_media_config(const std::string& media_conf_path) {
-        // 在 media_main.cc 中调用：解析 conf/media.json，填 _cfg + 加载 mime 白名单
+    void set_media_config_path(const std::string& media_conf_path) {
         _media_conf_path = media_conf_path;
     }
 
@@ -317,11 +316,12 @@ public:
             abort();
         }
 
-        auto* media_service = new MediaServiceImpl(_s3, _mime, _mysql, _redis, _cfg);
-        if (_rpc_server->AddService(media_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE) == -1) {
+        auto media_service = std::make_unique<MediaServiceImpl>(_s3, _mime, _mysql, _redis, _cfg);
+        if (_rpc_server->AddService(media_service.get(), brpc::ServiceOwnership::SERVER_OWNS_SERVICE) == -1) {
             LOG_ERROR("AddService MediaService 失败");
             abort();
         }
+        media_service.release();  // 所有权转移给 brpc
 
         brpc::ServerOptions opt;
         opt.idle_timeout_sec = timeout;

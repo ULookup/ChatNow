@@ -1,9 +1,9 @@
 # 1. 添加 cmake 版本说明
 cmake_minimum_required(VERSION 3.1.3)
 # 2. 声明工程名称
-project(user_server)
+project(identity_server)
 
-set(target "user_server")
+set(target "identity_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
@@ -66,7 +66,7 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
     -lredis++ -lhiredis -lcpr -lelasticlient -ljsoncpp)
 
-set(test_client "user_client")
+set(test_client "identity_client")
 # 4. 获取源码目录下的所有源码文件
 set(test_files "")
 aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)

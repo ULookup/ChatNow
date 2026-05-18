@@ -65,14 +65,14 @@ services:
     ports:
       - 5672:5672
     restart: always
-  file_server:
-    build: ./file
-    container_name: file_server-service
+  media_server:
+    build: ./media
+    container_name: media_server-service
     volumes:
       #1. 希望容器内的程序能访问宿主机上的文件
       #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/file_server.conf:/im/conf/file_server.conf
+      - ./conf/media_server.conf:/im/conf/media_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -83,7 +83,7 @@ services:
       - etcd
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/file_server -flagfile=/im/conf/file_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/media_server -flagfile=/im/conf/media_server.conf"
   relationship_server:
     build: ./relationship
     container_name: relationship_server-service
@@ -183,25 +183,6 @@ services:
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
       /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200,5672 -c "/im/bin/message_server -flagfile=/im/conf/message_server.conf"
-  speech_server:
-    build: ./speech
-    container_name: speech_server-service
-    volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/speech_server.conf:/im/conf/speech_server.conf
-      - ./middle/data/logs:/var/lib/logs:rw
-      - ./middle/data/data:/var/lib/data:rw
-      - ./entrypoint.sh:/im/bin/entrypoint.sh
-    ports:
-      - 10001:10001
-    restart: always
-    depends_on:
-      - etcd
-    entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/speech_server -flagfile=/im/conf/speech_server.conf"
   transmite_server:
     build: ./transmite
     container_name: transmite_server-service
@@ -223,14 +204,14 @@ services:
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
       /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,5672 -c "/im/bin/transmite_server -flagfile=/im/conf/transmite_server.conf"
-  user_server:
-    build: ./user
-    container_name: user_server-service
+  identity_server:
+    build: ./identity
+    container_name: identity_server-service
     volumes:
       #1. 希望容器内的程序能访问宿主机上的文件
       #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/user_server.conf:/im/conf/user_server.conf
+      - ./conf/identity_server.conf:/im/conf/identity_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -244,4 +225,4 @@ services:
       - elasticsearch
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,9200 -c "/im/bin/user_server -flagfile=/im/conf/user_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,9200 -c "/im/bin/identity_server -flagfile=/im/conf/identity_server.conf"
