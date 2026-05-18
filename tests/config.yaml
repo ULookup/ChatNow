@@ -1,0 +1,10 @@
+target:
+  gateway_addr: "localhost:9000"
+  websocket_addr: "localhost:9001"
+
+timeout:
+  http_request_sec: 10
+  ws_read_sec: 30
+
+log:
+  level: "debug"
