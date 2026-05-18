@@ -11,8 +11,6 @@
 #include "infra/logger.hpp"
 #include "utils/utils.hpp"
 #include "dao/data_es.hpp"
-#include "dao/mysql_chat_session_member.hpp"
-#include "dao/mysql_chat_session.hpp"
 #include "dao/mysql_relation.hpp"
 #include "dao/mysql_friend_apply.hpp"
 #include "dao/mysql_user_block.hpp"
@@ -31,6 +29,8 @@
 #include "log/log_context.hpp"
 
 namespace chatnow {
+
+using UserInfoMap = std::unordered_map<std::string, ::chatnow::common::UserInfo>;
 
 class RelationshipServiceImpl : public ::chatnow::relationship::RelationshipService
 {
@@ -63,7 +63,7 @@ public:
             auto friend_ids = _mysql_relation->friends(auth.user_id);
             std::unordered_set<std::string> uid_set(friend_ids.begin(), friend_ids.end());
 
-            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            UserInfoMap user_map;
             if (!uid_set.empty()) {
                 if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
                     throw ServiceError(::chatnow::error::kSystemUnavailable,
@@ -101,7 +101,7 @@ public:
             for (auto &h : hits) uid_set.insert(h.user_id());
 
             // 3. 批量取 UserInfo
-            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            UserInfoMap user_map;
             if (!uid_set.empty()) {
                 if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
                     throw ServiceError(::chatnow::error::kSystemUnavailable,
@@ -126,7 +126,7 @@ public:
             std::unordered_set<std::string> uid_set;
             for (auto &row : pendings) uid_set.insert(row.user_id());
 
-            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            UserInfoMap user_map;
             if (!uid_set.empty()) {
                 if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
                     throw ServiceError(::chatnow::error::kSystemUnavailable,
@@ -160,7 +160,7 @@ public:
             auto blocked_ids = _mysql_user_block->list_blocked(auth.user_id, offset, limit);
             std::unordered_set<std::string> uid_set(blocked_ids.begin(), blocked_ids.end());
 
-            std::unordered_map<std::string, ::chatnow::common::UserInfo> user_map;
+            UserInfoMap user_map;
             if (!uid_set.empty()) {
                 if (!fetch_users(cntl, req->request_id(), uid_set, user_map))
                     throw ServiceError(::chatnow::error::kSystemUnavailable,
@@ -352,8 +352,8 @@ public:
             ::chatnow::conversation::CreateConversationRsp  ca;
             cq.set_request_id(req->request_id());
             cq.set_name("");                 // 单聊不传名字
-            cq.add_member_id_list(peer_uid);
-            cq.add_member_id_list(apply_uid);
+            cq.add_member_ids(peer_uid);
+            cq.add_member_ids(apply_uid);
 
             brpc::Controller out_cntl;
             ::chatnow::auth::forward_auth_metadata(cntl, &out_cntl);
@@ -379,7 +379,7 @@ private:
     bool fetch_users(brpc::Controller* in_cntl,
                      const std::string &rid,
                      const std::unordered_set<std::string> &uid_set,
-                     std::unordered_map<std::string, ::chatnow::common::UserInfo> &out)
+                     UserInfoMap &out)
     {
         auto channel = _mm_channels->choose(_identity_service_name);
         if (!channel) {

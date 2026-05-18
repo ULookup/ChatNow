@@ -6,6 +6,7 @@ set(target "relationship_server")
 # 1. proto
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
 set(proto_files common/types.proto common/error.proto common/envelope.proto
+                message/message_types.proto
                 identity/identity_service.proto
                 conversation/conversation_service.proto
                 relationship/relationship_service.proto)

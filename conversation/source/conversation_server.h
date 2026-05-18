@@ -35,6 +35,8 @@
 
 namespace chatnow {
 
+using UserInfoMap = std::unordered_map<std::string, ::chatnow::common::UserInfo>;
+
 struct ConversationServiceConfig {
     std::string public_url_prefix;
 };
@@ -416,7 +418,7 @@ public:
             for (auto &v : views) {
                 if (v.peer_user_id) peer_uids.push_back(*v.peer_user_id);
             }
-            std::unordered_map<std::string, ::chatnow::common::UserInfo> peer_map;
+            UserInfoMap peer_map;
             (void)fetch_user_infos_(cntl, req->request_id(), peer_uids, peer_map);
 
             // 3. 转 proto
@@ -517,7 +519,7 @@ public:
             auto uids = _mysql_member->members(req->conversation_id());
             auto rows = _mysql_member->select(req->conversation_id(), uids);
 
-            std::unordered_map<std::string, ::chatnow::common::UserInfo> umap;
+            UserInfoMap umap;
             (void)fetch_user_infos_(cntl, req->request_id(), uids, umap);
 
             for (auto &m : rows) {

@@ -19,6 +19,7 @@
 #include "auth/auth_config_loader.hpp"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
+#include "error/handle_rpc.hpp"
 
 
 namespace chatnow
@@ -326,7 +327,8 @@ public:
         auto* header = response->mutable_header();
         header->set_request_id(request->request_id());
         try {
-            if (request->has_email()) {
+            if (request->destination_case() ==
+                ::chatnow::identity::SendVerifyCodeReq::kEmail) {
                 std::string mail = request->email();
                 if (!mail_check(mail)) {
                     throw ServiceError(::chatnow::error::kAuthInvalidCredentials,
@@ -340,7 +342,8 @@ public:
                 }
                 _redis_codes->append(code_id, code);
                 response->set_verify_code_id(code_id);
-            } else if (request->has_phone()) {
+            } else if (request->destination_case() ==
+                       ::chatnow::identity::SendVerifyCodeReq::kPhone) {
                 throw ServiceError(::chatnow::error::kNotImplemented,
                                    "phone verification not yet supported");
             } else {
@@ -452,7 +455,7 @@ public:
         brpc::ClosureGuard rpc_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(controller);
         HANDLE_RPC(cntl, request, response, {
-            auto users = _es_user->search(request->search_key(), 20);
+            auto users = _es_user->search(request->search_key(), {}, 20);
             for (auto& u : users) {
                 fill_user_info(response->add_user_info(), u);
             }
@@ -497,7 +500,7 @@ private:
     }
 
     // ---- 工具方法 ----
-    std::string uuid() { return utils::uuid(); }
+    std::string uuid() { return ::chatnow::uuid(); }
 
     std::string make_avatar_url(const std::string &avatar_id) {
         if (avatar_id.empty() || _media_public_url_prefix.empty()) return "";

@@ -160,12 +160,11 @@ public:
     std::string presigned_part(const std::string& bucket, const std::string& key,
                                const std::string& upload_id, int part_number,
                                int seconds) const {
-        Aws::Http::QueryStringParameterCollection q;
-        q.emplace("partNumber", std::to_string(part_number));
-        q.emplace("uploadId", upload_id);
         auto url = _client->GeneratePresignedUrl(
-            bucket, key, Aws::Http::HttpMethod::HTTP_PUT, q, seconds);
+            bucket, key, Aws::Http::HttpMethod::HTTP_PUT, seconds);
         if (url.empty()) throw_failed("presigned_part empty url");
+        url += "&partNumber=" + std::to_string(part_number) +
+               "&uploadId=" + upload_id;
         return url;
     }
 

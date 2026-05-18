@@ -37,6 +37,7 @@
 #include "dao/data_redis.hpp"
 #include "mq/rabbitmq.hpp"
 #include "mq/trace_headers.hpp"
+#include "utils/brpc_closure.hpp"
 
 #include <chrono>
 #include <map>

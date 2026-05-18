@@ -1,5 +1,6 @@
 #pragma once
 
+#include <brpc/server.h>
 #include "infra/etcd.hpp"     // 服务注册模块封装
 #include "infra/logger.hpp"   // 日志模块封装
 #include "auth/auth_context.hpp"
@@ -21,7 +22,6 @@
 #include "message/message_service.pb.h"
 #include "message/message_internal.pb.h"
 #include "transmite/transmite_service.pb.h"
-#include <brpc/server.h>
 #include <butil/logging.h>
 #include <atomic>
 #include <chrono>
@@ -124,7 +124,7 @@ public:
         if (!client_msg_id.empty() && _redis) {
             idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
             try {
-                auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::SET_NX);
+                auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
                 if (!result) {
                     // key 已存在 → 重复消息
                     auto cached = _redis->get(idem_key);
