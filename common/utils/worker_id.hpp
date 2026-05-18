@@ -91,15 +91,22 @@ public:
         }
         _cv.notify_all();
         if(_renew_thread.joinable()) _renew_thread.join();
-        // 释放 slot（仅当还属于本实例时）
+        // 原子释放 slot（CAS：仅当还属于本实例时删除）
+        static const char *kReleaseLua =
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    redis.call('DEL', KEYS[1]) "
+            "    return 1 "
+            "end "
+            "return 0";
         int allocated = _allocated.load(std::memory_order_acquire);
         if(allocated >= 0 && allocated < kMaxWorkerId && !_lease_lost.load()) {
             try {
-                auto cur = _c->get(slot_key(allocated));
-                if(cur && *cur == _owner) {
-                    _c->del(slot_key(allocated));
+                std::vector<std::string> keys = {slot_key(allocated)};
+                std::vector<std::string> args = {_owner};
+                auto ok = _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
+                                               args.begin(), args.end());
+                if (ok == 1)
                     LOG_INFO("WorkerIdAllocator: 释放 worker_id={} for {}", allocated, _service);
-                }
             } catch(std::exception &e) {
                 LOG_WARN("WorkerIdAllocator: 释放 slot 失败 {}", e.what());
             }
@@ -112,26 +119,30 @@ private:
     }
 
     void start_renew_thread() {
+        static const char *kRenewLua =
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
+            "    redis.call('EXPIRE', KEYS[1], ARGV[2]) "
+            "    return 1 "
+            "end "
+            "return 0";
         _running.store(true, std::memory_order_release);
-        _renew_thread = std::thread([this]() {
+        _renew_thread = std::thread([this, kRenewLua]() {
             while(true) {
                 {
                     std::unique_lock<std::mutex> lk(_cv_mutex);
                     if(_cv.wait_for(lk, std::chrono::seconds(kRenewSec),
                                     [this]() { return !_running.load(); })) {
-                        break;  // stop 被调用
+                        break;
                     }
                 }
                 int id = _allocated.load(std::memory_order_acquire);
                 if(id < 0 || id >= kMaxWorkerId) continue;
                 try {
-                    auto cur = _c->get(slot_key(id));
-                    if(cur && *cur == _owner) {
-                        // 仍然归本实例 → 延期
-                        _c->expire(slot_key(id), std::chrono::seconds(kLeaseSec));
-                    } else {
-                        // 租约已失效 → 标记并退出续期循环；
-                        // 不能用裸 SET 覆盖（可能撞别人的租约 → 雪花重号）
+                    std::vector<std::string> keys = {slot_key(id)};
+                    std::vector<std::string> args = {_owner, std::to_string(kLeaseSec)};
+                    auto ok = _c->eval<long long>(kRenewLua, keys.begin(), keys.end(),
+                                                  args.begin(), args.end());
+                    if (ok != 1) {
                         LOG_ERROR("WorkerIdAllocator: 租约 {} 已失效，停止续期；调用方应停服报警",
                                   id);
                         _lease_lost.store(true, std::memory_order_release);

@@ -484,7 +484,6 @@ public:
                         std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
                         continue;
                     }
-                    for (const auto &member : batch) _cross_outbox->remove(member);
                     for (const auto &member : batch) {
                         std::string b64, peer;
                         std::vector<std::string> uids;
@@ -493,6 +492,7 @@ public:
                         chatnow::message::internal::InternalMessage internal_msg;
                         if (!internal_msg.ParseFromString(_utils_base64_decode(b64))) {
                             LOG_ERROR("CrossInstanceOutbox: 反序列化失败，丢弃");
+                            _cross_outbox->remove(member);
                             continue;
                         }
 
@@ -534,6 +534,8 @@ public:
                             stub.PushBatch(&closure->cntl, &closure->req,
                                            &closure->rsp, closure);
                         }
+                        // 在所有 PushBatch RPC 发起之后才移除，避免崩溃导致数据丢失
+                        _cross_outbox->remove(member);
                     }
                 } catch (std::exception &e) {
                     LOG_ERROR("CrossInstanceOutbox reaper 异常: {}", e.what());

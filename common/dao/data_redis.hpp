@@ -360,13 +360,20 @@ public:
         try { return _c->scard(key::kReadAck + std::to_string(message_id)); }
         catch(std::exception &e) { LOG_ERROR("ReadAck.count 失败 {}: {}", message_id, e.what()); return 0; }
     }
-    /* brief: 后台批量刷库后调用，移交所有权后清空 SET 防止重复刷库 */
+    /* brief: 后台批量刷库后调用，原子 SMEMBERS + DEL 防并发 ack 丢失 */
     std::vector<std::string> drain(unsigned long message_id) {
         std::vector<std::string> res;
         try {
             std::string k = key::kReadAck + std::to_string(message_id);
-            _c->smembers(k, std::inserter(res, res.end()));
-            _c->del(k);
+            // 原子 drain：先读全量再删，避免并发 ack() 在 SMEMBERS 与 DEL 之间被漏掉
+            static const char *kDrainLua =
+                "local members = redis.call('SMEMBERS', KEYS[1]) "
+                "redis.call('DEL', KEYS[1]) "
+                "return members";
+            std::vector<std::string> keys = {k};
+            std::vector<std::string> args;
+            _c->eval(kDrainLua, keys.begin(), keys.end(), args.begin(), args.end(),
+                     std::back_inserter(res));
         } catch(std::exception &e) {
             LOG_ERROR("ReadAck.drain 失败 {}: {}", message_id, e.what());
         }
@@ -501,9 +508,7 @@ public:
     bool allow(const std::string &key_full, int max_count, int window_sec) {
         try {
             long long cur = _c->incr(key_full);
-            if(cur == 1) {
-                _c->expire(key_full, std::chrono::seconds(window_sec));
-            }
+            _c->expire(key_full, std::chrono::seconds(window_sec));
             return cur <= max_count;
         } catch(std::exception &e) {
             LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
@@ -755,6 +760,9 @@ public:
     static std::string key_for(const std::string &uid, const std::string &device_id) {
         return std::string(key::kUnacked) + uid + ":" + device_id;
     }
+    static std::string idx_key_for(const std::string &uid, const std::string &device_id) {
+        return std::string(key::kUnacked) + "idx:" + uid + ":" + device_id;
+    }
 
     /* brief: 入待重传队列（per-device，存 payload_b64 直接用） */
     void push(const std::string &uid, const std::string &device_id,
@@ -762,28 +770,27 @@ public:
               long long score_ts, std::chrono::seconds ttl = kUnackedTtl) {
         try {
             std::string k = key_for(uid, device_id);
+            std::string ik = idx_key_for(uid, device_id);
             std::string member = std::to_string(user_seq) + ":" + payload_b64;
             _c->zadd(k, member, static_cast<double>(score_ts));
+            _c->hset(ik, std::to_string(user_seq), payload_b64);
             _c->expire(k, ttl);
+            _c->expire(ik, ttl);
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.push 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
         }
     }
-    /* brief: 客户端 ACK 后移除（per-device） */
+    /* brief: 客户端 ACK 后移除（per-device，O(1) via HASH index） */
     void ack(const std::string &uid, const std::string &device_id,
              unsigned long user_seq) {
         try {
             std::string k = key_for(uid, device_id);
-            std::string prefix = std::to_string(user_seq) + ":";
-            using namespace sw::redis;
-            auto cursor = 0LL;
-            while (true) {
-                std::vector<std::pair<std::string, double>> items;
-                cursor = _c->zscan(k, cursor, prefix + "*", 1LL, std::back_inserter(items));
-                for (const auto &item : items) {
-                    _c->zrem(k, item.first);
-                }
-                if (cursor == 0) break;
+            std::string ik = idx_key_for(uid, device_id);
+            auto payload = _c->hget(ik, std::to_string(user_seq));
+            if (payload) {
+                std::string member = std::to_string(user_seq) + ":" + *payload;
+                _c->zrem(k, member);
+                _c->hdel(ik, std::to_string(user_seq));
             }
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.ack 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
@@ -816,28 +823,24 @@ public:
         }
         return res;
     }
-    /* brief: 重发后推迟这批 user_seq 的下次重发时机 + 续期 TTL */
+    /* brief: 重发后推迟这批 user_seq 的下次重发时机 + 续期 TTL（O(1) via HASH index） */
     void bump_score(const std::string &uid, const std::string &device_id,
                     const std::vector<unsigned long> &user_seqs,
                     std::chrono::seconds ttl = kUnackedTtl) {
         if(user_seqs.empty()) return;
         try {
             std::string k = key_for(uid, device_id);
+            std::string ik = idx_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
             for (unsigned long seq : user_seqs) {
-                std::string prefix = std::to_string(seq) + ":";
-                using namespace sw::redis;
-                auto cursor = 0LL;
-                while (true) {
-                    std::vector<std::pair<std::string, double>> items;
-                    cursor = _c->zscan(k, cursor, prefix + "*", 1LL, std::back_inserter(items));
-                    for (const auto &item : items) {
-                        _c->zadd(k, item.first, static_cast<double>(now), UpdateType::EXIST);
-                    }
-                    if (cursor == 0) break;
+                auto payload = _c->hget(ik, std::to_string(seq));
+                if (payload) {
+                    std::string member = std::to_string(seq) + ":" + *payload;
+                    _c->zadd(k, member, static_cast<double>(now), sw::redis::UpdateType::EXIST);
                 }
             }
             _c->expire(k, ttl);
+            _c->expire(ik, ttl);
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.bump_score 失败 {}-{}-{}: {}", uid, device_id, e.what());
         }
@@ -878,17 +881,27 @@ public:
         _r->hset(key::kPresence + uid, "custom_status", text);
     }
 
-    /* 添加在线设备（心跳续期） */
+    /* 添加在线设备：与 Push._write_presence_online_ 使用相同的 per-device HASH 模式 */
     void add_device(const std::string &uid, const std::string &device_id) {
-        auto k = key::kPresenceDevices + uid;
-        _r->sadd(k, device_id);
+        auto k = std::string("im:presence:device:") + uid + ":" + device_id;
+        _r->hset(k, "state", "ONLINE");
         _r->expire(k, std::chrono::seconds(120));
     }
 
-    /* 获取在线设备列表 */
+    /* 获取在线设备列表：SCAN 匹配 im:presence:device:{uid}:* */
     std::vector<std::string> get_devices(const std::string &uid) {
         std::vector<std::string> out;
-        _r->smembers(key::kPresenceDevices + uid, std::back_inserter(out));
+        auto cursor = 0ULL;
+        while (true) {
+            std::vector<std::string> batch;
+            cursor = _r->scan(cursor, "im:presence:device:" + uid + ":*", 100,
+                             std::back_inserter(batch));
+            for (auto& k : batch) {
+                auto pos = k.rfind(':');
+                if (pos != std::string::npos) out.push_back(k.substr(pos + 1));
+            }
+            if (cursor == 0) break;
+        }
         return out;
     }
 

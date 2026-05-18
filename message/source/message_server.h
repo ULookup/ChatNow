@@ -558,6 +558,24 @@ public:
         LOG_INFO("DB-Consumer: 存储成功 mid={} cid={} seq={}", mid,
                  msg_pb.conversation_id(), session_seq);
 
+        // 发布到 Push 队列，由 Push 服务进行 WS 下发
+        if (_push_publisher) {
+            std::string push_payload = internal_msg.SerializeAsString();
+            auto outbox = _push_outbox;
+            std::map<std::string, std::string> push_headers;
+            ::chatnow::mq::mq_inject_trace_headers(push_headers);
+            try {
+                _push_publisher->publish_confirm(push_payload, push_headers,
+                    [push_payload, outbox](PublishStatus st, const std::string &err) {
+                        if (st != PublishStatus::Acked && outbox)
+                            outbox->enqueue(push_payload, static_cast<long long>(time(nullptr)));
+                    });
+            } catch (std::exception &e) {
+                LOG_ERROR("DB-Consumer: 发布 Push 事件异常 mid={}: {}", mid, e.what());
+                if (outbox) outbox->enqueue(push_payload, static_cast<long long>(time(nullptr)));
+            }
+        }
+
         // 发布 ESIndexEvent（仅文本消息入 ES；fail-soft）
         if (msg_type == chatnow::message::TEXT && !content_text.empty() && _es_publisher) {
             chatnow::message::internal::ESIndexEvent es_event;

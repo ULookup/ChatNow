@@ -69,7 +69,13 @@ public:
     {
         brpc::ClosureGuard rpc_guard(done);
 
-        auto err_response = [response](const std::string &rid, int32_t code, const std::string &msg) {
+        bool idem_key_set = false;
+        std::string idem_key;
+        auto err_response = [this, response, &idem_key, &idem_key_set](const std::string &rid, int32_t code, const std::string &msg) {
+            if (idem_key_set && !idem_key.empty() && _redis) {
+                try { _redis->del(idem_key); } catch (...) {}
+                idem_key_set = false;
+            }
             response->mutable_header()->set_request_id(rid);
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(code);
@@ -116,7 +122,7 @@ public:
 
         // ③ 客户端幂等去重：Redis SET NX，命中直接返回（零 RPC）
         if (!client_msg_id.empty() && _redis) {
-            std::string idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+            idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
             try {
                 auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::SET_NX);
                 if (!result) {
@@ -136,6 +142,7 @@ public:
             } catch (std::exception &e) {
                 LOG_WARN("请求ID: {} - Redis 幂等检查异常: {}（fail-open）", rid, e.what());
             }
+            idem_key_set = true;  // SET NX 成功，后续任何错误路径需清理
         }
 
         // ④ 限流检查（用户级 + 会话级）
@@ -270,14 +277,19 @@ public:
         response->mutable_header()->set_success(true);
         response->mutable_message()->CopyFrom(*msg);
 
-        // ⑩ MQ publish_confirm（异步回调完成后 Run done）
-        google::protobuf::Closure *async_done = rpc_guard.release();
+        // ⑩ 将幂等 key 从 "pending" 更新为真实 msg_id（在 MQ publish 之前）。
+        //    如果此后进程崩溃，客户端重试时会命中缓存直接返回 msg_id，
+        //    而非被 "pending" 卡死 24 小时。
         auto msg_id = msg->message_id();
-        std::string idem_key;
-        if (!client_msg_id.empty() && _redis) {
-            idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+        if (idem_key_set && !idem_key.empty() && _redis) {
+            try { _redis->set(idem_key, std::to_string(msg_id), std::chrono::seconds(86400)); }
+            catch (...) {}
+            idem_key_set = false;  // 已更新为真实 msg_id，不再需要清理
         }
-        auto redis = _redis;  // 捕获 shared_ptr 延长生命周期
+
+        // ⑪ MQ publish_confirm（异步回调完成后 Run done）
+        google::protobuf::Closure *async_done = rpc_guard.release();
+        auto redis = _redis;
 
         std::shared_ptr<std::atomic<bool>> done_called =
             std::make_shared<std::atomic<bool>>(false);
@@ -286,15 +298,10 @@ public:
             ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
-                [async_done, response, rid, done_called, redis, idem_key, msg_id](PublishStatus status, const std::string &mq_msg) {
+                [async_done, response, rid, done_called, redis, idem_key](PublishStatus status, const std::string &mq_msg) {
                     if (done_called->exchange(true)) return;
                     if (status == PublishStatus::Acked) {
                         LOG_DEBUG("请求ID: {} - 消息成功投递到 Broker", rid);
-                        // 更新幂等 key：pending → 真实 msg_id
-                        if (!idem_key.empty() && redis) {
-                            try { redis->set(idem_key, std::to_string(msg_id), std::chrono::seconds(86400)); }
-                            catch (...) {}
-                        }
                     } else {
                         LOG_ERROR("请求ID: {} - 消息投递到 Broker 失败: {}", rid, mq_msg);
                         // 投递失败清除幂等 key，允许客户端重试
@@ -311,6 +318,10 @@ public:
         } catch (std::exception &e) {
             LOG_ERROR("请求ID: {} - publish_confirm 同步异常: {}", rid, e.what());
             if (!done_called->exchange(true)) {
+                // 同步异常：清除幂等 key 允许重试
+                if (!idem_key.empty() && redis) {
+                    try { redis->del(idem_key); } catch (...) {}
+                }
                 response->mutable_header()->set_success(false);
                 response->mutable_header()->set_error_code(chatnow::error::kSystemUnavailable);
                 response->mutable_header()->set_error_message("MQ 不可用");
