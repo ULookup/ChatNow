@@ -16,6 +16,9 @@
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
 #include "utils/brpc_closure.hpp"
+#include "utils/local_cache.hpp"
+#include "utils/inflight.hpp"
+#include "utils/random_ttl.hpp"
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
@@ -34,6 +37,11 @@
 
 namespace chatnow::push {
 
+struct RouteEntry {
+    std::vector<std::string> device_ids;
+    std::unordered_map<std::string, std::string> device_to_instance;
+};
+
 class PushServiceImpl : public PushService
 {
 public:
@@ -46,7 +54,9 @@ public:
                     const std::string &instance_id,
                     const std::string &message_service_name,
                     const ServiceManager::ptr &channels,
-                    LeaderElection::ptr cross_reaper_election = nullptr)
+                    LeaderElection::ptr cross_reaper_election = nullptr,
+                    LocalCache<RouteEntry>::ptr local_route_cache = nullptr,
+                    InflightRegistry::ptr inflight_registry = nullptr)
         : _connections(connections),
           _jwt_codec(jwt_codec),
           _redis(redis),
@@ -56,7 +66,9 @@ public:
           _instance_id(instance_id),
           _message_service_name(message_service_name),
           _mm_channels(channels),
-          _cross_reaper_election(std::move(cross_reaper_election)) {}
+          _cross_reaper_election(std::move(cross_reaper_election)),
+          _local_route_cache(std::move(local_route_cache)),
+          _inflight_registry(std::move(inflight_registry)) {}
 
     void set_resend_params(long batch, long max_age_sec) {
         _resend_batch = batch;
@@ -99,8 +111,8 @@ public:
             }
 
             int delivered = 0;
-            auto devices = _online_route->devices(request->user_id());
-            for (const auto &did : devices) {
+            auto route = resolve_route(request->user_id());
+            for (const auto &did : route.device_ids) {
                 if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
                 if (_local_send(request->user_id(), did, payload) > 0) ++delivered;
             }
@@ -108,7 +120,7 @@ public:
             if (request->has_user_seq() && _unacked) {
                 std::string payload_b64 = _utils_base64_encode(payload);
                 long long now_ts = static_cast<long long>(time(nullptr));
-                for (const auto &did : devices) {
+                for (const auto &did : route.device_ids) {
                     if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
                     _unacked->push(request->user_id(), did,
                                    request->user_seq(), payload_b64, now_ts);
@@ -155,8 +167,8 @@ public:
             int total = 0;
             long long now_ts = static_cast<long long>(time(nullptr));
             for (const auto &uid : request->user_id_list()) {
-                auto devices = _online_route->devices(uid);
-                for (const auto &did : devices) {
+                auto route = resolve_route(uid);
+                for (const auto &did : route.device_ids) {
                     std::string payload;
                     if (is_chat_msg) {
                         NotifyMessage per_user = base_notify;
@@ -218,13 +230,13 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for (const auto &uid : internal_msg.member_id_list()) {
-            auto devices = _online_route ? _online_route->devices(uid)
-                                         : std::vector<std::string>{};
-            if (devices.empty()) { remote_uids.push_back(uid); continue; }
+            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+            if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
 
             bool any_local = false;
-            for (const auto &did : devices) {
-                std::string inst = _online_route->device_instance(uid, did);
+            for (const auto &did : route.device_ids) {
+                auto it = route.device_to_instance.find(did);
+                std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                 if (inst == _instance_id) {
                     auto it = uid2seq.find(uid);
                     if (it != uid2seq.end()) {
@@ -252,10 +264,10 @@ public:
         // 2) 跨实例：按 Push 实例 ID 分组
         std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
         for (const auto &uid : remote_uids) {
-            auto devices = _online_route ? _online_route->devices(uid)
-                                         : std::vector<std::string>{};
-            for (const auto &did : devices) {
-                std::string peer = _online_route->device_instance(uid, did);
+            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+            for (const auto &did : route.device_ids) {
+                auto it = route.device_to_instance.find(did);
+                std::string peer = (it != route.device_to_instance.end()) ? it->second : "";
                 if (peer.empty() || peer == _instance_id) continue;
                 auto &vec = peer_to_uids[peer];
                 if (std::find(vec.begin(), vec.end(), uid) == vec.end())
@@ -410,8 +422,8 @@ private:
         const std::string uid = hb.user_id();
         if (uid.empty()) return;
 
-        auto devices = _online_route->devices(uid);
-        for (const auto &did : devices) {
+        auto route = resolve_route(uid);
+        for (const auto &did : route.device_ids) {
             auto pending = _unacked->peek_due(uid, did, _resend_batch, _resend_max_age_sec);
             if (pending.empty()) continue;
 
@@ -445,6 +457,47 @@ private:
         } catch (std::exception &e) {
             LOG_WARN("Presence 写入失败 uid={} did={}: {}", uid, did, e.what());
         }
+    }
+
+    RouteEntry resolve_route(const std::string &uid) {
+        std::string cache_key = "route:" + uid;
+
+        //  L1 hit → fast path (~ns)
+        if (_local_route_cache) {
+            auto cached = _local_route_cache->get(cache_key);
+            if (cached.has_value()) return *cached;
+        }
+
+        //  L1 miss → acquire InflightRegistry per-key lock
+        auto guard = _inflight_registry ? _inflight_registry->acquire(cache_key)
+                                        : InflightRegistry::Guard{};
+        std::shared_ptr<std::mutex> lock_mu = guard.mu;
+        std::unique_lock<std::mutex> lk(lock_mu ? *lock_mu : _dummy_mu_);
+
+        //  Double-check L1 (another thread may have just finished warm)
+        if (_local_route_cache) {
+            auto cached = _local_route_cache->get(cache_key);
+            if (cached.has_value()) {
+                lk.unlock();
+                if (_inflight_registry) _inflight_registry->release(guard.key);
+                return *cached;
+            }
+        }
+
+        //  L2 Redis: hgetall + build RouteEntry
+        RouteEntry route;
+        auto devices = _online_route->devices(uid);
+        route.device_ids = std::move(devices);
+        for (const auto &did : route.device_ids) {
+            route.device_to_instance[did] = _online_route->device_instance(uid, did);
+        }
+        if (_local_route_cache) {
+            _local_route_cache->set(cache_key, route, randomized_ttl(std::chrono::seconds(2)));
+        }
+
+        lk.unlock();
+        if (_inflight_registry) _inflight_registry->release(guard.key);
+        return route;
     }
 
     /* brief: 本实例直接通过 WS 下发；返回送达连接数 */
@@ -501,10 +554,10 @@ public:
                         // 按实例分组重发
                         std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
                         for (const auto &uid : uids) {
-                            auto devices = _online_route ? _online_route->devices(uid)
-                                                         : std::vector<std::string>{};
-                            for (const auto &did : devices) {
-                                std::string inst = _online_route->device_instance(uid, did);
+                            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+                            for (const auto &did : route.device_ids) {
+                                auto it = route.device_to_instance.find(did);
+                                std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                                 if (inst == _instance_id) continue;
                                 peer_to_uids[inst].push_back(uid);
                                 break;
@@ -634,6 +687,9 @@ private:
     std::thread _cross_reaper_thread;
     std::string _cross_reaper_owner;
     LeaderElection::ptr _cross_reaper_election;
+    LocalCache<RouteEntry>::ptr _local_route_cache;
+    InflightRegistry::ptr _inflight_registry;
+    std::mutex _dummy_mu_;
 };
 
 class PushServer
@@ -817,6 +873,11 @@ public:
             []() { LOG_INFO("CrossOutbox reaper 失去 leader"); });
     }
 
+    void make_local_cache() {
+        _local_route_cache = std::make_shared<LocalCache<RouteEntry>>(16384);
+        _inflight_registry = std::make_shared<InflightRegistry>();
+    }
+
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
         if (!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
@@ -825,7 +886,7 @@ public:
         _push_service = new PushServiceImpl(
             _connections, _jwt_codec, _redis_client, _online_route, _unacked, _cross_outbox,
             _instance_id, _message_service_name, _mm_channels,
-            _cross_reaper_election);
+            _cross_reaper_election, _local_route_cache, _inflight_registry);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if (ret == -1) { LOG_ERROR("Push: AddService 失败"); abort(); }
@@ -897,6 +958,8 @@ private:
     std::string _reaper_owner;
     std::shared_ptr<etcd::Client> _etcd_client;
     LeaderElection::ptr _cross_reaper_election;
+    LocalCache<RouteEntry>::ptr _local_route_cache;
+    InflightRegistry::ptr _inflight_registry;
 
     Connection::ptr _connections;
     server_t _ws_server;
