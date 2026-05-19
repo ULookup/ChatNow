@@ -14,6 +14,10 @@
 #include "infra/snowflake.hpp"
 #include "dao/data_redis.hpp"
 #include "utils/worker_id.hpp"
+#include "utils/local_cache.hpp"
+#include "utils/inflight.hpp"
+#include "utils/redis_mutex.hpp"
+#include "utils/random_ttl.hpp"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
 #include "identity/identity_service.pb.h"
@@ -47,7 +51,10 @@ public:
                         const SeqGen::ptr &seq_gen,
                         const Members::ptr &members_cache,
                         const RateLimiter::ptr &rate_limiter,
-                        const RedisClient::ptr &redis)
+                        const RedisClient::ptr &redis,
+                        LocalCache<std::vector<std::string>>::ptr local_members_cache = nullptr,
+                        LocalCache<std::string>::ptr local_user_cache = nullptr,
+                        InflightRegistry::ptr inflight_registry = nullptr)
                         : _identity_service_name(identity_service_name),
                         _conversation_service_name(conversation_service_name),
                         _message_service_name(message_service_name),
@@ -59,7 +66,10 @@ public:
                         _seq_gen(seq_gen),
                         _members_cache(members_cache),
                         _rate_limiter(rate_limiter),
-                        _redis(redis) {}
+                        _redis(redis),
+                        _local_members_cache(std::move(local_members_cache)),
+                        _local_user_cache(std::move(local_user_cache)),
+                        _inflight_registry(std::move(inflight_registry)) {}
     ~TransmiteServiceImpl() = default;
 
     void SendMessage(google::protobuf::RpcController *controller,
@@ -164,13 +174,8 @@ public:
             return err_response(rid, chatnow::error::kSystemUnavailable, "依赖服务暂不可用");
         }
 
-        // 成员列表：先查 Redis 缓存，未命中再 RPC + 回填
-        std::vector<std::string> member_id_list;
-        bool members_from_cache = false;
-        if (_members_cache) {
-            member_id_list = _members_cache->list(chat_ssid);
-            if (!member_id_list.empty()) members_from_cache = true;
-        }
+        // 成员列表：L1 → InflightRegistry → L2 Redis → RPC
+        std::vector<std::string> member_id_list = resolve_members(chat_ssid);
 
         chatnow::identity::IdentityService_Stub identity_stub(identity_channel.get());
         chatnow::identity::GetProfileReq profile_req;
@@ -181,10 +186,10 @@ public:
         chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &profile_cntl);
         identity_stub.GetProfile(&profile_cntl, &profile_req, &profile_rsp, brpc::DoNothing());
 
-        // 成员列表未命中缓存：RPC 拉取
+        // 成员列表未命中缓存：RPC 拉取 + warm
         ::chatnow::conversation::GetMemberIdsRsp member_rsp;
         brpc::Controller member_cntl;
-        if (!members_from_cache) {
+        if (member_id_list.empty()) {
             auto conv_channel = _mm_channels->choose(_conversation_service_name);
             if (!conv_channel) {
                 brpc::Join(profile_cntl.call_id());
@@ -205,7 +210,7 @@ public:
                 return err_response(rid, chatnow::error::kSystemUnavailable, "获取群成员失败");
             }
             for (const auto &m : member_rsp.member_ids()) member_id_list.push_back(m);
-            if (_members_cache) _members_cache->warm(chat_ssid, member_id_list);
+            warm_members_cache(chat_ssid, member_id_list);
         }
 
         brpc::Join(profile_cntl.call_id());
@@ -330,6 +335,81 @@ public:
             }
         }
     }
+
+    std::vector<std::string> resolve_members(const std::string &chat_session_id) {
+        std::string mkey = "members:" + chat_session_id;
+
+        if (_local_members_cache) {
+            auto local = _local_members_cache->get(mkey);
+            if (local.has_value()) {
+                auto &members = *local;
+                if (members.size() == 1 && members[0] == "__sentinel__")
+                    return {};
+                return members;
+            }
+        }
+
+        auto guard = _inflight_registry ? _inflight_registry->acquire(chat_session_id)
+                                        : InflightRegistry::Guard{};
+        std::shared_ptr<std::mutex> lock_mu = guard.mu;
+        std::unique_lock<std::mutex> lk(lock_mu ? *lock_mu : _dummy_mu_);
+
+        if (_local_members_cache) {
+            auto local = _local_members_cache->get(mkey);
+            if (local.has_value()) {
+                lk.unlock();
+                if (_inflight_registry) _inflight_registry->release(guard.key);
+                auto &members = *local;
+                if (members.size() == 1 && members[0] == "__sentinel__") return {};
+                return members;
+            }
+        }
+
+        auto members = _members_cache->list(chat_session_id);
+        if (!members.empty()) {
+            if (members.size() == 1 && members[0] == "__sentinel__") {
+                if (_local_members_cache)
+                    _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+                lk.unlock();
+                if (_inflight_registry) _inflight_registry->release(guard.key);
+                return {};
+            }
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
+            lk.unlock();
+            if (_inflight_registry) _inflight_registry->release(guard.key);
+            return members;
+        }
+
+        // L2 miss → RedisMutex for cross-instance stampede
+        RedisMutex warm_mutex(_redis, "warm:members:" + chat_session_id, 5000);
+        if (!warm_mutex.try_lock(std::chrono::milliseconds(100))) {
+            lk.unlock();
+            if (_inflight_registry) _inflight_registry->release(guard.key);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            return resolve_members(chat_session_id);
+        }
+
+        warm_mutex.unlock();
+        lk.unlock();
+        if (_inflight_registry) _inflight_registry->release(guard.key);
+        return {};
+    }
+
+    void warm_members_cache(const std::string &chat_session_id,
+                            const std::vector<std::string> &members) {
+        std::string mkey = "members:" + chat_session_id;
+        if (members.empty()) {
+            _members_cache->warm_sentinel(chat_session_id);
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+        } else {
+            _members_cache->warm(chat_session_id, members);
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
+        }
+    }
+
 private:
     std::string _identity_service_name;
     std::string _conversation_service_name;
@@ -345,6 +425,10 @@ private:
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
     RedisClient::ptr _redis;
+    LocalCache<std::vector<std::string>>::ptr _local_members_cache;
+    LocalCache<std::string>::ptr _local_user_cache;
+    InflightRegistry::ptr _inflight_registry;
+    std::mutex _dummy_mu_;
 };
 
 class TransmiteServer
@@ -516,6 +600,13 @@ public:
         _members_cache = std::make_shared<Members>(_redis_client);
         _rate_limiter = std::make_shared<RateLimiter>(_redis_client);
     }
+
+    void make_local_cache() {
+        _local_members_cache = std::make_shared<LocalCache<std::vector<std::string>>>(4096);
+        _local_user_cache = std::make_shared<LocalCache<std::string>>(16384);
+        _inflight_registry = std::make_shared<InflightRegistry>();
+    }
+
     /* brief: 构造RPC服务器对象，并添加服务 */
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
         if(!_id_generator) {
@@ -546,7 +637,10 @@ public:
                                                                         _seq_gen,
                                                                         _members_cache,
                                                                         _rate_limiter,
-                                                                        _redis_client);
+                                                                        _redis_client,
+                                                                        _local_members_cache,
+                                                                        _local_user_cache,
+                                                                        _inflight_registry);
         int ret = _rpc_server->AddService(transmite_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -598,6 +692,9 @@ private:
     SeqGen::ptr _seq_gen;
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
+    LocalCache<std::vector<std::string>>::ptr _local_members_cache;
+    LocalCache<std::string>::ptr _local_user_cache;
+    InflightRegistry::ptr _inflight_registry;
     std::string _instance_owner;
     std::shared_ptr<etcd::Client> _etcd_client;
     WorkerIdAllocator::ptr _worker_allocator;
