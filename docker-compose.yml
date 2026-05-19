@@ -29,16 +29,91 @@ services:
     ports:
       - 3306:3306
     restart: always
-  redis:
-    image: redis:7.0.15
-    container_name: redis-service
+  redis-node1:
+    image: redis:7.2.5
+    container_name: redis-node1
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-1.aof
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      - ./middle/data/redis:/var/lib/redis:rw
+      - ./middle/data/redis/node1:/data:rw
     ports:
-      - 6379:6379
+      - "6379:6379"
     restart: always
+
+  redis-node2:
+    image: redis:7.2.5
+    container_name: redis-node2
+    command: redis-server --port 6380 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-2.aof
+    volumes:
+      - ./middle/data/redis/node2:/data:rw
+    ports:
+      - "6380:6380"
+    restart: always
+
+  redis-node3:
+    image: redis:7.2.5
+    container_name: redis-node3
+    command: redis-server --port 6381 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-3.aof
+    volumes:
+      - ./middle/data/redis/node3:/data:rw
+    ports:
+      - "6381:6381"
+    restart: always
+
+  redis-node4:
+    image: redis:7.2.5
+    container_name: redis-node4
+    command: redis-server --port 6382 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-4.aof
+    volumes:
+      - ./middle/data/redis/node4:/data:rw
+    ports:
+      - "6382:6382"
+    restart: always
+
+  redis-node5:
+    image: redis:7.2.5
+    container_name: redis-node5
+    command: redis-server --port 6383 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-5.aof
+    volumes:
+      - ./middle/data/redis/node5:/data:rw
+    ports:
+      - "6383:6383"
+    restart: always
+
+  redis-node6:
+    image: redis:7.2.5
+    container_name: redis-node6
+    command: redis-server --port 6384 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-6.aof
+    volumes:
+      - ./middle/data/redis/node6:/data:rw
+    ports:
+      - "6384:6384"
+    restart: always
+
+  redis-cluster-init:
+    image: redis:7.2.5
+    container_name: redis-cluster-init
+    depends_on:
+      - redis-cluster-init-node1
+      - redis-cluster-init-node2
+      - redis-cluster-init-node3
+      - redis-cluster-init-node4
+      - redis-cluster-init-node5
+      - redis-cluster-init-node6
+    entrypoint: |
+      /bin/sh -c "
+      echo 'Waiting for all Redis nodes...' &&
+      sleep 10 &&
+      echo 'Creating 3-master 3-slave cluster...' &&
+      echo yes | redis-cli --cluster create \
+        redis-node1:6379 redis-node2:6380 redis-node3:6381 \
+        redis-node4:6382 redis-node5:6383 redis-node6:6384 \
+        --cluster-replicas 1 &&
+      echo 'Verifying cluster...' &&
+      redis-cli --cluster check redis-node1:6379 &&
+      echo 'Cluster ready.' &&
+      tail -f /dev/null
+      "
+    restart: "no"
   elasticsearch:
     image: elasticsearch:7.17.21
     container_name: elasticsearch-service
@@ -81,9 +156,10 @@ services:
     restart: always
     depends_on:
       - etcd
+      - redis-cluster-init
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/media_server -flagfile=/im/conf/media_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379,6380,6381,6382,6383,6384 -c "/im/bin/media_server -flagfile=/im/conf/media_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   relationship_server:
     build: ./relationship
     container_name: relationship_server-service
@@ -119,10 +195,10 @@ services:
     depends_on:
       - etcd
       - mysql
-      - redis
+      - redis-cluster-init
       - elasticsearch
     entrypoint:
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,9200 -c "/im/bin/conversation_server -flagfile=/im/conf/conversation_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,6380,6381,6382,6383,6384,9200 -c "/im/bin/conversation_server -flagfile=/im/conf/conversation_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   gateway_server:
     build: ./gateway
     container_name: gateway_server-service
@@ -139,10 +215,10 @@ services:
     restart: always
     depends_on:
       - etcd
-      - redis
+      - redis-cluster-init
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379 -c "/im/bin/gateway_server -flagfile=/im/conf/gateway_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379,6380,6381,6382,6383,6384 -c "/im/bin/gateway_server -flagfile=/im/conf/gateway_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   push_server:
     build: ./push
     container_name: push_server-service
@@ -157,10 +233,10 @@ services:
     restart: always
     depends_on:
       - etcd
-      - redis
+      - redis-cluster-init
       - rabbitmq
     entrypoint:
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379,5672 -c "/im/bin/push_server -flagfile=/im/conf/push_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379,6380,6381,6382,6383,6384,5672 -c "/im/bin/push_server -flagfile=/im/conf/push_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   message_server:
     build: ./message
     container_name: message_server-service
@@ -180,9 +256,10 @@ services:
       - mysql
       - elasticsearch
       - rabbitmq
+      - redis-cluster-init
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200,5672 -c "/im/bin/message_server -flagfile=/im/conf/message_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,6380,6381,6382,6383,6384,9200,5672 -c "/im/bin/message_server -flagfile=/im/conf/message_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   transmite_server:
     build: ./transmite
     container_name: transmite_server-service
@@ -201,9 +278,10 @@ services:
       - etcd
       - mysql
       - rabbitmq
+      - redis-cluster-init
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,5672 -c "/im/bin/transmite_server -flagfile=/im/conf/transmite_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,6380,6381,6382,6383,6384,5672 -c "/im/bin/transmite_server -flagfile=/im/conf/transmite_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   identity_server:
     build: ./identity
     container_name: identity_server-service
@@ -221,8 +299,8 @@ services:
     depends_on:
       - etcd
       - mysql
-      - redis
+      - redis-cluster-init
       - elasticsearch
     entrypoint:
       # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,9200 -c "/im/bin/identity_server -flagfile=/im/conf/identity_server.conf"
+      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,6380,6381,6382,6383,6384,9200 -c "/im/bin/identity_server -flagfile=/im/conf/identity_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
