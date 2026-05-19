@@ -1,0 +1,32 @@
+groups:
+  - name: redis_cluster
+    rules:
+      - alert: RedisNodeDown
+        expr: redis_up{node=~".+"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Redis node {{ $labels.node }} down"
+          description: "Redis Cluster node {{ $labels.node }} has been down for >1m"
+
+      - alert: RedisPoolExhausted
+        expr: redis_pool_active >= redis_pool_size
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "Redis connection pool exhausted on {{ $labels.instance }}"
+          description: "redis_pool_active ({{ $value }}) >= pool_size, connections saturated"
+
+      - alert: LeaderElectionFrequentChange
+        expr: rate(leader_election_changes_total[10m]) > 2
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Leader election changing frequently (>2x in 10min)"
+
+      - alert: LocalCacheHitRateDrop
+        expr: rate(local_cache_miss_total[5m]) > 3 * rate(local_cache_miss_total[5m] offset 30m)
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Local cache miss rate spiked 3x vs 30min ago"
