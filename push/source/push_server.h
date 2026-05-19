@@ -501,7 +501,7 @@ private:
             auto cached = _local_route_cache->get(cache_key);
             if (cached.has_value()) {
                 lk.unlock();
-                if (_inflight_registry) _inflight_registry->release(guard.key);
+                guard = InflightRegistry::Guard{};
                 return *cached;
             }
         }
@@ -518,7 +518,7 @@ private:
         }
 
         lk.unlock();
-        if (_inflight_registry) _inflight_registry->release(guard.key);
+        guard = InflightRegistry::Guard{};
         return route;
     }
 

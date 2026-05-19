@@ -337,7 +337,7 @@ public:
 
         auto release_guard = [&]() {
             if (lk.owns_lock()) lk.unlock();
-            if (guard.registry && !guard.key.empty()) guard.registry->release(guard.key);
+            guard = InflightRegistry::Guard{};
         };
 
         // ③ Double-check L1

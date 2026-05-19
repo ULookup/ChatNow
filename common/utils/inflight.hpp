@@ -7,18 +7,40 @@
 
 namespace chatnow {
 
-// 进程内 per-key 互斥注册表：用于合并同一 key 的并发缓存穿透请求。
-// 第一个 miss 的请求 acquire(key) 获取互斥锁，unique_lock 锁定后穿透后端，
-// warm 缓存，然后 release(key)。后续相同 key 的请求 acquire() 拿到同一个
-// mutex，在 unique_lock 上阻塞直到第一个请求完成并 unlock。
 class InflightRegistry {
 public:
     using ptr = std::shared_ptr<InflightRegistry>;
 
-    struct Guard {
+    class Guard {
+    public:
+        Guard() = default;
+        Guard(std::shared_ptr<std::mutex> m, std::string k, InflightRegistry *r)
+            : mu(std::move(m)), key(std::move(k)), registry(r) {}
+
+        ~Guard() { if (registry) registry->release(key); }
+
+        Guard(const Guard &) = delete;
+        Guard &operator=(const Guard &) = delete;
+        Guard(Guard &&o) noexcept
+            : mu(std::move(o.mu)), key(std::move(o.key)), registry(o.registry) {
+            o.registry = nullptr;
+        }
+        Guard &operator=(Guard &&o) noexcept {
+            if (this != &o) {
+                if (registry) registry->release(key);
+                mu = std::move(o.mu);
+                key = std::move(o.key);
+                registry = o.registry;
+                o.registry = nullptr;
+            }
+            return *this;
+        }
+
         std::shared_ptr<std::mutex> mu;
         std::string key;
-        InflightRegistry *registry;
+
+    private:
+        InflightRegistry *registry = nullptr;
     };
 
     Guard acquire(const std::string &key) {
