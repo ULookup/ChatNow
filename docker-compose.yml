@@ -93,12 +93,12 @@ services:
     image: redis:7.2.5
     container_name: redis-cluster-init
     depends_on:
-      - redis-cluster-init-node1
-      - redis-cluster-init-node2
-      - redis-cluster-init-node3
-      - redis-cluster-init-node4
-      - redis-cluster-init-node5
-      - redis-cluster-init-node6
+      - redis-node1
+      - redis-node2
+      - redis-node3
+      - redis-node4
+      - redis-node5
+      - redis-node6
     entrypoint: |
       /bin/sh -c "
       echo 'Waiting for all Redis nodes...' &&
