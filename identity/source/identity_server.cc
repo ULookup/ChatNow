@@ -30,6 +30,7 @@ DEFINE_string(redis_seeds, "", "Redis Cluster 种子节点（逗号分隔，如 
 DEFINE_int32(redis_port, 6379, "Redis服务器访问端口");
 DEFINE_int32(redis_db, 0, "Redis默认库号");
 DEFINE_bool(redis_keep_alive, true, "Redis长连接保活");
+DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
 DEFINE_string(mail_user, "yhaoyang666@163.com", "邮箱验证平台的用户名");
 DEFINE_string(mail_paswd, "XKk5zvYwWKeB8xNk", "邮箱验证平台的密码");
@@ -47,7 +48,7 @@ int main(int argc, char *argv[])
     isb.make_es_object({FLAGS_es_host});
     isb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     isb.set_redis_seeds(FLAGS_redis_seeds);
-    isb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
+    isb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     isb.make_jwt_object(FLAGS_auth_config);
     isb.make_mail_object(FLAGS_mail_user, FLAGS_mail_paswd, FLAGS_mail_host, FLAGS_mail_from);
     isb.make_media_config(FLAGS_media_public_url_prefix);

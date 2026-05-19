@@ -22,6 +22,7 @@ DEFINE_string(redis_seeds, "", "Redis Cluster 种子节点（逗号分隔，如 
 DEFINE_int32(redis_port, 6379, "Redis服务器访问端口");
 DEFINE_int32(redis_db, 0, "Redis默认库号");
 DEFINE_bool(redis_keep_alive, true, "Redis长连接保活");
+DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
 DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
 
@@ -32,7 +33,7 @@ int main(int argc, char *argv[])
 
     chatnow::GatewayServerBuilder gsb;
     gsb.set_redis_seeds(FLAGS_redis_seeds);
-    gsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
+    gsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     gsb.make_jwt_object(FLAGS_auth_config);
     gsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service,
                               FLAGS_identity_service, FLAGS_relationship_service,

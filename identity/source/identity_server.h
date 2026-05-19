@@ -571,13 +571,14 @@ public:
     void make_redis_object(const std::string &host,
                         uint16_t port,
                         int db,
-                        bool keep_alive)
+                        bool keep_alive,
+                        int pool_size = 16)
     {
         if (!_redis_seeds.empty()) {
             auto cluster = RedisClusterFactory::create(_redis_seeds);
             _redis_client = std::make_shared<RedisClient>(cluster);
         } else {
-            auto redis = RedisClientFactory::create(host, port, db, keep_alive);
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
             _redis_client = std::make_shared<RedisClient>(redis);
         }
     }

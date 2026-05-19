@@ -140,12 +140,17 @@ public:
             auto election = std::make_shared<LeaderElection>(
                 _etcd, key, instance_id, lease_ttl, nullptr, nullptr);
             election->start();
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            if (election->is_leader()) {
-                _active_election = election;
-                _allocated = slot;
-                LOG_INFO("EtcdWorkIdAllocator: 申请到 worker_id={}", slot);
-                return slot;
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (election->is_leader()) {
+                    _active_election = election;
+                    _allocated = slot;
+                    LOG_INFO("EtcdWorkIdAllocator: 申请到 worker_id={}", slot);
+                    return slot;
+                }
+                if (!election->is_leader()) break;  // lost immediately
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             election->stop();
         }
