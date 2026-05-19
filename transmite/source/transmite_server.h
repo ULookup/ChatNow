@@ -174,9 +174,8 @@ public:
             return err_response(rid, chatnow::error::kSystemUnavailable, "依赖服务暂不可用");
         }
 
-        // 成员列表：L1 → InflightRegistry → L2 Redis → RPC
-        std::vector<std::string> member_id_list = resolve_members(chat_ssid);
-
+        // 成员列表：L1 → InflightRegistry → L2 Redis → RedisMutex → RPC (内置 warm)
+        // 先发起 profile RPC（异步），与成员解析并行
         chatnow::identity::IdentityService_Stub identity_stub(identity_channel.get());
         chatnow::identity::GetProfileReq profile_req;
         chatnow::identity::GetProfileRsp profile_rsp;
@@ -186,31 +185,11 @@ public:
         chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &profile_cntl);
         identity_stub.GetProfile(&profile_cntl, &profile_req, &profile_rsp, brpc::DoNothing());
 
-        // 成员列表未命中缓存：RPC 拉取 + warm
-        ::chatnow::conversation::GetMemberIdsRsp member_rsp;
-        brpc::Controller member_cntl;
-        if (member_id_list.empty()) {
-            auto conv_channel = _mm_channels->choose(_conversation_service_name);
-            if (!conv_channel) {
-                brpc::Join(profile_cntl.call_id());
-                LOG_ERROR("请求ID: {} - conversation_service 节点缺失", rid);
-                return err_response(rid, chatnow::error::kSystemUnavailable, "依赖服务暂不可用");
-            }
-            ::chatnow::conversation::ConversationService_Stub conv_stub(conv_channel.get());
-            ::chatnow::conversation::GetMemberIdsReq member_req;
-            member_req.set_request_id(rid);
-            member_req.set_conversation_id(chat_ssid);
-            chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &member_cntl);
-            conv_stub.GetMemberIds(&member_cntl, &member_req, &member_rsp, brpc::DoNothing());
-            brpc::Join(member_cntl.call_id());
-            if (member_cntl.Failed() || !member_rsp.header().success()) {
-                brpc::Join(profile_cntl.call_id());
-                LOG_ERROR("请求ID: {} - 获取群成员失败: {} {}", rid,
-                          member_cntl.ErrorText(), member_rsp.header().error_message());
-                return err_response(rid, chatnow::error::kSystemUnavailable, "获取群成员失败");
-            }
-            for (const auto &m : member_rsp.member_ids()) member_id_list.push_back(m);
-            warm_members_cache(chat_ssid, member_id_list);
+        std::vector<std::string> member_id_list;
+        for (int retry = 0; retry < 3; ++retry) {
+            member_id_list = resolve_members(chat_ssid);
+            if (!member_id_list.empty()) break;
+            if (retry < 2) std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
 
         brpc::Join(profile_cntl.call_id());
@@ -339,66 +318,62 @@ public:
     std::vector<std::string> resolve_members(const std::string &chat_session_id) {
         std::string mkey = "members:" + chat_session_id;
 
+        // ① L1 hit → fast path
         if (_local_members_cache) {
             auto local = _local_members_cache->get(mkey);
             if (local.has_value()) {
-                auto &members = *local;
-                if (members.size() == 1 && members[0] == "__sentinel__")
-                    return {};
-                return members;
-            }
-        }
-
-        auto guard = _inflight_registry ? _inflight_registry->acquire(chat_session_id)
-                                        : InflightRegistry::Guard{};
-        std::shared_ptr<std::mutex> lock_mu = guard.mu;
-        std::unique_lock<std::mutex> lk(lock_mu ? *lock_mu : _dummy_mu_);
-
-        if (_local_members_cache) {
-            auto local = _local_members_cache->get(mkey);
-            if (local.has_value()) {
-                lk.unlock();
-                if (_inflight_registry) _inflight_registry->release(guard.key);
                 auto &members = *local;
                 if (members.size() == 1 && members[0] == "__sentinel__") return {};
                 return members;
             }
         }
 
+        // ② L1 miss → InflightRegistry per-key lock
+        auto guard = _inflight_registry ? _inflight_registry->acquire(chat_session_id)
+                                        : InflightRegistry::Guard{};
+        std::unique_lock<std::mutex> lk(guard.mu ? *guard.mu : _dummy_mu_);
+
+        auto release_guard = [&]() {
+            if (lk.owns_lock()) lk.unlock();
+            if (guard.registry && !guard.key.empty()) guard.registry->release(guard.key);
+        };
+
+        // ③ Double-check L1
+        if (_local_members_cache) {
+            auto local = _local_members_cache->get(mkey);
+            if (local.has_value()) {
+                release_guard();
+                auto &members = *local;
+                if (members.size() == 1 && members[0] == "__sentinel__") return {};
+                return members;
+            }
+        }
+
+        // ④ Double-check L2 Redis
         auto members = _members_cache->list(chat_session_id);
         if (!members.empty()) {
+            release_guard();
             if (members.size() == 1 && members[0] == "__sentinel__") {
                 if (_local_members_cache)
                     _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
-                lk.unlock();
-                if (_inflight_registry) _inflight_registry->release(guard.key);
                 return {};
             }
             if (_local_members_cache)
                 _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
-            lk.unlock();
-            if (_inflight_registry) _inflight_registry->release(guard.key);
             return members;
         }
 
-        // L2 miss → RedisMutex for cross-instance stampede
+        // ⑤ L2 miss → RedisMutex cross-instance stampede protection
         RedisMutex warm_mutex(_redis, "warm:members:" + chat_session_id, 5000);
         if (!warm_mutex.try_lock(std::chrono::milliseconds(100))) {
-            lk.unlock();
-            if (_inflight_registry) _inflight_registry->release(guard.key);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            return resolve_members(chat_session_id);
+            release_guard();
+            return {};  // another instance is warming; caller retries (no recursion)
         }
 
-        warm_mutex.unlock();
-        lk.unlock();
-        if (_inflight_registry) _inflight_registry->release(guard.key);
-        return {};
-    }
+        // ⑥ RPC to fetch members (INSIDE the mutex)
+        members = fetch_members_from_conversation_service_(chat_session_id);
 
-    void warm_members_cache(const std::string &chat_session_id,
-                            const std::vector<std::string> &members) {
-        std::string mkey = "members:" + chat_session_id;
+        // ⑦ Warm L2 + L1 (INSIDE the mutex)
         if (members.empty()) {
             _members_cache->warm_sentinel(chat_session_id);
             if (_local_members_cache)
@@ -408,6 +383,34 @@ public:
             if (_local_members_cache)
                 _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
         }
+
+        warm_mutex.unlock();
+        release_guard();
+        return members;
+    }
+
+    std::vector<std::string> fetch_members_from_conversation_service_(const std::string &chat_session_id) {
+        auto conv_channel = _mm_channels->choose(_conversation_service_name);
+        if (!conv_channel) {
+            LOG_ERROR("conversation_service 节点缺失 (warming members for {})", chat_session_id);
+            return {};
+        }
+        ::chatnow::conversation::ConversationService_Stub conv_stub(conv_channel.get());
+        ::chatnow::conversation::GetMemberIdsReq member_req;
+        ::chatnow::conversation::GetMemberIdsRsp member_rsp;
+        brpc::Controller member_cntl;
+        member_req.set_request_id(chat_session_id);
+        member_req.set_conversation_id(chat_session_id);
+        conv_stub.GetMemberIds(&member_cntl, &member_req, &member_rsp, brpc::DoNothing());
+        brpc::Join(member_cntl.call_id());
+        if (member_cntl.Failed() || !member_rsp.header().success()) {
+            LOG_ERROR("获取群成员失败 (warming): {} {}",
+                      member_cntl.ErrorText(), member_rsp.header().error_message());
+            return {};
+        }
+        std::vector<std::string> members;
+        for (const auto &m : member_rsp.member_ids()) members.push_back(m);
+        return members;
     }
 
 private:
