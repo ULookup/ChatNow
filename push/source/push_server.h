@@ -901,6 +901,7 @@ public:
             if (_connections && _connections->client(conn, uid, did, jti)) {
                 _connections->remove(conn);
                 if (_online_route) _online_route->unbind(uid, did, _instance_id);
+                if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
                 LOG_DEBUG("WS 关闭 uid={} did={}", uid, did);
             }
         });

@@ -62,6 +62,7 @@ int main(int argc, char *argv[])
     psb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
     psb.set_resend_params(FLAGS_resend_batch, FLAGS_resend_max_age_sec);
     psb.set_etcd_client(std::make_shared<etcd::Client>(FLAGS_registry_host));
+    psb.set_push_service_dir(FLAGS_base_service + FLAGS_push_service);
     psb.make_cross_reaper_election();
     psb.make_local_cache();
     psb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads, FLAGS_ws_port);
