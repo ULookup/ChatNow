@@ -36,6 +36,7 @@
 #include "dao/mysql_message_pin.hpp"
 #include "dao/data_es.hpp"
 #include "dao/data_redis.hpp"
+#include "utils/redis_mutex.hpp"
 #include "mq/rabbitmq.hpp"
 #include "mq/trace_headers.hpp"
 #include "utils/brpc_closure.hpp"
@@ -1170,6 +1171,14 @@ private:
             LOG_WARN("SeqGen / MySQL 未初始化，跳过 seq 回填");
             return;
         }
+
+        // 多实例启动互斥：同一时间只有一个实例执行 backfill
+        RedisMutex backfill_lock(_redis_client, "backfill:seq", 30000);
+        if (!backfill_lock.try_lock(std::chrono::seconds(5))) {
+            LOG_WARN("SeqGen backfill 获取锁超时（其他实例正在执行），跳过");
+            return;
+        }
+
         LOG_INFO("开始从 DB 回填 seq 到 Redis...");
         auto msg_table = std::make_shared<MessageTable>(_odb_db);
         auto timeline_table = std::make_shared<UserTimeLineTable>(_odb_db);
