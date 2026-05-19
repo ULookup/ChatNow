@@ -2,6 +2,7 @@
 
 #include "connection.hpp"
 #include "infra/etcd.hpp"
+#include "infra/leader_election.hpp"
 #include "infra/logger.hpp"
 #include "mq/channel.hpp"
 #include "mq/rabbitmq.hpp"
@@ -44,7 +45,8 @@ public:
                     const CrossInstanceOutbox::ptr &cross_outbox,
                     const std::string &instance_id,
                     const std::string &message_service_name,
-                    const ServiceManager::ptr &channels)
+                    const ServiceManager::ptr &channels,
+                    LeaderElection::ptr cross_reaper_election = nullptr)
         : _connections(connections),
           _jwt_codec(jwt_codec),
           _redis(redis),
@@ -53,7 +55,8 @@ public:
           _cross_outbox(cross_outbox),
           _instance_id(instance_id),
           _message_service_name(message_service_name),
-          _mm_channels(channels) {}
+          _mm_channels(channels),
+          _cross_reaper_election(std::move(cross_reaper_election)) {}
 
     void set_resend_params(long batch, long max_age_sec) {
         _resend_batch = batch;
@@ -468,14 +471,13 @@ public:
     void start_cross_outbox_reaper(const std::string &owner) {
         if (!_cross_outbox || !_mm_channels) return;
         constexpr int kReapIntervalSec = 5;
-        constexpr int kLeaseTtlSec = 30;
         constexpr int kBatchLimit = 50;
         _cross_reaper_running.store(true);
         _cross_reaper_owner = owner;
-        _cross_reaper_thread = std::thread([this, kReapIntervalSec, kLeaseTtlSec, kBatchLimit]() {
+        _cross_reaper_thread = std::thread([this, kReapIntervalSec, kBatchLimit]() {
             while (_cross_reaper_running.load()) {
                 try {
-                    if (!_cross_outbox->try_acquire_reaper_lease(_cross_reaper_owner, kLeaseTtlSec)) {
+                    if (!_cross_reaper_election || !_cross_reaper_election->is_leader()) {
                         std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
                         continue;
                     }
@@ -542,7 +544,6 @@ public:
                 }
                 std::this_thread::sleep_for(std::chrono::seconds(kReapIntervalSec));
             }
-            if (_cross_outbox) _cross_outbox->release_reaper_lease(_cross_reaper_owner);
             LOG_INFO("CrossInstanceOutbox reaper 已停止");
         });
     }
@@ -550,6 +551,7 @@ public:
     void stop_cross_outbox_reaper() {
         _cross_reaper_running.store(false);
         if (_cross_reaper_thread.joinable()) _cross_reaper_thread.join();
+        if (_cross_reaper_election) _cross_reaper_election->stop();
     }
 
 private:
@@ -631,6 +633,7 @@ private:
     std::atomic<bool> _cross_reaper_running{false};
     std::thread _cross_reaper_thread;
     std::string _cross_reaper_owner;
+    LeaderElection::ptr _cross_reaper_election;
 };
 
 class PushServer
@@ -804,6 +807,15 @@ public:
         _resend_max_age_sec = max_age_sec;
     }
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
+    void set_etcd_client(std::shared_ptr<etcd::Client> etcd) { _etcd_client = etcd; }
+
+    void make_cross_reaper_election() {
+        if (!_etcd_client) return;
+        _cross_reaper_election = std::make_shared<LeaderElection>(
+            _etcd_client, "/chatnow/reaper/cross_outbox", _instance_id, 30,
+            []() { LOG_INFO("CrossOutbox reaper 成为 leader"); },
+            []() { LOG_INFO("CrossOutbox reaper 失去 leader"); });
+    }
 
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
@@ -812,7 +824,8 @@ public:
         _rpc_server = std::make_shared<brpc::Server>();
         _push_service = new PushServiceImpl(
             _connections, _jwt_codec, _redis_client, _online_route, _unacked, _cross_outbox,
-            _instance_id, _message_service_name, _mm_channels);
+            _instance_id, _message_service_name, _mm_channels,
+            _cross_reaper_election);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if (ret == -1) { LOG_ERROR("Push: AddService 失败"); abort(); }
@@ -844,6 +857,7 @@ public:
         };
         _push_subscriber->consume(std::move(callback));
 
+        if (_cross_reaper_election) _cross_reaper_election->start();
         std::string owner = _reaper_owner.empty()
             ? std::to_string(::getpid()) : _reaper_owner;
         _push_service->start_cross_outbox_reaper(owner);
@@ -881,6 +895,8 @@ private:
     int _resend_batch{50};
     int _resend_max_age_sec{5};
     std::string _reaper_owner;
+    std::shared_ptr<etcd::Client> _etcd_client;
+    LeaderElection::ptr _cross_reaper_election;
 
     Connection::ptr _connections;
     server_t _ws_server;

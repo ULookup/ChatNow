@@ -78,6 +78,8 @@ int main(int argc, char *argv[])
                           FLAGS_mysql_pool_count);
     msb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service,
                               FLAGS_identity_service, FLAGS_media_service);
+    msb.set_etcd_client(std::make_shared<etcd::Client>(FLAGS_registry_host));
+    msb.make_reaper_elections();
     msb.make_rpc_object(static_cast<uint16_t>(FLAGS_listen_port),
                         static_cast<uint32_t>(FLAGS_rpc_timeout),
                         static_cast<uint8_t>(FLAGS_rpc_threads));

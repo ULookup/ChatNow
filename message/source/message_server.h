@@ -27,6 +27,7 @@
 #include "log/log_context.hpp"
 #include "infra/logger.hpp"
 #include "infra/etcd.hpp"
+#include "infra/leader_election.hpp"
 #include "mq/channel.hpp"
 #include "dao/mysql_message.hpp"
 #include "dao/mysql_user_timeline.hpp"
@@ -861,11 +862,30 @@ public:
     MessageServer(const std::shared_ptr<brpc::Server> &server,
                   MessageServiceImpl *impl,
                   const Registry::ptr &registry,
-                  const MQClient::ptr &mq_client)
+                  const MQClient::ptr &mq_client,
+                  LeaderElection::ptr push_reaper_election = nullptr,
+                  LeaderElection::ptr es_reaper_election = nullptr,
+                  std::thread *push_reaper_thread = nullptr,
+                  std::thread *es_reaper_thread = nullptr,
+                  std::atomic<bool> *push_reaper_running = nullptr,
+                  std::atomic<bool> *es_reaper_running = nullptr)
         : _rpc_server(server), _service_impl(impl),
-          _registry(registry), _mq_client(mq_client) {}
+          _registry(registry), _mq_client(mq_client),
+          _push_reaper_election(std::move(push_reaper_election)),
+          _es_reaper_election(std::move(es_reaper_election)),
+          _push_reaper_thread(push_reaper_thread),
+          _es_reaper_thread(es_reaper_thread),
+          _push_reaper_running(push_reaper_running),
+          _es_reaper_running(es_reaper_running) {}
 
     ~MessageServer() {
+        // 先停 reaper 线程，再停选举，最后停 RPC
+        if (_push_reaper_running) *_push_reaper_running = false;
+        if (_es_reaper_running) *_es_reaper_running = false;
+        if (_push_reaper_thread && _push_reaper_thread->joinable()) _push_reaper_thread->join();
+        if (_es_reaper_thread && _es_reaper_thread->joinable()) _es_reaper_thread->join();
+        if (_push_reaper_election) _push_reaper_election->stop();
+        if (_es_reaper_election) _es_reaper_election->stop();
         if (_rpc_server) { _rpc_server->Stop(0); _rpc_server->Join(); }
         _mq_client.reset();
     }
@@ -877,6 +897,12 @@ private:
     MessageServiceImpl *_service_impl {nullptr};
     Registry::ptr _registry;
     MQClient::ptr _mq_client;
+    LeaderElection::ptr _push_reaper_election;
+    LeaderElection::ptr _es_reaper_election;
+    std::thread *_push_reaper_thread{nullptr};
+    std::thread *_es_reaper_thread{nullptr};
+    std::atomic<bool> *_push_reaper_running{nullptr};
+    std::atomic<bool> *_es_reaper_running{nullptr};
 };
 
 class MessageServerBuilder {
@@ -1015,6 +1041,66 @@ public:
             _mq_client, _es_index_settings, dummy_cb);
     }
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
+    void set_etcd_client(std::shared_ptr<etcd::Client> etcd) { _etcd_client = etcd; }
+
+    void make_reaper_elections() {
+        if (!_etcd_client) {
+            LOG_WARN("etcd 未初始化，跳过 reaper 选举");
+            return;
+        }
+        _push_reaper_election = std::make_shared<LeaderElection>(
+            _etcd_client, "/chatnow/reaper/push_outbox", _reaper_owner, 30,
+            []() { LOG_INFO("PushOutbox reaper 成为 leader"); },
+            []() { LOG_INFO("PushOutbox reaper 失去 leader"); });
+        _es_reaper_election = std::make_shared<LeaderElection>(
+            _etcd_client, "/chatnow/reaper/es_outbox", _reaper_owner, 30,
+            []() { LOG_INFO("ESOutbox reaper 成为 leader"); },
+            []() { LOG_INFO("ESOutbox reaper 失去 leader"); });
+    }
+
+    void start_push_outbox_reaper() {
+        _push_reaper_running = true;
+        _push_reaper_thread = std::thread([this]() {
+            while (_push_reaper_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                if (!_push_reaper_election || !_push_reaper_election->is_leader())
+                    continue;
+                try {
+                    auto items = _push_outbox->peek(50);
+                    for (const auto &item : items) {
+                        _push_publisher->publish_confirm(item, {},
+                            [outbox = _push_outbox, item](PublishStatus st, const std::string &) {
+                                if (st == PublishStatus::Acked && outbox) outbox->remove(item);
+                            });
+                    }
+                } catch (std::exception &e) {
+                    LOG_WARN("PushOutbox reaper 异常: {}", e.what());
+                }
+            }
+        });
+    }
+
+    void start_es_outbox_reaper() {
+        _es_reaper_running = true;
+        _es_reaper_thread = std::thread([this]() {
+            while (_es_reaper_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                if (!_es_reaper_election || !_es_reaper_election->is_leader())
+                    continue;
+                try {
+                    auto items = _es_outbox->peek(50);
+                    for (const auto &item : items) {
+                        _es_publisher->publish_confirm(item, {},
+                            [outbox = _es_outbox, item](PublishStatus st, const std::string &) {
+                                if (st == PublishStatus::Acked && outbox) outbox->remove(item);
+                            });
+                    }
+                } catch (std::exception &e) {
+                    LOG_WARN("ESOutbox reaper 异常: {}", e.what());
+                }
+            }
+        });
+    }
 
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
         _rpc_server = std::make_shared<brpc::Server>();
@@ -1063,11 +1149,19 @@ public:
         _subscriber_es->consume(std::move(callback_es));
 
         LOG_INFO("MQ 订阅完成，消息服务启动！");
+
+        if (_push_reaper_election) _push_reaper_election->start();
+        if (_es_reaper_election) _es_reaper_election->start();
+        start_push_outbox_reaper();
+        start_es_outbox_reaper();
     }
 
     MessageServer::ptr build() {
         return std::make_shared<MessageServer>(
-            _rpc_server, _service_impl, _registry, _mq_client);
+            _rpc_server, _service_impl, _registry, _mq_client,
+            _push_reaper_election, _es_reaper_election,
+            &_push_reaper_thread, &_es_reaper_thread,
+            &_push_reaper_running, &_es_reaper_running);
     }
 
 private:
@@ -1127,6 +1221,13 @@ private:
     std::string _identity_service_name;
     std::string _media_service_name;
     std::string _reaper_owner;
+    std::shared_ptr<etcd::Client> _etcd_client;
+    LeaderElection::ptr _push_reaper_election;
+    LeaderElection::ptr _es_reaper_election;
+    std::thread _push_reaper_thread;
+    std::thread _es_reaper_thread;
+    std::atomic<bool> _push_reaper_running{false};
+    std::atomic<bool> _es_reaper_running{false};
 
     std::shared_ptr<brpc::Server> _rpc_server;
     MessageServiceImpl *_service_impl {nullptr};
