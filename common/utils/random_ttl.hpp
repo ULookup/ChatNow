@@ -1,13 +1,16 @@
 #pragma once
 #include <chrono>
+#include <cmath>
 #include <random>
 
 namespace chatnow {
 inline std::chrono::seconds randomized_ttl(std::chrono::seconds base) {
     long base_sec = base.count();
-    long jitter = base_sec / 5;
+    double jitter_sec = static_cast<double>(base_sec) * 0.20;
     static thread_local std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<long> dist(-jitter, jitter);
-    return std::chrono::seconds(base_sec + dist(rng));
+    std::uniform_real_distribution<double> dist(-jitter_sec, jitter_sec);
+    long adjusted = base_sec + static_cast<long>(std::round(dist(rng)));
+    if (adjusted < 1) adjusted = 1;
+    return std::chrono::seconds(adjusted);
 }
 } // namespace chatnow
