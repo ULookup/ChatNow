@@ -55,6 +55,14 @@ public:
              std::chrono::milliseconds ttl) {
         return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl);
     }
+    bool set(const std::string &key, const std::string &val,
+             std::chrono::seconds ttl, sw::redis::UpdateType type) {
+        return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type);
+    }
+    bool set(const std::string &key, const std::string &val,
+             std::chrono::milliseconds ttl, sw::redis::UpdateType type) {
+        return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type);
+    }
     long long del(const std::string &key) {
         return _rc ? _rc->del(key) : _r->del(key);
     }
