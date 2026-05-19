@@ -24,7 +24,8 @@ public:
     bool try_lock(std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {
-            bool ok = _redis->set(_key, _token, std::chrono::milliseconds(_ttl_ms));
+            bool ok = _redis->set(_key, _token, std::chrono::milliseconds(_ttl_ms),
+                                  sw::redis::UpdateType::NOT_EXIST);
             if (ok) { _locked = true; return true; }
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
