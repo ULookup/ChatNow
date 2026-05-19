@@ -23,8 +23,7 @@
 #include <vector>
 
 #include <odb/database.hxx>
-#include <sw/redis++/redis++.h>
-
+#include "dao/data_redis.hpp"
 #include "dao/mysql_media_blob_ref.hpp"
 #include "dao/mysql_media_file.hpp"
 #include "dao/mysql_media_user_quota.hpp"
@@ -47,7 +46,7 @@ public:
 
     CleanupWorker(std::shared_ptr<S3Client>            s3,
                   std::shared_ptr<odb::core::database> mysql,
-                  std::shared_ptr<sw::redis::Redis>    redis,
+                  RedisClient::ptr    redis,
                   std::string                          public_bucket,
                   std::string                          private_bucket)
         : _s3(std::move(s3)),
@@ -156,7 +155,7 @@ private:
     }
 
     std::shared_ptr<S3Client>             _s3;
-    std::shared_ptr<sw::redis::Redis>     _redis;
+    RedisClient::ptr     _redis;
     std::shared_ptr<MediaFileTable>       _files;
     std::shared_ptr<MediaBlobRefTable>    _blobs;
     std::shared_ptr<MediaUserQuotaTable>  _quota;

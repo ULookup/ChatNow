@@ -18,6 +18,7 @@ DEFINE_string(presence_service, "/service/presence_service", "Presence 子服务
 DEFINE_string(push_service, "/service/push_service", "Push 子服务名称");
 
 DEFINE_string(redis_host, "127.0.0.1", "Redis服务器访问地址");
+DEFINE_string(redis_seeds, "", "Redis Cluster 种子节点（逗号分隔，如 host1:6379,host2:6379）");
 DEFINE_int32(redis_port, 6379, "Redis服务器访问端口");
 DEFINE_int32(redis_db, 0, "Redis默认库号");
 DEFINE_bool(redis_keep_alive, true, "Redis长连接保活");
@@ -30,6 +31,7 @@ int main(int argc, char *argv[])
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::GatewayServerBuilder gsb;
+    gsb.set_redis_seeds(FLAGS_redis_seeds);
     gsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive);
     gsb.make_jwt_object(FLAGS_auth_config);
     gsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service,

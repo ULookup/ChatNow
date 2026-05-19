@@ -42,6 +42,7 @@ DEFINE_int32 (mysql_port, 0, "MySQL 端口");
 DEFINE_int32 (mysql_pool_count, 4, "MySQL 连接池");
 
 DEFINE_string(redis_host, "127.0.0.1", "Redis 地址");
+DEFINE_string(redis_seeds, "", "Redis Cluster 种子节点（逗号分隔，如 host1:6379,host2:6379）");
 DEFINE_int32 (redis_port, 6379, "Redis 端口");
 DEFINE_int32 (redis_db,   0, "Redis 默认库号");
 DEFINE_bool  (redis_keep_alive, true, "Redis 长连接");
@@ -129,6 +130,7 @@ int main(int argc, char* argv[]) {
         b.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host,
                             FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port,
                             FLAGS_mysql_pool_count);
+        b.set_redis_seeds(FLAGS_redis_seeds);
         b.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
                             FLAGS_redis_keep_alive);
         b.make_s3_object(conf.s3_endpoint, conf.s3_region,

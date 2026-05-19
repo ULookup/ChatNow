@@ -35,7 +35,7 @@ class IdentityServiceImpl : public ::chatnow::identity::IdentityService
 public:
     IdentityServiceImpl(const std::shared_ptr<odb::core::database> &mysql_client,
                         const std::shared_ptr<elasticlient::Client> &es_client,
-                        const std::shared_ptr<sw::redis::Redis> &redis_client,
+                        const RedisClient::ptr &redis_client,
                         const std::shared_ptr<MailClient> &mail_client,
                         const std::shared_ptr<auth::JwtCodec> &jwt_codec,
                         const std::shared_ptr<auth::JwtStore> &jwt_store,
@@ -526,7 +526,7 @@ public:
             const Registry::ptr &reg_client,
             const std::shared_ptr<elasticlient::Client> &es_client,
             const std::shared_ptr<odb::core::database> &mysql_client,
-            const std::shared_ptr<sw::redis::Redis> &redis_client,
+            const RedisClient::ptr &redis_client,
             const std::shared_ptr<brpc::Server> &server)
         : _service_discover(service_discover),
         _reg_client(reg_client),
@@ -545,7 +545,7 @@ private:
     std::shared_ptr<brpc::Server> _rpc_server;
     std::shared_ptr<elasticlient::Client> _es_client;
     std::shared_ptr<odb::core::database> _mysql_client;
-    std::shared_ptr<sw::redis::Redis> _redis_client;
+    RedisClient::ptr _redis_client;
 };
 
 /* 建造者模式: 将对象真正的构造过程封装，便于后期扩展和调整 */
@@ -565,13 +565,21 @@ public:
     {
         _mysql_client = ODBFactory::create(user, password, host, db, cset, port, conn_pool_count);
     }
-    /* brief: 构造redis客户端对象 */
+    void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }
+
+    /* brief: 构造redis客户端对象（双模：单机 / Cluster） */
     void make_redis_object(const std::string &host,
                         uint16_t port,
                         int db,
                         bool keep_alive)
     {
-        _redis_client = RedisClientFactory::create(host, port, db, keep_alive);
+        if (!_redis_seeds.empty()) {
+            auto cluster = RedisClusterFactory::create(_redis_seeds);
+            _redis_client = std::make_shared<RedisClient>(cluster);
+        } else {
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive);
+            _redis_client = std::make_shared<RedisClient>(redis);
+        }
     }
     /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
     void make_jwt_object(const std::string &auth_config_path) {
@@ -687,7 +695,8 @@ private:
 
     std::shared_ptr<elasticlient::Client> _es_client;
     std::shared_ptr<odb::core::database> _mysql_client;
-    std::shared_ptr<sw::redis::Redis> _redis_client;
+    std::string _redis_seeds;
+    RedisClient::ptr _redis_client;
     std::shared_ptr<MailClient> _mail_client;
 
     std::string _media_public_url_prefix;

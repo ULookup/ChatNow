@@ -38,7 +38,7 @@ class PushServiceImpl : public PushService
 public:
     PushServiceImpl(const Connection::ptr &connections,
                     const std::shared_ptr<chatnow::auth::JwtCodec> &jwt_codec,
-                    const std::shared_ptr<sw::redis::Redis> &redis,
+                    const RedisClient::ptr &redis,
                     const OnlineRoute::ptr &online_route,
                     const UnackedPush::ptr &unacked,
                     const CrossInstanceOutbox::ptr &cross_outbox,
@@ -619,7 +619,7 @@ private:
 
     Connection::ptr _connections;
     std::shared_ptr<chatnow::auth::JwtCodec> _jwt_codec;
-    std::shared_ptr<sw::redis::Redis> _redis;
+    RedisClient::ptr _redis;
     OnlineRoute::ptr _online_route;
     UnackedPush::ptr _unacked;
     CrossInstanceOutbox::ptr _cross_outbox;
@@ -684,13 +684,21 @@ public:
         _jwt_codec = std::make_shared<chatnow::auth::JwtCodec>(config);
     }
 
+    void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }
+
     void make_redis_object(const std::string &host, uint16_t port, int db,
                            bool keep_alive, int pool_size)
     {
-        _redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
-        _online_route = std::make_shared<OnlineRoute>(_redis);
-        _unacked      = std::make_shared<UnackedPush>(_redis);
-        _cross_outbox = std::make_shared<CrossInstanceOutbox>(_redis);
+        if (!_redis_seeds.empty()) {
+            auto cluster = RedisClusterFactory::create(_redis_seeds, pool_size, keep_alive);
+            _redis_client = std::make_shared<RedisClient>(cluster);
+        } else {
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+            _redis_client = std::make_shared<RedisClient>(redis);
+        }
+        _online_route = std::make_shared<OnlineRoute>(_redis_client);
+        _unacked      = std::make_shared<UnackedPush>(_redis_client);
+        _cross_outbox = std::make_shared<CrossInstanceOutbox>(_redis_client);
     }
 
     void make_discovery_object(const std::string &reg_host,
@@ -798,12 +806,12 @@ public:
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
 
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
-        if (!_redis) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
+        if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
         if (!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
         _connections = std::make_shared<Connection>();
         _rpc_server = std::make_shared<brpc::Server>();
         _push_service = new PushServiceImpl(
-            _connections, _jwt_codec, _redis, _online_route, _unacked, _cross_outbox,
+            _connections, _jwt_codec, _redis_client, _online_route, _unacked, _cross_outbox,
             _instance_id, _message_service_name, _mm_channels);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
@@ -852,7 +860,8 @@ public:
     }
 
 private:
-    std::shared_ptr<sw::redis::Redis> _redis;
+    std::string _redis_seeds;
+    RedisClient::ptr _redis_client;
     std::shared_ptr<chatnow::auth::JwtCodec> _jwt_codec;
     OnlineRoute::ptr _online_route;
     UnackedPush::ptr _unacked;

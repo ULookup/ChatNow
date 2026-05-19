@@ -834,9 +834,17 @@ public:
     void make_es_object(const std::vector<std::string> host_list) {
         _es_client = ESClientFactory::create(host_list);
     }
+    void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }
+
     void make_redis_object(const std::string &host, uint16_t port, int db,
                            bool keep_alive, int pool_size) {
-        _redis_client  = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+        if (!_redis_seeds.empty()) {
+            auto cluster = RedisClusterFactory::create(_redis_seeds, pool_size, keep_alive);
+            _redis_client = std::make_shared<RedisClient>(cluster);
+        } else {
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+            _redis_client = std::make_shared<RedisClient>(redis);
+        }
         _members_cache = std::make_shared<Members>(_redis_client);
     }
     void make_mysql_object(const std::string &user, const std::string &password,
@@ -905,7 +913,8 @@ public:
 
 private:
     std::shared_ptr<elasticlient::Client>   _es_client;
-    std::shared_ptr<sw::redis::Redis>       _redis_client;
+    std::string                             _redis_seeds;
+    RedisClient::ptr       _redis_client;
     Members::ptr                            _members_cache;
     std::shared_ptr<odb::core::database>    _mysql_client;
     Discovery::ptr                          _service_discover;

@@ -59,7 +59,7 @@ public:
     MediaServiceImpl(std::shared_ptr<S3Client> s3,
                      std::shared_ptr<MimeWhitelist> mime,
                      std::shared_ptr<odb::core::database> mysql,
-                     std::shared_ptr<sw::redis::Redis> /*redis*/,
+                     RedisClient::ptr /*redis*/,
                      const MediaServiceConfig& cfg)
     {
         auto files  = std::make_shared<MediaFileTable>(mysql);
@@ -248,7 +248,7 @@ public:
 
     MediaServer(Registry::ptr reg,
                 std::shared_ptr<odb::core::database> mysql,
-                std::shared_ptr<sw::redis::Redis> redis,
+                RedisClient::ptr redis,
                 std::shared_ptr<S3Client> s3,
                 std::shared_ptr<brpc::Server> server,
                 std::unique_ptr<CleanupWorker> worker)
@@ -269,7 +269,7 @@ public:
 private:
     Registry::ptr                          _reg;
     std::shared_ptr<odb::core::database>   _mysql;
-    std::shared_ptr<sw::redis::Redis>      _redis;
+    RedisClient::ptr      _redis;
     std::shared_ptr<S3Client>              _s3;
     std::shared_ptr<brpc::Server>          _rpc_server;
     std::unique_ptr<CleanupWorker>         _worker;
@@ -283,8 +283,16 @@ public:
         _mysql = ODBFactory::create(user, password, host, db, cset, port, pool_count);
     }
 
+    void set_redis_seeds(const std::string& seeds) { _redis_seeds = seeds; }
+
     void make_redis_object(const std::string& host, uint16_t port, int db, bool keep_alive) {
-        _redis = RedisClientFactory::create(host, port, db, keep_alive);
+        if (!_redis_seeds.empty()) {
+            auto cluster = RedisClusterFactory::create(_redis_seeds);
+            _redis = std::make_shared<RedisClient>(cluster);
+        } else {
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive);
+            _redis = std::make_shared<RedisClient>(redis);
+        }
     }
 
     void make_s3_object(const std::string& endpoint, const std::string& region,
@@ -345,7 +353,8 @@ public:
 
 private:
     std::shared_ptr<odb::core::database> _mysql;
-    std::shared_ptr<sw::redis::Redis>    _redis;
+    std::string                _redis_seeds;
+    RedisClient::ptr    _redis;
     std::shared_ptr<S3Client>            _s3;
     std::shared_ptr<MimeWhitelist>       _mime;
     Registry::ptr                        _reg;

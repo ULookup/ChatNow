@@ -22,6 +22,7 @@ DEFINE_string(conversation_service, "/service/conversation_service", "会话管�
 DEFINE_string(message_service, "/service/message_service", "消息存储子服务名称（用于幂等查询）");
 
 DEFINE_string(redis_host, "127.0.0.1", "Redis 服务器访问地址");
+DEFINE_string(redis_seeds, "", "Redis Cluster 种子节点（逗号分隔，如 host1:6379,host2:6379）");
 DEFINE_int32(redis_port, 6379, "Redis 服务器访问端口");
 DEFINE_int32(redis_db, 0, "Redis 选择的库");
 DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
@@ -52,6 +53,7 @@ int main(int argc, char *argv[])
 
     chatnow::TransmiteServerBuilder tsb;
     // 注意：先初始化 Redis（worker_id 自动分配依赖 Redis），再初始化 ID 生成器
+    tsb.set_redis_seeds(FLAGS_redis_seeds);
     tsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     tsb.set_instance_owner(FLAGS_access_host);
     tsb.make_id_generator_object(FLAGS_instance_num, FLAGS_epoch_ms, FLAGS_wait_on_clock_backwards);

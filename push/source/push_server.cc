@@ -19,6 +19,7 @@ DEFINE_string(message_service, "/service/message_service", "消息存储子服�
 DEFINE_string(push_service, "/service/push_service", "推送子服务名称（自身，便于跨实例转发）");
 
 DEFINE_string(redis_host, "127.0.0.1", "Redis 服务器访问地址");
+DEFINE_string(redis_seeds, "", "Redis Cluster 种子节点（逗号分隔，如 host1:6379,host2:6379）");
 DEFINE_int32(redis_port, 6379, "Redis 端口");
 DEFINE_int32(redis_db, 0, "Redis 库号");
 DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
@@ -52,6 +53,7 @@ int main(int argc, char *argv[])
     jwt_cfg.access_ttl_sec = 7200;
     psb.make_jwt_object(jwt_cfg);
 
+    psb.set_redis_seeds(FLAGS_redis_seeds);
     psb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
                           FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     psb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host,

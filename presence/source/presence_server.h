@@ -36,7 +36,7 @@ class PresenceAggregator {
 public:
     using ptr = std::shared_ptr<PresenceAggregator>;
 
-    explicit PresenceAggregator(std::shared_ptr<sw::redis::Redis> redis)
+    explicit PresenceAggregator(RedisClient::ptr redis)
         : _redis(std::move(redis)) {}
 
     Presence aggregate(const std::string& uid) {
@@ -152,12 +152,12 @@ public:
     }
 
 private:
-    std::shared_ptr<sw::redis::Redis> _redis;
+    RedisClient::ptr _redis;
 };
 
 class PresenceServiceImpl : public PresenceService {
 public:
-    PresenceServiceImpl(std::shared_ptr<sw::redis::Redis> redis,
+    PresenceServiceImpl(RedisClient::ptr redis,
                         const ServiceManager::ptr& channels,
                         const std::string& push_service_name)
         : _redis(std::move(redis)),
@@ -365,7 +365,7 @@ private:
         }
     }
 
-    std::shared_ptr<sw::redis::Redis> _redis;
+    RedisClient::ptr _redis;
     PresenceAggregator::ptr _aggregator;
     ServiceManager::ptr _channels;
     std::string _push_service_name;

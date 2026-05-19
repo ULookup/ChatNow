@@ -29,7 +29,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <sw/redis++/redis++.h>
+#include "dao/data_redis.hpp"
 #include "infra/logger.hpp"
 
 namespace chatnow
@@ -44,7 +44,7 @@ public:
     static constexpr int kLeaseSec = 300;
     static constexpr int kRenewSec = 60;
 
-    WorkerIdAllocator(const std::shared_ptr<sw::redis::Redis> &c,
+    WorkerIdAllocator(const RedisClient::ptr &c,
                       const std::string &service_name,
                       const std::string &owner)
         : _c(c), _service(service_name), _owner(owner),
@@ -155,7 +155,7 @@ private:
         });
     }
 
-    std::shared_ptr<sw::redis::Redis> _c;
+    RedisClient::ptr _c;
     std::string _service;
     std::string _owner;
     std::atomic<bool> _running;

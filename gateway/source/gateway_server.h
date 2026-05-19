@@ -454,6 +454,8 @@ inline void GatewayServer::push_notify(const std::string& target_uid,
 
 class GatewayServerBuilder {
 public:
+    void set_redis_seeds(const std::string& seeds) { _redis_seeds = seeds; }
+
     void make_redis_object(const std::string& host, int port, int db, bool keep_alive) {
         _redis_host = host; _redis_port = port; _redis_db = db; _redis_keep_alive = keep_alive;
     }
@@ -474,8 +476,15 @@ public:
     void make_server_object(int http_port) { _http_port = http_port; }
 
     GatewayServer::ptr build() {
-        auto redis = std::make_shared<sw::redis::Redis>(
-            fmt::format("tcp://{}:{}/{}", _redis_host, _redis_port, _redis_db));
+        chatnow::RedisClient::ptr redis;
+        if (!_redis_seeds.empty()) {
+            auto cluster = chatnow::RedisClusterFactory::create(_redis_seeds);
+            redis = std::make_shared<chatnow::RedisClient>(cluster);
+        } else {
+            auto r = std::make_shared<sw::redis::Redis>(
+                fmt::format("tcp://{}:{}/{}", _redis_host, _redis_port, _redis_db));
+            redis = std::make_shared<chatnow::RedisClient>(r);
+        }
         auto jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(_jwt_config);
         auto jwt_store = std::make_shared<::chatnow::auth::JwtStore>(redis);
 
@@ -502,6 +511,7 @@ public:
     }
 
 private:
+    std::string _redis_seeds;
     std::string _redis_host; int _redis_port = 6379, _redis_db = 0; bool _redis_keep_alive = true;
     ::chatnow::auth::JwtConfig _jwt_config;
     std::string _reg_host, _base;

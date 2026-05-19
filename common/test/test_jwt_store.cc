@@ -8,14 +8,14 @@
 #include <thread>
 
 namespace {
-std::shared_ptr<sw::redis::Redis> make_redis() {
+chatnow::RedisClient::ptr make_redis() {
     sw::redis::ConnectionOptions opt;
     opt.host = "127.0.0.1";
     opt.port = 6379;
     opt.db = 15;
     auto c = std::make_shared<sw::redis::Redis>(opt);
     c->flushdb();
-    return c;
+    return std::make_shared<chatnow::RedisClient>(c);
 }
 }  // namespace
 

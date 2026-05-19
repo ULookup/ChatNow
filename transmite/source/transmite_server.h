@@ -47,7 +47,7 @@ public:
                         const SeqGen::ptr &seq_gen,
                         const Members::ptr &members_cache,
                         const RateLimiter::ptr &rate_limiter,
-                        const std::shared_ptr<sw::redis::Redis> &redis)
+                        const RedisClient::ptr &redis)
                         : _identity_service_name(identity_service_name),
                         _conversation_service_name(conversation_service_name),
                         _message_service_name(message_service_name),
@@ -344,7 +344,7 @@ private:
     SeqGen::ptr _seq_gen;
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
-    std::shared_ptr<sw::redis::Redis> _redis;
+    RedisClient::ptr _redis;
 };
 
 class TransmiteServer
@@ -489,14 +489,22 @@ public:
         _publisher = std::make_shared<Publisher>(_mq_client, settings);
         LOG_INFO("Transmite MQ 已就绪: exchange={} (FANOUT, publisher-only)", exchange_name);
     }
-    /* brief: 构造 Redis 客户端 + SeqGen + Members + RateLimiter */
+    void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }
+
+    /* brief: 构造 Redis 客户端 + SeqGen + Members + RateLimiter（双模：单机 / Cluster） */
     void make_redis_object(const std::string &host, uint16_t port, int db,
                           bool keep_alive, int pool_size)
     {
-        _redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
-        _seq_gen = std::make_shared<SeqGen>(_redis);
-        _members_cache = std::make_shared<Members>(_redis);
-        _rate_limiter = std::make_shared<RateLimiter>(_redis);
+        if (!_redis_seeds.empty()) {
+            auto cluster = RedisClusterFactory::create(_redis_seeds, pool_size, keep_alive);
+            _redis_client = std::make_shared<RedisClient>(cluster);
+        } else {
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+            _redis_client = std::make_shared<RedisClient>(redis);
+        }
+        _seq_gen = std::make_shared<SeqGen>(_redis_client);
+        _members_cache = std::make_shared<Members>(_redis_client);
+        _rate_limiter = std::make_shared<RateLimiter>(_redis_client);
     }
     /* brief: 构造RPC服务器对象，并添加服务 */
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
@@ -528,7 +536,7 @@ public:
                                                                         _seq_gen,
                                                                         _members_cache,
                                                                         _rate_limiter,
-                                                                        _redis);
+                                                                        _redis_client);
         int ret = _rpc_server->AddService(transmite_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
@@ -575,7 +583,8 @@ private:
     Publisher::ptr _publisher;
     std::shared_ptr<SnowflakeId> _id_generator;
 
-    std::shared_ptr<sw::redis::Redis> _redis;
+    std::string _redis_seeds;
+    RedisClient::ptr _redis_client;
     SeqGen::ptr _seq_gen;
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;

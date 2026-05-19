@@ -891,12 +891,20 @@ public:
         _mysql_reaction = std::make_shared<MessageReactionTable>(_odb_db);
         _mysql_pin = std::make_shared<MessagePinTable>(_odb_db);
     }
+    void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }
+
     void make_redis_object(const std::string &host, uint16_t port, int db,
                            bool keep_alive, int pool_size) {
-        _redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
-        _seq_gen = std::make_shared<SeqGen>(_redis);
-        _push_outbox = std::make_shared<PushOutbox>(_redis);
-        _es_outbox = std::make_shared<ESOutbox>(_redis);
+        if (!_redis_seeds.empty()) {
+            auto cluster = RedisClusterFactory::create(_redis_seeds, pool_size, keep_alive);
+            _redis_client = std::make_shared<RedisClient>(cluster);
+        } else {
+            auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
+            _redis_client = std::make_shared<RedisClient>(redis);
+        }
+        _seq_gen = std::make_shared<SeqGen>(_redis_client);
+        _push_outbox = std::make_shared<PushOutbox>(_redis_client);
+        _es_outbox = std::make_shared<ESOutbox>(_redis_client);
     }
     void make_es_object(const std::vector<std::string> &hosts) {
         _es_client = ESClientFactory::create(hosts);
@@ -1087,7 +1095,8 @@ private:
 
 private:
     std::shared_ptr<odb::core::database> _odb_db;
-    std::shared_ptr<sw::redis::Redis> _redis;
+    std::string _redis_seeds;
+    RedisClient::ptr _redis_client;
     std::shared_ptr<elasticlient::Client> _es_client;
     MQClient::ptr _mq_client;
     Registry::ptr _registry;
