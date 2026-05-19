@@ -29,6 +29,7 @@
 #include <butil/logging.h>
 #include <atomic>
 #include <chrono>
+#include <optional>
 #include <thread>
 
 namespace chatnow
@@ -187,7 +188,7 @@ public:
 
         std::vector<std::string> member_id_list;
         for (int retry = 0; retry < 3; ++retry) {
-            member_id_list = resolve_members(chat_ssid);
+            member_id_list = resolve_members(chat_ssid, static_cast<brpc::Controller*>(controller));
             if (!member_id_list.empty()) break;
             if (retry < 2) std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
@@ -315,7 +316,8 @@ public:
         }
     }
 
-    std::vector<std::string> resolve_members(const std::string &chat_session_id) {
+    std::vector<std::string> resolve_members(const std::string &chat_session_id,
+                                               brpc::Controller *caller_cntl = nullptr) {
         std::string mkey = "members:" + chat_session_id;
 
         // ① L1 hit → fast path
@@ -371,7 +373,14 @@ public:
         }
 
         // ⑥ RPC to fetch members (INSIDE the mutex)
-        members = fetch_members_from_conversation_service_(chat_session_id);
+        auto result = fetch_members_from_conversation_service_(chat_session_id, caller_cntl);
+        if (!result.has_value()) {
+            // RPC failed — don't cache, just release and return empty
+            warm_mutex.unlock();
+            release_guard();
+            return {};
+        }
+        members = std::move(*result);
 
         // ⑦ Warm L2 + L1 (INSIDE the mutex)
         if (members.empty()) {
@@ -389,16 +398,20 @@ public:
         return members;
     }
 
-    std::vector<std::string> fetch_members_from_conversation_service_(const std::string &chat_session_id) {
+    std::optional<std::vector<std::string>> fetch_members_from_conversation_service_(
+        const std::string &chat_session_id, brpc::Controller *caller_cntl) {
         auto conv_channel = _mm_channels->choose(_conversation_service_name);
         if (!conv_channel) {
             LOG_ERROR("conversation_service 节点缺失 (warming members for {})", chat_session_id);
-            return {};
+            return std::nullopt;
         }
         ::chatnow::conversation::ConversationService_Stub conv_stub(conv_channel.get());
         ::chatnow::conversation::GetMemberIdsReq member_req;
         ::chatnow::conversation::GetMemberIdsRsp member_rsp;
         brpc::Controller member_cntl;
+        if (caller_cntl) {
+            chatnow::auth::forward_auth_metadata(caller_cntl, &member_cntl);
+        }
         member_req.set_request_id(chat_session_id);
         member_req.set_conversation_id(chat_session_id);
         conv_stub.GetMemberIds(&member_cntl, &member_req, &member_rsp, brpc::DoNothing());
@@ -406,7 +419,7 @@ public:
         if (member_cntl.Failed() || !member_rsp.header().success()) {
             LOG_ERROR("获取群成员失败 (warming): {} {}",
                       member_cntl.ErrorText(), member_rsp.header().error_message());
-            return {};
+            return std::nullopt;
         }
         std::vector<std::string> members;
         for (const auto &m : member_rsp.member_ids()) members.push_back(m);
