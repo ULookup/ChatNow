@@ -398,6 +398,20 @@ public:
         return members;
     }
 
+    std::string resolve_user_info(const std::string &uid) {
+        if (!_local_user_cache) return "";
+        std::string ukey = "user:" + uid;
+        auto cached = _local_user_cache->get(ukey);
+        if (cached.has_value()) return *cached;
+        return "";
+    }
+
+    void warm_user_info(const std::string &uid, const std::string &serialized_info) {
+        if (_local_user_cache && !serialized_info.empty())
+            _local_user_cache->set("user:" + uid, serialized_info,
+                                   randomized_ttl(std::chrono::seconds(45)));
+    }
+
     std::optional<std::vector<std::string>> fetch_members_from_conversation_service_(
         const std::string &chat_session_id, brpc::Controller *caller_cntl) {
         auto conv_channel = _mm_channels->choose(_conversation_service_name);
