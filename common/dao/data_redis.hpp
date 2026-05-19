@@ -189,9 +189,7 @@ namespace key
     inline constexpr const char* kPushRoute  = "im:push:route:";    // uid        -> push_instance_id (单设备)
     inline constexpr const char* kUnacked    = "im:unack:";         // uid        -> Sorted Set<msg_id, ts>
     inline constexpr const char* kPushOutbox     = "im:push:outbox";       // 全局 Sorted Set<serialized_payload, ts> 投递失败兜底
-    inline constexpr const char* kPushOutboxLock = "im:push:outbox:lock";  // M3 reaper 单实例租约 key
     inline constexpr const char* kCrossOutbox     = "im:push:cross_outbox";
-    inline constexpr const char* kCrossOutboxLock = "im:push:cross_outbox:lock";
 
     // --- Presence 域（Push 内模块） ---
     inline constexpr const char* kPresence        = "im:presence:";         // {uid} → HASH {state,last_active,custom_status}
@@ -766,47 +764,6 @@ public:
         try { _c->zrem(key::kPushOutbox, payload); }
         catch(std::exception &e) { LOG_ERROR("PushOutbox.remove 失败: {}", e.what()); }
     }
-
-    /* brief: M3 reaper 单实例租约 — SET NX EX 上锁；已持有则原子续约。
-     *        必须 Lua 原子，否则 acquire 的 GET+EXPIRE 与 release 的 GET+DEL 都有 TOCTOU race，
-     *        race 下两个实例可能同时认为自己持锁，导致 outbox 双发。
-     *        返回是否拿到 / 续到锁。
-     */
-    bool try_acquire_reaper_lease(const std::string &owner, int ttl_sec) {
-        static const char *kAcquireLua =
-            "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-            "    redis.call('EXPIRE', KEYS[1], ARGV[2]); return 1 "
-            "end "
-            "return 0";
-        try {
-            std::vector<std::string> keys = {key::kPushOutboxLock};
-            std::vector<std::string> args = {owner, std::to_string(ttl_sec)};
-            auto ret = _c->eval<long long>(kAcquireLua, keys.begin(), keys.end(),
-                                           args.begin(), args.end());
-            return ret == 1;
-        } catch(std::exception &e) {
-            LOG_ERROR("PushOutbox.try_acquire_reaper_lease 失败: {}", e.what());
-            return false;
-        }
-    }
-
-    /* brief: M3 reaper 主动释放租约（CAS：仅 owner 与自己一致时 DEL，原子） */
-    void release_reaper_lease(const std::string &owner) {
-        static const char *kReleaseLua =
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-            "    return redis.call('DEL', KEYS[1]) "
-            "end "
-            "return 0";
-        try {
-            std::vector<std::string> keys = {key::kPushOutboxLock};
-            std::vector<std::string> args = {owner};
-            _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
-                                args.begin(), args.end());
-        } catch(std::exception &e) {
-            LOG_ERROR("PushOutbox.release_reaper_lease 失败: {}", e.what());
-        }
-    }
 private:
     RedisClient::ptr _c;
 };
@@ -853,41 +810,6 @@ public:
         catch(std::exception &e) { LOG_ERROR("CrossInstanceOutbox.remove 失败: {}", e.what()); }
     }
 
-    bool try_acquire_reaper_lease(const std::string &owner, int ttl_sec) {
-        static const char *kAcquireLua =
-            "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-            "    redis.call('EXPIRE', KEYS[1], ARGV[2]); return 1 "
-            "end "
-            "return 0";
-        try {
-            std::vector<std::string> keys = {key::kCrossOutboxLock};
-            std::vector<std::string> args = {owner, std::to_string(ttl_sec)};
-            auto ret = _c->eval<long long>(kAcquireLua, keys.begin(), keys.end(),
-                                           args.begin(), args.end());
-            return ret == 1;
-        } catch(std::exception &e) {
-            LOG_ERROR("CrossInstanceOutbox.try_acquire_reaper_lease 失败: {}", e.what());
-            return false;
-        }
-    }
-
-    void release_reaper_lease(const std::string &owner) {
-        static const char *kReleaseLua =
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-            "    return redis.call('DEL', KEYS[1]) "
-            "end "
-            "return 0";
-        try {
-            std::vector<std::string> keys = {key::kCrossOutboxLock};
-            std::vector<std::string> args = {owner};
-            _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
-                                args.begin(), args.end());
-        } catch(std::exception &e) {
-            LOG_ERROR("CrossInstanceOutbox.release_reaper_lease 失败: {}", e.what());
-        }
-    }
-
 private:
     RedisClient::ptr _c;
 };
@@ -920,44 +842,9 @@ public:
         catch(std::exception &e) { LOG_ERROR("ESOutbox.remove 失败: {}", e.what()); }
     }
 
-    bool try_acquire_reaper_lease(const std::string &owner, int ttl_sec) {
-        static const char *kAcquireLua =
-            "if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then return 1 end "
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-            "    redis.call('EXPIRE', KEYS[1], ARGV[2]); return 1 "
-            "end "
-            "return 0";
-        try {
-            std::vector<std::string> keys = {kEsOutboxLockKey};
-            std::vector<std::string> args = {owner, std::to_string(ttl_sec)};
-            return _c->eval<long long>(kAcquireLua, keys.begin(), keys.end(),
-                                        args.begin(), args.end()) == 1;
-        } catch(std::exception &e) {
-            LOG_ERROR("ESOutbox.try_acquire_reaper_lease 失败: {}", e.what());
-            return false;
-        }
-    }
-
-    void release_reaper_lease(const std::string &owner) {
-        static const char *kReleaseLua =
-            "if redis.call('GET', KEYS[1]) == ARGV[1] then "
-            "    return redis.call('DEL', KEYS[1]) "
-            "end "
-            "return 0";
-        try {
-            std::vector<std::string> keys = {kEsOutboxLockKey};
-            std::vector<std::string> args = {owner};
-            _c->eval<long long>(kReleaseLua, keys.begin(), keys.end(),
-                                args.begin(), args.end());
-        } catch(std::exception &e) {
-            LOG_ERROR("ESOutbox.release_reaper_lease 失败: {}", e.what());
-        }
-    }
-
 private:
     RedisClient::ptr _c;
     static constexpr const char *kEsOutboxKey     = "im:es:outbox";
-    static constexpr const char *kEsOutboxLockKey = "im:es:outbox:lock";
 };
 
 // =============================================================================

@@ -366,6 +366,8 @@ public:
     void shutdown_cleanup() {
         LOG_INFO("Push 关停: 开始清理 OnlineRoute...");
         // SCAN all online keys and unbind those belonging to this instance
+        // NOTE: SCAN is per-node in Redis Cluster mode. Only keys on the node
+        // that this connection routes to will be scanned. Fallback: 30s kOnlineTtl auto-expiry.
         long long cursor = 0;
         do {
             std::vector<std::string> keys;
@@ -653,6 +655,8 @@ public:
             }
 
             std::vector<std::pair<std::string, std::string>> stale_entries;
+            // NOTE: SCAN is per-node in Redis Cluster mode. Only keys on the node
+            // that this connection routes to will be scanned. Fallback: 30s kOnlineTtl auto-expiry.
             long long cursor = 0;
             do {
                 std::vector<std::string> keys;
