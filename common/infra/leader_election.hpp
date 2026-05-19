@@ -5,16 +5,16 @@
 #include <etcd/Transaction.hpp>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include "infra/logger.hpp"
 
 namespace chatnow {
 
-// etcd Lease + Transaction CAS 选举锁。
-// 使用 etcdv3 Transaction 保证"仅当 key 不存在时才写入"，消除双主窗口。
 class LeaderElection {
 public:
     using ptr = std::shared_ptr<LeaderElection>;
@@ -38,6 +38,7 @@ public:
 
     void stop() {
         _running = false;
+        _cv.notify_all();
         if (_keep_alive) {
             try { _keep_alive->Cancel(); } catch (...) {}
         }
@@ -53,12 +54,11 @@ private:
                 auto lease_resp = _etcd->leasegrant(_ttl).get();
                 if (!lease_resp.is_ok()) {
                     LOG_WARN("LeaderElection leasegrant 失败: {}", lease_resp.error_message());
-                    std::this_thread::sleep_for(std::chrono::seconds(_ttl / 2));
+                    if (!_sleep_interruptible_(std::chrono::seconds(_ttl / 2))) return;
                     continue;
                 }
                 int64_t lease_id = lease_resp.value().lease();
 
-                // Transaction CAS: compare version(key) == 0 → key 不存在则写入
                 etcd::Transaction txn;
                 txn.setup_compare_version(_key, etcd::CompareResult::EQUAL, 0);
                 txn.setup_put_success(_key, _id, lease_id);
@@ -84,21 +84,24 @@ private:
                 LOG_ERROR("LeaderElection campaign 异常: {}", e.what());
             }
 
-            if (_running) {
-                std::this_thread::sleep_for(std::chrono::seconds(_ttl / 3));
-            }
+            if (!_sleep_interruptible_(std::chrono::seconds(_ttl / 3))) return;
         }
     }
 
     void _hold_leadership_(int64_t lease_id) {
         while (_running && _is_leader) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (!_sleep_interruptible_(std::chrono::seconds(1))) return;
             auto ttl_resp = _etcd->timetolive(lease_id).get();
             if (!ttl_resp.is_ok() || ttl_resp.value().ttl() <= 0) {
                 LOG_WARN("LeaderElection lease {} 过期，失去 leader", lease_id);
                 break;
             }
         }
+    }
+
+    bool _sleep_interruptible_(std::chrono::seconds duration) {
+        std::unique_lock<std::mutex> lk(_cv_mu);
+        return !_cv.wait_for(lk, duration, [this] { return !_running; });
     }
 
     std::shared_ptr<etcd::Client> _etcd;
@@ -112,6 +115,9 @@ private:
     std::atomic<bool> _running{false};
     std::atomic<bool> _is_leader{false};
     std::shared_ptr<etcd::KeepAlive> _keep_alive;
+
+    std::mutex _cv_mu;
+    std::condition_variable _cv;
 };
 
 } // namespace chatnow
