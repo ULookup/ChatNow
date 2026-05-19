@@ -355,9 +355,10 @@ public:
     TransmiteServer(const Discovery::ptr &service_discover,
                 const Registry::ptr &reg_client,
                 const std::shared_ptr<brpc::Server> &server,
-                const WorkerIdAllocator::ptr &worker_allocator = nullptr)
+                const WorkerIdAllocator::ptr &worker_allocator = nullptr,
+                const EtcdWorkIdAllocator::ptr &etcd_worker_allocator = nullptr)
         : _service_discover(service_discover), _reg_client(reg_client), _rpc_server(server),
-          _worker_allocator(worker_allocator) {}
+          _worker_allocator(worker_allocator), _etcd_worker_allocator(etcd_worker_allocator) {}
     ~TransmiteServer() {
         _watchdog_running.store(false);
         if(_watchdog_thread.joinable()) _watchdog_thread.join();
@@ -369,11 +370,14 @@ public:
      *    避免 SnowflakeId 用已被别人占据的 worker_id 继续发号产生重号。
      */
     void start() {
-        if(_worker_allocator) {
+        if(_worker_allocator || _etcd_worker_allocator) {
             _watchdog_running.store(true);
             _watchdog_thread = std::thread([this]() {
                 while(_watchdog_running.load()) {
-                    if(_worker_allocator->lease_lost()) {
+                    bool lost = false;
+                    if (_worker_allocator) lost = _worker_allocator->lease_lost();
+                    if (!lost && _etcd_worker_allocator) lost = _etcd_worker_allocator->lease_lost();
+                    if (lost) {
                         // brpc Stop(0) 不会打断 in-flight handler；
                         // 在 worker_id 已被别人占走的状态下，每多发一个雪花 ID 都
                         // 必然撞向对端实例，污染 message 主键唯一约束。
@@ -396,6 +400,7 @@ private:
     Registry::ptr _reg_client;          // 服务注册客户端
     std::shared_ptr<brpc::Server> _rpc_server;
     WorkerIdAllocator::ptr _worker_allocator;
+    EtcdWorkIdAllocator::ptr _etcd_worker_allocator;
     std::atomic<bool> _watchdog_running {false};
     std::thread _watchdog_thread;
 };
@@ -404,18 +409,22 @@ private:
 class TransmiteServerBuilder
 {
 public:
-    /* brief: 构造分布式有序ID生成器（worker_id 优先从 Redis 自动申请，否则用 fallback） */
+    /* brief: 构造分布式有序ID生成器（Cluster 模式用 etcd，单机模式用 Redis，否则 fallback） */
     void make_id_generator_object(uint64_t fallback_worker_id, uint64_t epoch_ms, bool wait_on_clock_backwards)
     {
         try {
             uint64_t worker_id = fallback_worker_id;
-            if(_redis) {
-                std::string owner = _instance_owner.empty() ? std::to_string(getpid()) : _instance_owner;
-                _worker_allocator = std::make_shared<WorkerIdAllocator>(_redis, "transmite", owner);
+            std::string owner = _instance_owner.empty() ? std::to_string(getpid()) : _instance_owner;
+            if (_etcd_client && !_redis_seeds.empty()) {
+                _etcd_worker_allocator = std::make_shared<EtcdWorkIdAllocator>(_etcd_client);
+                int allocated = _etcd_worker_allocator->acquire(owner, static_cast<int>(fallback_worker_id));
+                if (allocated >= 0) worker_id = static_cast<uint64_t>(allocated);
+            } else if (_redis_client) {
+                _worker_allocator = std::make_shared<WorkerIdAllocator>(_redis_client, "transmite", owner);
                 int allocated = _worker_allocator->acquire(static_cast<int>(fallback_worker_id));
-                if(allocated >= 0) worker_id = static_cast<uint64_t>(allocated);
+                if (allocated >= 0) worker_id = static_cast<uint64_t>(allocated);
             } else {
-                LOG_WARN("Redis 未初始化，worker_id 退回配置值 {}", fallback_worker_id);
+                LOG_WARN("Redis / etcd 未初始化，worker_id 退回配置值 {}", fallback_worker_id);
             }
             _id_generator = std::make_shared<SnowflakeId>(worker_id, epoch_ms, wait_on_clock_backwards);
             LOG_INFO("Snowflake worker_id={} epoch_ms={}", worker_id, epoch_ms);
@@ -425,6 +434,7 @@ public:
     }
     /* brief: 设置实例标识（host:pid），用于 worker_id 租约识别 */
     void set_instance_owner(const std::string &owner) { _instance_owner = owner; }
+    void set_etcd_client(std::shared_ptr<etcd::Client> etcd) { _etcd_client = etcd; }
     /* brief: 用于构造服务发现&信道管理客户端对象（含 message_service 用于幂等查询） */
     void make_discovery_object(const std::string &reg_host,
                             const std::string &base_service_name,
@@ -568,7 +578,7 @@ public:
 
         // M4: 把 worker_allocator 传给 server，让 watchdog 线程在 start() 中轮询 lease_lost
         TransmiteServer::ptr server = std::make_shared<TransmiteServer>(
-            _service_discover, _reg_client, _rpc_server, _worker_allocator);
+            _service_discover, _reg_client, _rpc_server, _worker_allocator, _etcd_worker_allocator);
         return server;
     }
 private:
@@ -589,7 +599,9 @@ private:
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
     std::string _instance_owner;
+    std::shared_ptr<etcd::Client> _etcd_client;
     WorkerIdAllocator::ptr _worker_allocator;
+    EtcdWorkIdAllocator::ptr _etcd_worker_allocator;
 
     Discovery::ptr _service_discover;   // 服务发现客户端
     Registry::ptr _reg_client;          // 服务注册客户端

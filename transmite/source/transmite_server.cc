@@ -56,6 +56,7 @@ int main(int argc, char *argv[])
     tsb.set_redis_seeds(FLAGS_redis_seeds);
     tsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
     tsb.set_instance_owner(FLAGS_access_host);
+    tsb.set_etcd_client(std::make_shared<etcd::Client>(FLAGS_registry_host));
     tsb.make_id_generator_object(FLAGS_instance_num, FLAGS_epoch_ms, FLAGS_wait_on_clock_backwards);
     tsb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host, FLAGS_mq_msg_exchange, FLAGS_mq_msg_queue, FLAGS_mq_msg_binding_key);
     tsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_identity_service, FLAGS_conversation_service, FLAGS_message_service);
