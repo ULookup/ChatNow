@@ -363,6 +363,28 @@ public:
         }
     }
 
+    void shutdown_cleanup() {
+        LOG_INFO("Push 关停: 开始清理 OnlineRoute...");
+        // SCAN all online keys and unbind those belonging to this instance
+        long long cursor = 0;
+        do {
+            std::vector<std::string> keys;
+            cursor = _redis->scan(cursor, "im:online:*", 100, std::back_inserter(keys));
+            for (const auto &key : keys) {
+                std::string uid = key.substr(std::string("im:online:").size());
+                std::unordered_map<std::string, std::string> device_map;
+                _redis->hgetall(key, std::inserter(device_map, device_map.end()));
+                for (const auto &[did, instance] : device_map) {
+                    if (instance == _instance_id) {
+                        _online_route->unbind(uid, did, _instance_id);
+                    }
+                }
+                if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
+            }
+        } while (cursor != 0);
+        LOG_INFO("Push 关停: OnlineRoute + L1 缓存已清理");
+    }
+
     /* brief: 给特定设备推送 KICKED 通知 */
     void publish_kicked(const std::string &uid, const std::string &device_id,
                         NotifyType reason, const std::string &msg) {
@@ -607,6 +629,56 @@ public:
         if (_cross_reaper_election) _cross_reaper_election->stop();
     }
 
+    const auto& connections() const { return _connections; }
+
+    void reap_stale_routes_(const std::string &push_service_dir,
+                            std::shared_ptr<etcd::Client> etcd_client,
+                            LeaderElection::ptr stale_reaper_election,
+                            std::atomic<bool> *running) {
+        while (running && running->load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            if (!stale_reaper_election || !stale_reaper_election->is_leader())
+                continue;
+
+            std::vector<std::string> online_instances;
+            try {
+                auto resp = etcd_client->ls(push_service_dir).get();
+                if (resp.is_ok()) {
+                    for (size_t i = 0; i < resp.keys().size(); ++i)
+                        online_instances.push_back(resp.value(i).as_string());
+                }
+            } catch (std::exception &e) {
+                LOG_WARN("StaleRoute reaper: etcd ls 失败: {}", e.what());
+                continue;
+            }
+
+            std::vector<std::pair<std::string, std::string>> stale_entries;
+            long long cursor = 0;
+            do {
+                std::vector<std::string> keys;
+                cursor = _redis->scan(cursor, "im:online:*", 100, std::back_inserter(keys));
+                for (const auto &key : keys) {
+                    std::string uid = key.substr(std::string("im:online:").size());
+                    std::unordered_map<std::string, std::string> device_map;
+                    _redis->hgetall(key, std::inserter(device_map, device_map.end()));
+                    for (const auto &[did, instance] : device_map) {
+                        if (std::find(online_instances.begin(), online_instances.end(), instance)
+                            == online_instances.end()) {
+                            stale_entries.emplace_back(uid, did);
+                        }
+                    }
+                }
+            } while (cursor != 0);
+
+            for (const auto &[uid, did] : stale_entries) {
+                _online_route->unbind(uid, did, "");
+                if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
+            }
+            if (!stale_entries.empty())
+                LOG_INFO("StaleRoute reaper: 移除 {} 条僵死路由", stale_entries.size());
+        }
+    }
+
 private:
     void _parse_outbox_member(const std::string &member,
                                std::string &b64,
@@ -701,9 +773,10 @@ public:
                const std::shared_ptr<brpc::Server> &rpc,
                server_t *ws_server,
                const MQClient::ptr &mq_client,
-               const Subscriber::ptr &push_subscriber)
+               const Subscriber::ptr &push_subscriber,
+               PushServiceImpl *push_service = nullptr)
         : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(ws_server),
-          _mq_client(mq_client), _push_subscriber(push_subscriber) {}
+          _mq_client(mq_client), _push_subscriber(push_subscriber), _push_service(push_service) {}
     ~PushServer() = default;
 
     void start() {
@@ -720,6 +793,12 @@ public:
         _push_subscriber.reset();
         _mq_client.reset();
         _ws_server->stop();
+
+        // 关停清理：遍历连接，主动清理 OnlineRoute 和 L1 缓存
+        if (_push_service) {
+            _push_service->shutdown_cleanup();
+        }
+
         if (_ws_thread.joinable()) _ws_thread.join();
         _rpc_server->Join();
         LOG_INFO("Push 关停完成");
@@ -732,6 +811,7 @@ private:
     server_t *_ws_server;
     MQClient::ptr _mq_client;
     Subscriber::ptr _push_subscriber;
+    PushServiceImpl *_push_service{nullptr};
     std::thread _ws_thread;
 };
 
@@ -878,6 +958,16 @@ public:
         _inflight_registry = std::make_shared<InflightRegistry>();
     }
 
+    void set_push_service_dir(const std::string &dir) { _push_service_dir = dir; }
+
+    void make_stale_reaper_election() {
+        if (!_etcd_client) return;
+        _stale_reaper_election = std::make_shared<LeaderElection>(
+            _etcd_client, "/chatnow/reaper/stale_routes", _instance_id, 30,
+            []() { LOG_INFO("StaleRoute reaper 成为 leader"); },
+            []() { LOG_INFO("StaleRoute reaper 失去 leader"); });
+    }
+
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
         if (!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
@@ -922,6 +1012,17 @@ public:
         std::string owner = _reaper_owner.empty()
             ? std::to_string(::getpid()) : _reaper_owner;
         _push_service->start_cross_outbox_reaper(owner);
+
+        // Stale route reaper
+        if (_stale_reaper_election) {
+            _stale_reaper_election->start();
+            _stale_reaper_running = true;
+            _stale_reaper_thread = std::thread([this]() {
+                _push_service->reap_stale_routes_(_push_service_dir, _etcd_client,
+                                                  _stale_reaper_election, &_stale_reaper_running);
+            });
+        }
+
         LOG_INFO("Push 服务启动: rpc_port={} ws_port={}", port, ws_port);
     }
 
@@ -931,7 +1032,8 @@ public:
                                             std::move(_rpc_server),
                                             &_ws_server,
                                             std::move(_mq_client),
-                                            std::move(_push_subscriber));
+                                            std::move(_push_subscriber),
+                                            _push_service);
     }
 
 private:
@@ -960,6 +1062,10 @@ private:
     LeaderElection::ptr _cross_reaper_election;
     LocalCache<RouteEntry>::ptr _local_route_cache;
     InflightRegistry::ptr _inflight_registry;
+    std::string _push_service_dir;
+    LeaderElection::ptr _stale_reaper_election;
+    std::thread _stale_reaper_thread;
+    std::atomic<bool> _stale_reaper_running{false};
 
     Connection::ptr _connections;
     server_t _ws_server;

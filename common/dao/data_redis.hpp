@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <vector>
 #include "infra/logger.hpp"
+#include "utils/random_ttl.hpp"
 
 namespace chatnow
 {
@@ -198,7 +199,7 @@ inline constexpr std::chrono::seconds kCodeTtl(60 * 5);             // 验证码
 inline constexpr std::chrono::seconds kLastMsgTtl(24 * 3600);       // 最近消息预览 24 小时
 inline constexpr std::chrono::seconds kReadAckTtl(24 * 3600);       // 已读暂存 24 小时
 inline constexpr std::chrono::seconds kMembersTtl(30 * 60);         // 成员缓存 30 分钟
-inline constexpr std::chrono::seconds kOnlineTtl(120);              // 在线路由 120s（依赖心跳续期）
+inline constexpr std::chrono::seconds kOnlineTtl(30);               // 在线路由 30s（依赖心跳续期，每 heartbeat 刷新）
 inline constexpr std::chrono::seconds kUnackedTtl(7 * 24 * 3600);   // 未 ack 重传缓冲 7 天
 
 
@@ -476,7 +477,7 @@ public:
     /* brief: 写最后一条消息预览（已序列化 JSON 字符串）；TTL 24h */
     void set(const std::string &ssid, const std::string &preview_json,
              std::chrono::seconds ttl = kLastMsgTtl) {
-        try { _c->set(key::kLastMsg + ssid, preview_json, ttl); }
+        try { _c->set(key::kLastMsg + ssid, preview_json, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("LastMessage.set 失败 {}: {}", ssid, e.what()); }
     }
     sw::redis::OptionalString get(const std::string &ssid) {
@@ -543,7 +544,7 @@ public:
         try {
             std::string k = key::kReadAck + std::to_string(message_id);
             _c->sadd(k, uid);
-            _c->expire(k, ttl);
+            _c->expire(k, randomized_ttl(ttl));
         } catch(std::exception &e) {
             LOG_ERROR("ReadAck.ack 失败 mid={} uid={}: {}", message_id, uid, e.what());
         }
@@ -600,7 +601,7 @@ public:
         try {
             std::string k = key::kMembers + ssid;
             _c->sadd(k, uids.begin(), uids.end());
-            _c->expire(k, ttl);
+            _c->expire(k, randomized_ttl(ttl));
         } catch(std::exception &e) {
             LOG_ERROR("Members.warm 失败 {}: {}", ssid, e.what());
         }
@@ -618,6 +619,17 @@ public:
     void invalidate(const std::string &ssid) {
         try { _c->del(key::kMembers + ssid); }
         catch(std::exception &e) { LOG_ERROR("Members.invalidate 失败 {}: {}", ssid, e.what()); }
+    }
+    void touch_ttl(const std::string &ssid, std::chrono::seconds ttl = kMembersTtl) {
+        try { _c->expire(key::kMembers + ssid, randomized_ttl(ttl)); }
+        catch (std::exception &e) { LOG_ERROR("Members.touch_ttl 失败 {}: {}", ssid, e.what()); }
+    }
+    void warm_sentinel(const std::string &ssid, std::chrono::seconds ttl = std::chrono::seconds(60)) {
+        try {
+            std::string k = key::kMembers + ssid;
+            _c->sadd(k, "__sentinel__");
+            _c->expire(k, randomized_ttl(ttl));
+        } catch (std::exception &e) { LOG_ERROR("Members.warm_sentinel 失败 {}: {}", ssid, e.what()); }
     }
 private:
     RedisClient::ptr _c;
@@ -640,14 +652,14 @@ public:
         try {
             std::string k = key::kOnline + uid;
             _c->hset(k, device_id, push_instance);
-            _c->expire(k, ttl);
+            _c->expire(k, randomized_ttl(ttl));
         } catch(std::exception &e) {
             LOG_ERROR("OnlineRoute.bind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what());
         }
     }
     /* brief: 心跳续期（续整个 uid 的 HASH） */
     void touch(const std::string &uid, std::chrono::seconds ttl = kOnlineTtl) {
-        try { _c->expire(key::kOnline + uid, ttl); }
+        try { _c->expire(key::kOnline + uid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
     }
     /* brief: 设备下线 — HDEL uid did */
