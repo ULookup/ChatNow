@@ -1,45 +1,43 @@
 #include "auth/forward_auth.hpp"
-#include "auth/metadata_keys.hpp"
+#include "common/auth/metadata.pb.h"
 #include <brpc/controller.h>
 #include <gtest/gtest.h>
 
 using namespace chatnow::auth;
 
 namespace {
-const std::string* hdr(const brpc::Controller& c, const char* k) {
-    return c.http_request().GetHeader(k);
+void set_meta(brpc::Controller& c,
+              std::function<void(chatnow::rpc::RpcMetadata&)> fill) {
+    chatnow::rpc::RpcMetadata meta;
+    fill(meta);
+    std::string data;
+    meta.SerializeToString(&data);
+    c.request_attachment().append(data);
 }
-std::string read(const brpc::Controller& c, const char* k) {
-    auto* v = hdr(c, k);
-    return v ? *v : "";
+
+bool meta_equal(const brpc::Controller& a, const brpc::Controller& b) {
+    return a.request_attachment() == b.request_attachment();
 }
 }
 
 TEST(ForwardAuthMetadata, CopiesAllFourFields) {
     brpc::Controller in, out;
-    in.http_request().SetHeader(kMetaTraceId,  "t");
-    in.http_request().SetHeader(kMetaUserId,   "u");
-    in.http_request().SetHeader(kMetaDeviceId, "d");
-    in.http_request().SetHeader(kMetaJwtJti,   "j");
+    set_meta(in, [](chatnow::rpc::RpcMetadata& m) {
+        m.set_trace_id("t");
+        m.set_user_id("u");
+        m.set_device_id("d");
+        m.set_jwt_jti("j");
+    });
 
     forward_auth_metadata(&in, &out);
 
-    EXPECT_EQ(read(out, kMetaTraceId),  "t");
-    EXPECT_EQ(read(out, kMetaUserId),   "u");
-    EXPECT_EQ(read(out, kMetaDeviceId), "d");
-    EXPECT_EQ(read(out, kMetaJwtJti),   "j");
+    EXPECT_TRUE(meta_equal(in, out));
 }
 
-TEST(ForwardAuthMetadata, SkipsMissingFields) {
+TEST(ForwardAuthMetadata, CopiesEmptyAttachment) {
     brpc::Controller in, out;
-    in.http_request().SetHeader(kMetaTraceId, "t");
-
     forward_auth_metadata(&in, &out);
-
-    EXPECT_EQ(read(out, kMetaTraceId),  "t");
-    EXPECT_EQ(hdr(out, kMetaUserId),    nullptr);
-    EXPECT_EQ(hdr(out, kMetaDeviceId),  nullptr);
-    EXPECT_EQ(hdr(out, kMetaJwtJti),    nullptr);
+    EXPECT_TRUE(meta_equal(in, out));
 }
 
 TEST(ForwardAuthMetadata, NullSafetyInOrOut) {
