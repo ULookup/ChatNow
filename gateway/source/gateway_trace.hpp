@@ -35,19 +35,11 @@ inline std::string resolve_trace_id(const httplib::Request& req) {
  *   user_id/device_id 可空；非空时也填入 meta。
  */
 inline std::string gateway_setup_trace(const httplib::Request& req,
-                                       ::chatnow::rpc::RpcMetadata& meta,
-                                       const std::string& user_id = "",
-                                       const std::string& device_id = "")
+                                       ::chatnow::rpc::RpcMetadata& meta)
 {
     std::string trace_id = resolve_trace_id(req);
     meta.set_trace_id(trace_id);
-    if (!user_id.empty()) {
-        meta.set_user_id(user_id);
-    }
-    if (!device_id.empty()) {
-        meta.set_device_id(device_id);
-    }
-    ::chatnow::log::LogContext::set(trace_id, user_id, device_id);
+    ::chatnow::log::LogContext::set(trace_id, "", "");
     return trace_id;
 }
 
