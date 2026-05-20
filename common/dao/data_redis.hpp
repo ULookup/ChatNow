@@ -858,10 +858,10 @@ public:
     UnackedPush(const RedisClient::ptr &c) : _c(c) {}
 
     static std::string key_for(const std::string &uid, const std::string &device_id) {
-        return std::string(key::kUnacked) + uid + ":" + device_id;
+        return std::string(key::kUnacked) + "{" + uid + ":" + device_id + "}";
     }
     static std::string idx_key_for(const std::string &uid, const std::string &device_id) {
-        return std::string(key::kUnacked) + "idx:" + uid + ":" + device_id;
+        return std::string(key::kUnacked) + "idx:{" + uid + ":" + device_id + "}";
     }
 
     /* brief: 入待重传队列（per-device，存 payload_b64 直接用） */
@@ -983,7 +983,7 @@ public:
 
     /* 添加在线设备：与 Push._write_presence_online_ 使用相同的 per-device HASH 模式 */
     void add_device(const std::string &uid, const std::string &device_id) {
-        auto k = std::string("im:presence:device:") + uid + ":" + device_id;
+        auto k = std::string("im:presence:device:{") + uid + "}:" + device_id;
         _r->hset(k, "state", "ONLINE");
         _r->expire(k, std::chrono::seconds(120));
     }
@@ -994,7 +994,7 @@ public:
         auto cursor = 0ULL;
         while (true) {
             std::vector<std::string> batch;
-            cursor = _r->scan(cursor, "im:presence:device:" + uid + ":*", 100,
+            cursor = _r->scan(cursor, "im:presence:device:{" + uid + "}:*", 100,
                              std::back_inserter(batch));
             for (auto& k : batch) {
                 auto pos = k.rfind(':');

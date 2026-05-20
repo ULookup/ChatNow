@@ -49,7 +49,7 @@ public:
         while (true) {
             std::vector<std::string> batch;
             cursor = _redis->scan(
-                cursor, "im:presence:device:" + uid + ":*", 100,
+                cursor, "im:presence:device:{" + uid + "}:*", 100,
                 std::back_inserter(batch));
             device_keys.insert(device_keys.end(), batch.begin(), batch.end());
             if (cursor == 0) break;

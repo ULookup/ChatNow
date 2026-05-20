@@ -5,6 +5,7 @@ set(target "presence_server")
 
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
 set(proto_files
+    common/auth/metadata.proto
     common/types.proto
     common/error.proto
     common/envelope.proto

@@ -1,5 +1,5 @@
 #include "auth/auth_context.hpp"
-#include "auth/metadata_keys.hpp"
+#include "common/auth/metadata.pb.h"
 #include "error/service_error.hpp"
 #include "error/error_codes.hpp"
 #include <brpc/controller.h>
@@ -8,22 +8,23 @@
 using namespace chatnow::auth;
 
 namespace {
-// brpc::Controller 不可拷贝/移动，因此用 in-place 填充而非返回值
-void fill_cntl(brpc::Controller& cntl,
-               std::initializer_list<std::pair<std::string, std::string>> headers) {
-    for (const auto& kv : headers) {
-        cntl.http_request().SetHeader(kv.first, kv.second);
-    }
+template<typename F>
+void fill_cntl(brpc::Controller& cntl, F fill) {
+    chatnow::rpc::RpcMetadata meta;
+    fill(meta);
+    std::string data;
+    meta.SerializeToString(&data);
+    cntl.request_attachment().append(data);
 }
 }
 
 TEST(ExtractAuth, AllFieldsPresent) {
     brpc::Controller cntl;
-    fill_cntl(cntl, {
-        {kMetaUserId,   "u_1"},
-        {kMetaDeviceId, "d_1"},
-        {kMetaTraceId,  "t_1"},
-        {kMetaJwtJti,   "jti_1"},
+    fill_cntl(cntl, [](chatnow::rpc::RpcMetadata& m) {
+        m.set_user_id("u_1");
+        m.set_device_id("d_1");
+        m.set_trace_id("t_1");
+        m.set_jwt_jti("jti_1");
     });
     AuthContext ctx = extract_auth(&cntl);
     EXPECT_EQ(ctx.user_id,   "u_1");
@@ -34,9 +35,9 @@ TEST(ExtractAuth, AllFieldsPresent) {
 
 TEST(ExtractAuth, TraceIdOptional) {
     brpc::Controller cntl;
-    fill_cntl(cntl, {
-        {kMetaUserId,   "u_1"},
-        {kMetaDeviceId, "d_1"},
+    fill_cntl(cntl, [](chatnow::rpc::RpcMetadata& m) {
+        m.set_user_id("u_1");
+        m.set_device_id("d_1");
     });
     AuthContext ctx = extract_auth(&cntl);
     EXPECT_EQ(ctx.user_id,  "u_1");
@@ -45,9 +46,9 @@ TEST(ExtractAuth, TraceIdOptional) {
 
 TEST(ExtractAuth, MissingUserIdThrows) {
     brpc::Controller cntl;
-    fill_cntl(cntl, {
-        {kMetaDeviceId, "d_1"},
-        {kMetaTraceId,  "t_1"},
+    fill_cntl(cntl, [](chatnow::rpc::RpcMetadata& m) {
+        m.set_device_id("d_1");
+        m.set_trace_id("t_1");
     });
     try {
         extract_auth(&cntl);
@@ -59,13 +60,24 @@ TEST(ExtractAuth, MissingUserIdThrows) {
 
 TEST(ExtractAuth, MissingDeviceIdThrows) {
     brpc::Controller cntl;
-    fill_cntl(cntl, {
-        {kMetaUserId,  "u_1"},
-        {kMetaTraceId, "t_1"},
+    fill_cntl(cntl, [](chatnow::rpc::RpcMetadata& m) {
+        m.set_user_id("u_1");
+        m.set_trace_id("t_1");
     });
     EXPECT_THROW(extract_auth(&cntl), chatnow::ServiceError);
 }
 
 TEST(ExtractAuth, NullControllerThrows) {
     EXPECT_THROW(extract_auth(nullptr), chatnow::ServiceError);
+}
+
+TEST(ExtractAuth, EmptyAttachmentThrows) {
+    brpc::Controller cntl;
+    EXPECT_THROW(extract_auth(&cntl), chatnow::ServiceError);
+}
+
+TEST(ExtractAuth, CorruptedAttachmentThrows) {
+    brpc::Controller cntl;
+    cntl.request_attachment().append("\x01");
+    EXPECT_THROW(extract_auth(&cntl), chatnow::ServiceError);
 }

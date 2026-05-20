@@ -6,6 +6,7 @@ set(target "conversation_server")
 # 1. proto
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
 set(proto_files common/types.proto common/error.proto common/envelope.proto
+                common/auth/metadata.proto
                 message/message_types.proto
                 message/message_service.proto
                 identity/identity_service.proto
