@@ -181,11 +181,13 @@ private:
             return;  // 401 已写
         }
 
-        // 写 X-Trace-Id 响应头
+        // 写 X-Trace-Id 响应头，并为 handle_request 自身的日志设置 trace 上下文
         std::string trace_id = ::chatnow::gateway::resolve_trace_id(req);
+        ::chatnow::log::LogContext::set(trace_id, "", "");
         res.set_header("X-Trace-Id", trace_id);
 
         // 转发（forward() 内部会创建自己的 RpcMetadata 并写入 attachment）
+        // dummy_cntl 仅用于满足 handler 签名，handler 内部忽略此参数并自行构造 Controller
         brpc::Controller dummy_cntl;
         matched->handler(req, res, a, _channels, matched->timeout_ms, dummy_cntl);
     }

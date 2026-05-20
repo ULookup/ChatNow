@@ -122,7 +122,7 @@ public:
     }
 
     /* brief: IdentityService.Logout —— 吊销当前设备的 access + refresh
-     * metadata 必填：x-user-id / x-device-id / x-jwt-jti（P1 extract_auth）
+     * metadata 必填：user_id / device_id / jwt_jti（P1 extract_auth 从 RpcMetadata 读取）
      */
     void Logout(::google::protobuf::RpcController* controller,
                 const ::chatnow::identity::LogoutReq* request,

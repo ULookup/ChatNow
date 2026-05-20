@@ -6,10 +6,10 @@
  * RPC handler 入口统一调用 extract_auth(cntl) 解析 brpc request_attachment
  * 中的 RpcMetadata（由 Gateway 写入）。
  *
- * 强校验：x-user-id 与 x-device-id 缺失 → throw ServiceError(SYSTEM_INTERNAL_ERROR)。
+ * 强校验：user_id 与 device_id 缺失 → throw ServiceError(SYSTEM_INTERNAL_ERROR)。
  *   理由：Gateway 必须写入；缺失说明调用方未透传或 Gateway 出 bug，
  *   不属于业务错误，对客户端而言是 9001 内部错误。
- * 例外：x-trace-id 缺失时使用空字符串（不抛错），理由：内部 worker
+ * 例外：trace_id 缺失时使用空字符串（不抛错），理由：内部 worker
  *   可能不带 trace_id；扩散到日志时简单缺一行字段，不影响业务。
  */
 
@@ -29,6 +29,10 @@ struct AuthContext {
     std::string jwt_jti;       // 可空
 };
 
+/* brief: 从 brpc request_attachment 解析 RpcMetadata 并校验必填字段。
+ *   user_id/device_id 缺失 → throw ServiceError(kSystemInternalError)。
+ *   trace_id 缺失 → 空字符串（不抛错）。
+ */
 inline AuthContext extract_auth(brpc::Controller* cntl) {
     chatnow::rpc::RpcMetadata meta;
     bool ok = false;

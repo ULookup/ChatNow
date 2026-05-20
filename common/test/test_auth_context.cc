@@ -8,8 +8,8 @@
 using namespace chatnow::auth;
 
 namespace {
-void fill_cntl(brpc::Controller& cntl,
-               std::function<void(chatnow::rpc::RpcMetadata&)> fill) {
+template<typename F>
+void fill_cntl(brpc::Controller& cntl, F fill) {
     chatnow::rpc::RpcMetadata meta;
     fill(meta);
     std::string data;
@@ -73,5 +73,11 @@ TEST(ExtractAuth, NullControllerThrows) {
 
 TEST(ExtractAuth, EmptyAttachmentThrows) {
     brpc::Controller cntl;
+    EXPECT_THROW(extract_auth(&cntl), chatnow::ServiceError);
+}
+
+TEST(ExtractAuth, CorruptedAttachmentThrows) {
+    brpc::Controller cntl;
+    cntl.request_attachment().append("\x01");
     EXPECT_THROW(extract_auth(&cntl), chatnow::ServiceError);
 }

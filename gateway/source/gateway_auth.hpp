@@ -24,7 +24,7 @@
 #include "common/envelope.pb.h"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
-#include "gateway_trace.hpp"
+#include "log/log_context.hpp"
 #include "infra/logger.hpp"
 
 #include "httplib.h"
@@ -106,6 +106,9 @@ inline bool jwt_authenticate(const httplib::Request& request,
 }
 
 /* brief: 将 JWT claims 写入 RpcMetadata（user_id, device_id, jwt_jti）
+ *   并补填 LogContext 的身份字段（trace_id 由 gateway_setup_trace 预先填入）。
+ *
+ *   前置条件：gateway_setup_trace 必须先于本函数调用，以保证 meta.trace_id() 非空。
  */
 inline void apply_auth_to_brpc(::chatnow::rpc::RpcMetadata& meta,
                                const AuthInfo& a)
