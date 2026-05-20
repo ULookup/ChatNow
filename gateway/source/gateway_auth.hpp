@@ -119,6 +119,9 @@ inline void apply_auth_to_brpc(::chatnow::rpc::RpcMetadata& meta,
     if (a.authed && !a.jwt_jti.empty()) {
         meta.set_jwt_jti(a.jwt_jti);
     }
+    ::chatnow::log::LogContext::set(
+        ::chatnow::log::LogContext::current().trace_id,
+        a.user_id, a.device_id);
 }
 
 /* brief: 把 RpcMetadata 序列化写入 brpc Controller 的 request_attachment
