@@ -36,7 +36,8 @@ inline AuthContext extract_auth(brpc::Controller* cntl) {
         ok = meta.ParseFromString(cntl->request_attachment().to_string());
     }
     if (!ok) {
-        LOG_WARN("Failed to parse RpcMetadata from attachment");
+        LOG_WARN("Failed to parse RpcMetadata from attachment, size={}",
+                 cntl ? cntl->request_attachment().size() : 0);
         throw ServiceError(::chatnow::error::kSystemInternalError,
                            "missing auth metadata: user_id/device_id required");
     }
