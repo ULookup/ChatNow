@@ -9,6 +9,7 @@ set(test_client "media_client")
 # 3.1 protoc：生成 proto 框架代码
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
 set(proto_files
+    common/auth/metadata.proto
     common/types.proto
     common/error.proto
     common/envelope.proto
