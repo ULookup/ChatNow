@@ -1,32 +1,26 @@
 #pragma once
 
 /**
- * gateway_auth — JWT 鉴权中间件 + brpc metadata 写入
+ * gateway_auth — JWT 鉴权中间件 + RpcMetadata 写入
  * 横切 spec §2.5
  *
  * 入口契约（每个 handler 顶部一行）：
  *
  *   chatnow::gateway::LogContextScope _trace_scope;
+ *   chatnow::rpc::RpcMetadata meta;
  *   AuthInfo a;
  *   if (!chatnow::gateway::jwt_authenticate(request, response, _jwt_codec,
  *                                            _jwt_store, /*whitelisted=*\/false, a)) {
  *       return;  // 401 已写
  *   }
  *   ...
- *   brpc::Controller cntl;
- *   chatnow::gateway::apply_auth_to_brpc(request, cntl, a);
- *
- * 白名单路径（Login/Register/SendVerifyCode/RefreshToken）传 whitelisted=true：
- *   - 不解析 Authorization header
- *   - 仍调 gateway_setup_trace 生成 trace_id（通过 apply_auth_to_brpc）
- *
- * 非白名单路径若 Authorization 缺失/无效/过期/被吊销 → jwt_authenticate
- * 写 401（HTTP）+ 简单 ResponseHeader 风格 body，并返回 false。
+ *   chatnow::gateway::apply_auth_to_brpc(meta, a);
+ *   chatnow::gateway::apply_metadata_to_brpc(meta, cntl);
  */
 
 #include "auth/jwt_codec.hpp"
 #include "auth/jwt_store.hpp"
-#include "auth/metadata_keys.hpp"
+#include "common/auth/metadata.pb.h"
 #include "common/envelope.pb.h"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
@@ -111,19 +105,30 @@ inline bool jwt_authenticate(const httplib::Request& request,
     }
 }
 
-/* brief: 调 gateway_setup_trace 解析 trace_id 并把 user_id/device_id/jwt_jti
- *        写入 brpc cntl HTTP header；返回 trace_id（调用方填回 X-Trace-Id 响应头）
+/* brief: 将 JWT claims 写入 RpcMetadata（user_id, device_id, jwt_jti）
  */
-inline std::string apply_auth_to_brpc(const httplib::Request& request,
-                                      brpc::Controller& cntl,
-                                      const AuthInfo& a)
+inline void apply_auth_to_brpc(::chatnow::rpc::RpcMetadata& meta,
+                               const AuthInfo& a)
 {
-    std::string trace_id = ::chatnow::gateway::gateway_setup_trace(
-        request, cntl, a.user_id, a.device_id);
-    if (a.authed && !a.jwt_jti.empty()) {
-        cntl.http_request().SetHeader(::chatnow::auth::kMetaJwtJti, a.jwt_jti);
+    if (!a.user_id.empty()) {
+        meta.set_user_id(a.user_id);
     }
-    return trace_id;
+    if (!a.device_id.empty()) {
+        meta.set_device_id(a.device_id);
+    }
+    if (a.authed && !a.jwt_jti.empty()) {
+        meta.set_jwt_jti(a.jwt_jti);
+    }
+}
+
+/* brief: 把 RpcMetadata 序列化写入 brpc Controller 的 request_attachment
+ */
+inline void apply_metadata_to_brpc(const ::chatnow::rpc::RpcMetadata& meta,
+                                   brpc::Controller& cntl)
+{
+    std::string data;
+    meta.SerializeToString(&data);
+    cntl.request_attachment().append(data);
 }
 
 }  // namespace chatnow::gateway
