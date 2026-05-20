@@ -12,6 +12,7 @@
 #include "dao/data_redis.hpp"
 #include "auth/auth_context.hpp"
 #include "auth/forward_auth.hpp"
+#include "common/auth/metadata.pb.h"
 #include "auth/jwt_codec.hpp"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
@@ -467,7 +468,7 @@ private:
 
     void _write_presence_online_(const std::string &uid, const std::string &did) {
         try {
-            std::string k = std::string("im:presence:device:") + uid + ":" + did;
+            std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
             _redis->hset(k, "state", "ONLINE");
             _redis->hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
