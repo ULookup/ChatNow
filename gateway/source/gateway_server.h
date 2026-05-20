@@ -122,8 +122,7 @@ private:
         cntl.set_timeout_ms(timeout_ms);
 
         ::chatnow::rpc::RpcMetadata meta;
-        ::chatnow::gateway::gateway_setup_trace(
-            httpreq, meta, auth.user_id, auth.device_id);
+        ::chatnow::gateway::gateway_setup_trace(httpreq, meta);
         ::chatnow::gateway::apply_auth_to_brpc(meta, auth);
         ::chatnow::gateway::apply_metadata_to_brpc(meta, cntl);
 
@@ -182,11 +181,8 @@ private:
             return;  // 401 已写
         }
 
-        // 写 X-Trace-Id 响应头（trace 已由 forward() 内 gateway_setup_trace 处理，
-        // 这里只为 handle_request 自己的日志设置 LogContext）
-        ::chatnow::rpc::RpcMetadata meta;
-        std::string trace_id = ::chatnow::gateway::gateway_setup_trace(
-            req, meta);
+        // 写 X-Trace-Id 响应头
+        std::string trace_id = ::chatnow::gateway::resolve_trace_id(req);
         res.set_header("X-Trace-Id", trace_id);
 
         // 转发（forward() 内部会创建自己的 RpcMetadata 并写入 attachment）
