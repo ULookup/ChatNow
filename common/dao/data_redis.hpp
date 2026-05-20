@@ -983,7 +983,7 @@ public:
 
     /* 添加在线设备：与 Push._write_presence_online_ 使用相同的 per-device HASH 模式 */
     void add_device(const std::string &uid, const std::string &device_id) {
-        auto k = std::string("im:presence:device:") + uid + ":" + device_id;
+        auto k = std::string("im:presence:device:{") + uid + "}:" + device_id;
         _r->hset(k, "state", "ONLINE");
         _r->expire(k, std::chrono::seconds(120));
     }
@@ -994,7 +994,7 @@ public:
         auto cursor = 0ULL;
         while (true) {
             std::vector<std::string> batch;
-            cursor = _r->scan(cursor, "im:presence:device:" + uid + ":*", 100,
+            cursor = _r->scan(cursor, "im:presence:device:{" + uid + "}:*", 100,
                              std::back_inserter(batch));
             for (auto& k : batch) {
                 auto pos = k.rfind(':');
