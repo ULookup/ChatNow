@@ -19,6 +19,7 @@
 #include "utils/local_cache.hpp"
 #include "utils/inflight.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/trace_id.hpp"
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
@@ -87,12 +88,6 @@ public:
         for (const auto &did : request->target_device_ids()) target_dids.insert(did);
         bool filter_devices = !target_dids.empty();
         try {
-            // auth 提取失败不阻塞（PushToUser 不依赖 auth，所有数据来自 request）
-            try {
-                auto auth = ::chatnow::auth::extract_auth(cntl);
-            } catch (const ::chatnow::ServiceError&) {
-                // 内部调用方可能未设置 auth metadata；可接受
-            }
             response->mutable_header()->set_success(true);
             response->mutable_header()->set_error_code(::chatnow::error::kOK);
             response->mutable_header()->set_request_id(request->request_id());
@@ -153,9 +148,6 @@ public:
         std::unordered_map<std::string, unsigned long> uid2seq;
         for (const auto &p : request->user_seqs()) uid2seq[p.user_id()] = p.user_seq();
         try {
-            try {
-                auto auth = ::chatnow::auth::extract_auth(cntl);
-            } catch (const ::chatnow::ServiceError&) {}
             response->mutable_header()->set_success(true);
             response->mutable_header()->set_error_code(::chatnow::error::kOK);
             response->mutable_header()->set_request_id(request->request_id());
@@ -349,6 +341,7 @@ public:
             ::chatnow::rpc::RpcMetadata meta;
             meta.set_user_id(ack.user_id());
             meta.set_device_id(ack.device_id());
+            meta.set_trace_id(::chatnow::utils::gen_trace_id());
             std::string data;
             meta.SerializeToString(&data);
             closure->cntl.request_attachment().append(data);
