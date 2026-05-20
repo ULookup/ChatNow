@@ -120,7 +120,13 @@ private:
         Stub stub(ch.get());
         brpc::Controller cntl;
         cntl.set_timeout_ms(timeout_ms);
-        ::chatnow::gateway::apply_auth_to_brpc(httpreq, cntl, auth);
+
+        ::chatnow::rpc::RpcMetadata meta;
+        ::chatnow::gateway::gateway_setup_trace(
+            httpreq, meta, auth.user_id, auth.device_id);
+        ::chatnow::gateway::apply_auth_to_brpc(meta, auth);
+        ::chatnow::gateway::apply_metadata_to_brpc(meta, cntl);
+
         (stub.*method)(&cntl, &pb_req, &pb_rsp, nullptr);
 
         if (cntl.Failed()) {
@@ -176,13 +182,15 @@ private:
             return;  // 401 已写
         }
 
-        // 写 X-Trace-Id 响应头
-        brpc::Controller dummy_cntl;
+        // 写 X-Trace-Id 响应头（trace 已由 forward() 内 gateway_setup_trace 处理，
+        // 这里只为 handle_request 自己的日志设置 LogContext）
+        ::chatnow::rpc::RpcMetadata meta;
         std::string trace_id = ::chatnow::gateway::gateway_setup_trace(
-            req, dummy_cntl, a.user_id, a.device_id);
+            req, meta);
         res.set_header("X-Trace-Id", trace_id);
 
-        // 转发
+        // 转发（forward() 内部会创建自己的 RpcMetadata 并写入 attachment）
+        brpc::Controller dummy_cntl;
         matched->handler(req, res, a, _channels, matched->timeout_ms, dummy_cntl);
     }
 
