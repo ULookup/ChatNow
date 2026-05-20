@@ -858,10 +858,10 @@ public:
     UnackedPush(const RedisClient::ptr &c) : _c(c) {}
 
     static std::string key_for(const std::string &uid, const std::string &device_id) {
-        return std::string(key::kUnacked) + uid + ":" + device_id;
+        return std::string(key::kUnacked) + "{" + uid + ":" + device_id + "}";
     }
     static std::string idx_key_for(const std::string &uid, const std::string &device_id) {
-        return std::string(key::kUnacked) + "idx:" + uid + ":" + device_id;
+        return std::string(key::kUnacked) + "idx:{" + uid + ":" + device_id + "}";
     }
 
     /* brief: 入待重传队列（per-device，存 payload_b64 直接用） */
