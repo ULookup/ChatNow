@@ -345,11 +345,13 @@ public:
             closure->req.set_request_id(ack.user_id());
             closure->req.set_conversation_id(ack.conversation_id());
             closure->req.set_seq_id(ack.user_seq());
-            // 手动设置 auth headers：WS handler 无入站 RPC context，extract_auth 需这些字段
-            closure->cntl.http_request().SetHeader("x-user-id", ack.user_id());
-            closure->cntl.http_request().SetHeader("x-device-id", ack.device_id());
-            closure->cntl.http_request().SetHeader("x-trace-id", "");
-            closure->cntl.http_request().SetHeader("x-jwt-jti", "");
+            // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
+            ::chatnow::rpc::RpcMetadata meta;
+            meta.set_user_id(ack.user_id());
+            meta.set_device_id(ack.device_id());
+            std::string data;
+            meta.SerializeToString(&data);
+            closure->cntl.request_attachment().append(data);
             closure->on_done = [uid = ack.user_id(), seq = ack.user_seq()]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
                 if (c->Failed()) {
