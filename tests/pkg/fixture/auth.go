@@ -11,7 +11,7 @@ import (
 
 // RegisterAndLogin creates a new user with random credentials and returns the authed client.
 func RegisterAndLogin(t testing.TB, c *client.HTTPClient) (*client.HTTPClient, string, string) {
-	username := fmt.Sprintf("test_%d_%d", rand.Int63(), rand.Intn(10000))
+	username := fmt.Sprintf("test_%d_%d", rand.Int63n(1000000), rand.Intn(1000))
 	password := "test123456"
 	nickname := username
 

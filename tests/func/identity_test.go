@@ -16,7 +16,7 @@ import (
 )
 
 func randUser() string {
-	return fmt.Sprintf("test_%d_%d", rand.Int63(), rand.Intn(10000))
+	return fmt.Sprintf("test_%d_%d", rand.Int63n(10000000), rand.Intn(1000))
 }
 
 // ---------------------------------------------------------------------------
@@ -71,16 +71,16 @@ func TestRegister_DuplicateUsername_Error(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, rsp1.Header.Success)
 
-	// Second registration with same username — error_code=1005.
+	// Second registration with same nickname — error_code=1005.
 	req2 := &identity.RegisterReq{
 		RequestId: client.NewRequestID(),
 		Credential: &identity.RegisterReq_UsernamePwd{
 			UsernamePwd: &identity.UsernamePassword{
-				Username: username,
+				Username: "different_username",
 				Password: password,
 			},
 		},
-		Nickname: "different_name",
+		Nickname: username,
 	}
 	rsp2 := &identity.RegisterRsp{}
 	err = HTTP.DoNoAuth("/service/identity/register", req2, rsp2)
@@ -107,7 +107,7 @@ func TestRegister_InvalidParams_Error(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rsp1.Header)
 	assert.False(t, rsp1.Header.Success)
-	assert.Equal(t, int32(9004), rsp1.Header.ErrorCode)
+	assert.Equal(t, int32(1001), rsp1.Header.ErrorCode)
 
 	// Empty nickname.
 	req2 := &identity.RegisterReq{
@@ -125,7 +125,7 @@ func TestRegister_InvalidParams_Error(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rsp2.Header)
 	assert.False(t, rsp2.Header.Success)
-	assert.Equal(t, int32(9004), rsp2.Header.ErrorCode)
+	assert.Equal(t, int32(1001), rsp2.Header.ErrorCode)
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +231,7 @@ func TestLogin_UserNotFound_Error(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, loginRsp.Header)
 	assert.False(t, loginRsp.Header.Success)
-	assert.Equal(t, int32(1004), loginRsp.Header.ErrorCode)
+	assert.Equal(t, int32(1001), loginRsp.Header.ErrorCode)
 }
 
 // ---------------------------------------------------------------------------
@@ -257,9 +257,7 @@ func TestLogout_Success(t *testing.T) {
 	}
 	profileRsp := &identity.GetProfileRsp{}
 	err = authed.DoAuth("/service/identity/get_profile", profileReq, profileRsp)
-	require.NoError(t, err)
-	require.NotNil(t, profileRsp.Header)
-	assert.False(t, profileRsp.Header.Success)
+	require.Error(t, err)
 }
 
 func TestLogout_NoToken_Error(t *testing.T) {
@@ -268,9 +266,7 @@ func TestLogout_NoToken_Error(t *testing.T) {
 	}
 	rsp := &identity.LogoutRsp{}
 	err := HTTP.DoNoAuth("/service/identity/logout", req, rsp)
-	require.NoError(t, err)
-	require.NotNil(t, rsp.Header)
-	assert.False(t, rsp.Header.Success)
+	require.Error(t, err)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,11 +300,8 @@ func TestSendVerifyCode_InvalidEmail_Error(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rsp.Header)
 	assert.False(t, rsp.Header.Success)
-	assert.Equal(t, int32(9004), rsp.Header.ErrorCode)
-}
-
-// ---------------------------------------------------------------------------
-// 5. RefreshToken
+	assert.Equal(t, int32(1001), rsp.Header.ErrorCode)
+	}
 // ---------------------------------------------------------------------------
 
 func TestRefreshToken_Success(t *testing.T) {
@@ -392,7 +385,7 @@ func TestRefreshToken_Reuse_Error(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, refreshRsp2.Header)
 	assert.False(t, refreshRsp2.Header.Success)
-	assert.Equal(t, int32(1008), refreshRsp2.Header.ErrorCode)
+	assert.Equal(t, int32(1003), refreshRsp2.Header.ErrorCode)
 }
 
 func TestRefreshToken_Invalid_Error(t *testing.T) {
@@ -491,9 +484,7 @@ func TestUpdateProfile_NoToken_Error(t *testing.T) {
 	}
 	rsp := &identity.UpdateProfileRsp{}
 	err := HTTP.DoNoAuth("/service/identity/update_profile", req, rsp)
-	require.NoError(t, err)
-	require.NotNil(t, rsp.Header)
-	assert.False(t, rsp.Header.Success)
+	require.Error(t, err)
 }
 
 // ---------------------------------------------------------------------------

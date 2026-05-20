@@ -290,7 +290,7 @@ public:
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 _redis->sadd("im:presence:typing:" + req->conversation_id(),
                              auth.user_id + ":" + std::to_string(now_ms));
-                _redis->expire("im:presence:typing:" + req->conversation_id(), 10);
+                _redis->expire("im:presence:typing:" + req->conversation_id(), std::chrono::seconds(10));
             } else {
                 std::vector<std::string> members;
                 _redis->smembers("im:presence:typing:" + req->conversation_id(),

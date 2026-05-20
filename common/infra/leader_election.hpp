@@ -2,7 +2,7 @@
 
 #include <etcd/Client.hpp>
 #include <etcd/KeepAlive.hpp>
-#include <etcd/Transaction.hpp>
+#include <etcd/v3/Transaction.hpp>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -62,16 +62,16 @@ private:
                 }
                 int64_t lease_id = lease_resp.value().lease();
 
-                etcd::Transaction txn;
-                txn.setup_compare_version(_key, etcd::CompareResult::EQUAL, 0);
-                txn.setup_put_success(_key, _id, lease_id);
-                txn.setup_get_failure(_key);
+                etcdv3::Transaction txn;
+                txn.add_compare_version(_key, etcdv3::CompareResult::EQUAL, 0);
+                txn.add_success_put(_key, _id, lease_id);
+                txn.add_failure_range(_key);
                 auto txn_resp = _etcd->txn(txn).get();
 
-                if (txn_resp.is_ok() && txn_resp.value().succeeded()) {
+                if (txn_resp.is_ok() && txn_resp.values().empty()) {
                     {
                         std::lock_guard<std::mutex> lk(_cv_mu);
-                        _keep_alive = _etcd->keepalive(lease_id).get();
+                        _keep_alive = std::make_shared<etcd::KeepAlive>(*_etcd, _ttl, lease_id);
                     }
                     _is_leader = true;
                     if (_on_acquired) _on_acquired();
@@ -97,7 +97,7 @@ private:
     void _hold_leadership_(int64_t lease_id) {
         while (_running && _is_leader) {
             if (!_sleep_interruptible_(std::chrono::seconds(1))) return;
-            auto ttl_resp = _etcd->timetolive(lease_id).get();
+            auto ttl_resp = _etcd->leasetimetolive(lease_id).get();
             if (!ttl_resp.is_ok() || ttl_resp.value().ttl() <= 0) {
                 LOG_WARN("LeaderElection lease {} 过期，失去 leader", lease_id);
                 break;

@@ -206,16 +206,10 @@ public:
                 throw ServiceError(::chatnow::error::kRelationshipAlreadyFriends,
                                    "already friends");
 
-            // PENDING 中 → 直接复用之前 event_id（与现状一致）
-            if (_mysql_friend_apply->exists_pending(uid, pid)) {
-                auto latest = _mysql_friend_apply->select_latest(uid, pid);
-                if (latest && latest->status() == FriendApplyStatus::PENDING) {
-                    rsp->set_notify_event_id(latest->event_id());
-                    return; // HANDLE_RPC 已写好成功 header
-                }
+            // 已有待处理申请 → 拒绝（避免重复申请）
+            if (_mysql_friend_apply->exists_pending(uid, pid))
                 throw ServiceError(::chatnow::error::kRelationshipRequestPending,
-                                   "duplicate apply");
-            }
+                                   "friend request already pending");
 
             // 上一次被拒 + 距今 <72h → 拒绝
             auto last = _mysql_friend_apply->select_latest(uid, pid);
@@ -351,9 +345,9 @@ public:
             ::chatnow::conversation::CreateConversationReq  cq;
             ::chatnow::conversation::CreateConversationRsp  ca;
             cq.set_request_id(req->request_id());
-            cq.set_name("");                 // 单聊不传名字
-            cq.add_member_ids(peer_uid);
-            cq.add_member_ids(apply_uid);
+            cq.set_type(::chatnow::conversation::ConversationType::PRIVATE);
+            cq.set_name("");
+            cq.add_member_ids(apply_uid);    // 只传对方；caller 由 conversation 服务自动加入
 
             brpc::Controller out_cntl;
             ::chatnow::auth::forward_auth_metadata(cntl, &out_cntl);

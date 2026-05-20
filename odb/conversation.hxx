@@ -96,7 +96,7 @@ private:
     #pragma db id auto
     unsigned long _id;
 
-    #pragma db type("varchar(32)") index unique
+    #pragma db type("varchar(48)") index unique
     std::string _conversation_id;
 
     #pragma db type("varchar(64)")

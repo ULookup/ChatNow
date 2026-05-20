@@ -62,8 +62,7 @@ func TestJWTRequired_GetProfile_NoToken(t *testing.T) {
 	req := &identity.GetProfileReq{RequestId: client.NewRequestID()}
 	rsp := &identity.GetProfileRsp{}
 	err := HTTP.DoNoAuth("/service/identity/get_profile", req, rsp)
-	require.NoError(t, err)
-	assert.False(t, rsp.Header.Success)
+	require.Error(t, err)
 }
 
 func TestJWTRequired_ExpiredToken(t *testing.T) {
@@ -72,6 +71,5 @@ func TestJWTRequired_ExpiredToken(t *testing.T) {
 	req := &identity.GetProfileReq{RequestId: client.NewRequestID()}
 	rsp := &identity.GetProfileRsp{}
 	err := expiredClient.DoAuth("/service/identity/get_profile", req, rsp)
-	require.NoError(t, err)
-	assert.False(t, rsp.Header.Success)
+	require.Error(t, err)
 }

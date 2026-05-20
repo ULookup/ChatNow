@@ -99,6 +99,9 @@ public:
         HANDLE_RPC(cntl, req, rsp, {
             const auto type_p = req->type();
             using ::chatnow::conversation::ConversationType;
+            if (type_p == ConversationType::CONVERSATION_TYPE_UNSPECIFIED)
+                throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                   "conversation type must be specified");
             if (type_p == ConversationType::PRIVATE && req->member_ids_size() != 1)
                 throw ServiceError(::chatnow::error::kSystemInvalidArgument,
                                    "private requires exactly 1 peer");
@@ -154,9 +157,11 @@ public:
                 ? ::chatnow::MemberRole::OWNER
                 : ::chatnow::MemberRole::NORMAL;
             rows.emplace_back(cid, auth.user_id, /*muted=*/false, /*visible=*/true, owner_role, now);
-            // peers
+            // peers（跳过与 caller 重复的条目，防止调用方误传导致唯一键冲突）
             for (int i = 0; i < req->member_ids_size(); ++i) {
-                rows.emplace_back(cid, req->member_ids(i),
+                const auto& mid = req->member_ids(i);
+                if (mid == auth.user_id) continue;
+                rows.emplace_back(cid, mid,
                                   /*muted=*/false, /*visible=*/true,
                                   ::chatnow::MemberRole::NORMAL, now);
             }
@@ -177,6 +182,9 @@ public:
             out->set_member_count(member_total);
             out->set_status(::chatnow::conversation::ConversationStatus::CONVERSATION_NORMAL);
             out->set_created_at_ms(_to_ms(ent.create_time()));
+            auto* self = out->mutable_self();
+            self->set_role(static_cast<::chatnow::conversation::MemberRole>(owner_role));
+            self->set_joined_at_ms(_to_ms(now));
         });
     }
 

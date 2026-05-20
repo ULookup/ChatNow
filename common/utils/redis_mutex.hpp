@@ -6,7 +6,7 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "common/dao/data_redis.hpp"
+#include "dao/data_redis.hpp"
 #include "infra/logger.hpp"
 
 namespace chatnow {

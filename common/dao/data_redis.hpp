@@ -146,23 +146,34 @@ public:
         return _rc ? _rc->eval<Ret>(script, key_first, key_last, arg_first, arg_last)
                    : _r->eval<Ret>(script, key_first, key_last, arg_first, arg_last);
     }
-    template <typename Ret, typename KeyIt, typename ArgIt, typename Out>
-    Ret eval(const std::string &script, KeyIt key_first, KeyIt key_last,
-             ArgIt arg_first, ArgIt arg_last, Out out) {
-        return _rc ? _rc->eval<Ret>(script, key_first, key_last, arg_first, arg_last, out)
-                   : _r->eval<Ret>(script, key_first, key_last, arg_first, arg_last, out);
+    template <typename KeyIt, typename ArgIt, typename Out>
+    void eval(const std::string &script, KeyIt key_first, KeyIt key_last,
+              ArgIt arg_first, ArgIt arg_last, Out out) {
+        _rc ? _rc->eval(script, key_first, key_last, arg_first, arg_last, out)
+            : _r->eval(script, key_first, key_last, arg_first, arg_last, out);
     }
 
     // --- Pipeline ---
-    auto pipeline() {
-        return _rc ? _rc->pipeline() : _r->pipeline();
+    auto pipeline(const sw::redis::StringView &hash_tag = {}) {
+        return _rc ? _rc->pipeline(hash_tag) : _r->pipeline();
     }
 
     // --- SCAN ---
     template <typename Out>
     long long scan(long long cursor, const std::string &pattern, long long count, Out out) {
-        return _rc ? _rc->scan(cursor, pattern, count, out)
-                   : _r->scan(cursor, pattern, count, out);
+        if (_rc) {
+            if (cursor == 0) {
+                _rc->for_each([&](sw::redis::Redis &r) {
+                    long long cur = 0;
+                    while (true) {
+                        cur = r.scan(cur, pattern, count, out);
+                        if (cur == 0) break;
+                    }
+                });
+            }
+            return 0;
+        }
+        return _r->scan(cursor, pattern, count, out);
     }
 
     bool is_cluster() const { return _rc != nullptr; }
@@ -177,8 +188,8 @@ namespace key
     inline constexpr const char* kSession    = "im:sess:";          // session_id -> user_id
     inline constexpr const char* kStatus     = "im:status:";        // user_id    -> 1
     inline constexpr const char* kVerifyCode = "im:code:";          // code_id    -> 验证码
-    inline constexpr const char* kSeqSession = "im:seq:ssid:";      // ssid       -> 会话级 seq
-    inline constexpr const char* kSeqUser    = "im:seq:uid:";       // uid        -> 用户级 seq
+    inline constexpr const char* kSeqSession = "{seq}:im:seq:ssid:";  // ssid       -> 会话级 seq
+    inline constexpr const char* kSeqUser    = "{seq}:im:seq:uid:";   // uid        -> 用户级 seq
     inline constexpr const char* kLastMsg    = "im:last:";          // ssid       -> 最后一条消息预览(JSON)
     inline constexpr const char* kDeviceSet  = "im:dev:";           // uid        -> SET<device_id>
     inline constexpr const char* kReadAck    = "im:read:";          // mid        -> SET<uid>
@@ -281,7 +292,7 @@ public:
 
                 auto cluster = std::make_shared<sw::redis::RedisCluster>(copts, popts);
                 // 验证连接可用（立即尝试一个轻量命令）
-                cluster->ping("cluster-seed-check");
+                cluster->for_each([](sw::redis::Redis &r) { r.ping("cluster-seed-check"); });
                 LOG_INFO("RedisClusterFactory: 通过种子 {}:{} 成功连接集群", host, port);
                 return cluster;
             } catch (std::exception &e) {
@@ -425,7 +436,7 @@ public:
         std::vector<unsigned long> res;
         if(uids.empty()) return res;
         try {
-            auto pipe = _c->pipeline();
+            auto pipe = _c->pipeline(key::kSeqUser);
             for(const auto &uid : uids) {
                 pipe.incr(key::kSeqUser + uid);
             }
