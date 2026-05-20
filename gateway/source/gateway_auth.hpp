@@ -120,7 +120,7 @@ inline void apply_auth_to_brpc(::chatnow::rpc::RpcMetadata& meta,
         meta.set_jwt_jti(a.jwt_jti);
     }
     ::chatnow::log::LogContext::set(
-        ::chatnow::log::LogContext::current().trace_id,
+        meta.trace_id(),
         a.user_id, a.device_id);
 }
 
