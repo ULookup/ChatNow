@@ -3,11 +3,10 @@
 /**
  * gateway_setup_trace
  * ---
- * Gateway 每个 HTTP handler 入口三件套：
+ * Gateway 每个 HTTP handler 入口两件事：
  *   1. 从 HTTP 请求读 X-Trace-Id；不合法则现生成 32 字符 hex
- *   2. 写到 RpcMetadata（传引用，与 apply_auth_to_brpc 共享同一对象）
- *   3. LogContext::set(trace_id, user_id, device_id)
- *      让 Gateway 自身的 LOG_xxx 输出也带 trace_id
+ *   2. 写到 RpcMetadata + LogContext（trace_id 写入，身份字段留空，
+ *      由 apply_auth_to_brpc 后续补填）
  */
 
 #include "log/log_context.hpp"
@@ -32,7 +31,6 @@ inline std::string resolve_trace_id(const httplib::Request& req) {
 
 /* brief: 一行接入：解析 trace_id → 填 RpcMetadata → 写 LogContext
  *   返回 trace_id（调用方按需用，例如填回 HTTP response header 给客户端）
- *   user_id/device_id 可空；非空时也填入 meta。
  */
 inline std::string gateway_setup_trace(const httplib::Request& req,
                                        ::chatnow::rpc::RpcMetadata& meta)
