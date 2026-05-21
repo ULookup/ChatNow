@@ -1,0 +1,211 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Presence API
+  version: 3.0.0
+  description: |
+    在线状态域。Proto: proto/presence/presence_service.proto
+    Service: chatnow.presence.PresenceService
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/presence/get:
+    post:
+      summary: 获取用户在线状态
+      tags: [Presence]
+      x-protobuf: { service: chatnow.presence.PresenceService, rpc: GetPresence, request: GetPresenceReq, response: GetPresenceRsp, file: proto/presence/presence_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetPresenceReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetPresenceRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/presence/batch_get:
+    post:
+      summary: 批量获取在线状态
+      tags: [Presence]
+      x-protobuf: { service: chatnow.presence.PresenceService, rpc: BatchGetPresence, request: BatchGetPresenceReq, response: BatchGetPresenceRsp, file: proto/presence/presence_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/BatchGetPresenceReq' }
+      responses:
+        '200':
+          description: 成功，返回 user_id -> Presence 映射
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/BatchGetPresenceRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/presence/subscribe:
+    post:
+      summary: 订阅在线状态
+      description: subscriber_user_id 从 JWT metadata 提取，无需在 body 中传递。
+      tags: [Presence]
+      x-protobuf: { service: chatnow.presence.PresenceService, rpc: SubscribePresence, request: SubscribeReq, response: SubscribeRsp, file: proto/presence/presence_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SubscribeReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/presence/unsubscribe:
+    post:
+      summary: 取消订阅在线状态
+      description: subscriber_user_id 从 JWT metadata 提取，无需在 body 中传递。
+      tags: [Presence]
+      x-protobuf: { service: chatnow.presence.PresenceService, rpc: UnsubscribePresence, request: UnsubscribeReq, response: UnsubscribeRsp, file: proto/presence/presence_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UnsubscribeReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/presence/send_typing:
+    post:
+      summary: 发送输入状态
+      description: user_id 从 JWT metadata 提取。仅 PRIVATE 会话生效，GROUP/CHANNEL 静默忽略。
+      tags: [Presence]
+      x-protobuf: { service: chatnow.presence.PresenceService, rpc: SendTyping, request: TypingReq, response: TypingRsp, file: proto/presence/presence_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/TypingReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Success:
+      description: 成功（仅 ResponseHeader，无额外数据）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    PresenceState:
+      x-protobuf: { message: PresenceState, file: proto/presence/presence_service.proto }
+      type: integer
+      description: 0=UNSPECIFIED, 1=ONLINE, 2=AWAY, 3=BUSY, 4=OFFLINE, 5=INVISIBLE
+
+    DevicePresence:
+      x-protobuf: { message: DevicePresence, file: proto/presence/presence_service.proto }
+      type: object
+      properties:
+        device_id: { type: string }
+        platform: { $ref: '../openapi-common.yaml#/components/schemas/DevicePlatform' }
+        state: { $ref: '#/components/schemas/PresenceState' }
+        last_active_at_ms: { type: integer, format: int64 }
+
+    Presence:
+      x-protobuf: { message: Presence, file: proto/presence/presence_service.proto }
+      type: object
+      properties:
+        user_id: { type: string }
+        aggregated_state: { $ref: '#/components/schemas/PresenceState' }
+        last_active_at_ms: { type: integer, format: int64 }
+        devices:
+          type: array
+          items: { $ref: '#/components/schemas/DevicePresence' }
+
+    GetPresenceReq:
+      x-protobuf: { message: GetPresenceReq, file: proto/presence/presence_service.proto }
+      type: object
+      required: [request_id, user_id]
+      properties:
+        request_id: { type: string }
+        user_id:
+          type: string
+          description: 查询目标用户ID
+
+    GetPresenceRsp:
+      type: object
+      properties:
+        presence: { $ref: '#/components/schemas/Presence' }
+
+    BatchGetPresenceReq:
+      x-protobuf: { message: BatchGetPresenceReq, file: proto/presence/presence_service.proto }
+      type: object
+      required: [request_id, user_ids]
+      properties:
+        request_id: { type: string }
+        user_ids:
+          type: array
+          items: { type: string }
+
+    BatchGetPresenceRsp:
+      type: object
+      properties:
+        presences:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/Presence' }
+          description: user_id -> Presence 映射
+
+    SubscribeReq:
+      x-protobuf: { message: SubscribeReq, file: proto/presence/presence_service.proto }
+      type: object
+      required: [request_id, subscribe_user_ids]
+      properties:
+        request_id: { type: string }
+        subscribe_user_ids:
+          type: array
+          items: { type: string }
+          description: 要订阅的用户ID列表
+
+    UnsubscribeReq:
+      x-protobuf: { message: UnsubscribeReq, file: proto/presence/presence_service.proto }
+      type: object
+      required: [request_id, unsubscribe_user_ids]
+      properties:
+        request_id: { type: string }
+        unsubscribe_user_ids:
+          type: array
+          items: { type: string }
+          description: 要取消订阅的用户ID列表
+
+    TypingReq:
+      x-protobuf: { message: TypingReq, file: proto/presence/presence_service.proto }
+      type: object
+      required: [request_id, conversation_id, is_typing]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        is_typing: { type: boolean }
