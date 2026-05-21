@@ -637,16 +637,21 @@ public:
             const std::shared_ptr<elasticlient::Client> &es_client,
             const std::shared_ptr<odb::core::database> &mysql_client,
             const RedisClient::ptr &redis_client,
-            const std::shared_ptr<brpc::Server> &server)
+            const std::shared_ptr<brpc::Server> &server,
+            IdentityServiceImpl *impl)
         : _service_discover(service_discover),
         _reg_client(reg_client),
         _es_client(es_client),
         _mysql_client(mysql_client),
         _redis_client(redis_client),
-        _rpc_server(server) {}
-    ~IdentityServer() = default;
+        _rpc_server(server),
+        _impl(impl) {}
+    ~IdentityServer() {
+        if (_impl) _impl->stop_es_outbox_reaper();
+    }
     /* brief: 搭建RPC服务器，并启动服务器 */
     void start() {
+        if (_impl) _impl->start_es_outbox_reaper();
         _rpc_server->RunUntilAskedToQuit();
     }
 private:
@@ -656,6 +661,7 @@ private:
     std::shared_ptr<elasticlient::Client> _es_client;
     std::shared_ptr<odb::core::database> _mysql_client;
     RedisClient::ptr _redis_client;
+    IdentityServiceImpl* _impl = nullptr;
 };
 
 /* 建造者模式: 将对象真正的构造过程封装，便于后期扩展和调整 */
@@ -663,7 +669,10 @@ class IdentityServerBuilder
 {
 public:
     /* brief: 构造es客户端对象 */
-    void make_es_object(const std::vector<std::string> host_list) { _es_client = ESClientFactory::create(host_list); }
+    void make_es_object(const std::vector<std::string> host_list) {
+        _es_client = ESClientFactory::create(host_list);
+        _es_hosts = host_list;
+    }
     /* brief: 构造mysql客户端对象 */
     void make_mysql_object(const std::string &user,
                         const std::string &password,
@@ -691,6 +700,7 @@ public:
             auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
             _redis_client = std::make_shared<RedisClient>(redis);
         }
+        _es_outbox = std::make_shared<ESOutbox>(_redis_client, "im:es:outbox:identity");
     }
     /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
     void make_jwt_object(const std::string &auth_config_path) {
@@ -764,10 +774,17 @@ public:
             LOG_ERROR("还未初始化JWT模块（缺 make_jwt_object）");
             abort();
         }
+        if(!_es_outbox) {
+            LOG_ERROR("还未初始化ESOutbox");
+            abort();
+        }
 
+        auto es_reaper_client = ESClientFactory::create(_es_hosts);
         IdentityServiceImpl *identity_service = new IdentityServiceImpl(
             _mysql_client, _es_client, _redis_client, _mail_client,
-            _jwt_codec, _jwt_store, _media_public_url_prefix);
+            _jwt_codec, _jwt_store, _media_public_url_prefix,
+            _es_outbox, es_reaper_client);
+        _service_impl = identity_service;
         int ret = _rpc_server->AddService(identity_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加IdentityService RPC服务失败!");
@@ -798,7 +815,8 @@ public:
         }
 
         IdentityServer::ptr server = std::make_shared<IdentityServer>(
-            _service_discover, _reg_client, _es_client, _mysql_client, _redis_client, _rpc_server);
+            _service_discover, _reg_client, _es_client, _mysql_client, _redis_client,
+            _rpc_server, _service_impl);
         return server;
     }
 private:
@@ -817,6 +835,9 @@ private:
     std::shared_ptr<::chatnow::auth::JwtStore> _jwt_store;
 
     std::shared_ptr<brpc::Server> _rpc_server;
+    ESOutbox::ptr                           _es_outbox;
+    std::vector<std::string>                _es_hosts;
+    IdentityServiceImpl*                    _service_impl = nullptr;
 };
 
 }
