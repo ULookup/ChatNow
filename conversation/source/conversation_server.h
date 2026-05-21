@@ -73,6 +73,30 @@ public:
 
     ~ConversationServiceImpl() override = default;
 
+    void start_es_outbox_reaper() {
+        _es_reaper_running = std::make_shared<std::atomic<bool>>(true);
+        _es_reaper_thread = std::make_shared<std::thread>([this]() {
+            while (*_es_reaper_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                try {
+                    auto items = _es_outbox->peek(50);
+                    for (const auto &item : items) {
+                        if (replay_es_write_(item))
+                            _es_outbox->remove(item);
+                    }
+                } catch (std::exception &e) {
+                    LOG_WARN("ESOutbox reaper 异常: {}", e.what());
+                }
+            }
+        });
+    }
+
+    void stop_es_outbox_reaper() {
+        if (_es_reaper_running) *_es_reaper_running = false;
+        if (_es_reaper_thread && _es_reaper_thread->joinable())
+            _es_reaper_thread->join();
+    }
+
     // —— 18 个 RPC 占位实现（T10–T14 逐步替换） ——
     // T10 已替换：ListConversations / GetConversation / ListMembers /
     //              SearchConversations / GetMemberIds
@@ -964,6 +988,8 @@ private:
     ConversationServiceConfig     _cfg;
     ESOutbox::ptr                          _es_outbox;
     ESConversation::ptr                    _es_conv_reaper;
+    std::shared_ptr<std::atomic<bool>>   _es_reaper_running;
+    std::shared_ptr<std::thread>         _es_reaper_thread;
 
     /* brief: 解析 Outbox payload 并重放 ES 写入（Reaper 线程调用，使用独立 _es_conv_reaper） */
     bool replay_es_write_(const std::string &payload) {
@@ -1044,20 +1070,28 @@ public:
     ConversationServer(const Discovery::ptr &service_discover,
                        const Registry::ptr &reg_client,
                        const std::shared_ptr<odb::core::database> &mysql_client,
-                       const std::shared_ptr<brpc::Server> &server)
+                       const std::shared_ptr<brpc::Server> &server,
+                       ConversationServiceImpl *impl)
         : _service_discover(service_discover),
           _reg_client(reg_client),
           _mysql_client(mysql_client),
-          _rpc_server(server) {}
+          _rpc_server(server),
+          _impl(impl) {}
 
-    ~ConversationServer() = default;
-    void start() { _rpc_server->RunUntilAskedToQuit(); }
+    ~ConversationServer() {
+        if (_impl) _impl->stop_es_outbox_reaper();
+    }
+    void start() {
+        if (_impl) _impl->start_es_outbox_reaper();
+        _rpc_server->RunUntilAskedToQuit();
+    }
 
 private:
     Discovery::ptr _service_discover;
     Registry::ptr  _reg_client;
     std::shared_ptr<odb::core::database> _mysql_client;
     std::shared_ptr<brpc::Server>        _rpc_server;
+    ConversationServiceImpl*             _impl = nullptr;
 };
 
 class ConversationServerBuilder
@@ -1065,6 +1099,7 @@ class ConversationServerBuilder
 public:
     void make_es_object(const std::vector<std::string> host_list) {
         _es_client = ESClientFactory::create(host_list);
+        _es_hosts = host_list;
     }
     void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }
 
@@ -1079,6 +1114,7 @@ public:
         }
         _members_cache = std::make_shared<Members>(_redis_client);
         _last_msg_cache = std::make_shared<LastMessage>(_redis_client);
+        _es_outbox = std::make_shared<ESOutbox>(_redis_client, "im:es:outbox:conversation");
     }
     void make_mysql_object(const std::string &user, const std::string &password,
                            const std::string &host, const std::string &dbname,
@@ -1116,10 +1152,14 @@ public:
         if(!_mm_channels)  { LOG_ERROR("还未初始化信道管理模块"); abort(); }
         if(!_members_cache){ LOG_ERROR("还未初始化Members缓存");  abort(); }
         if(!_last_msg_cache){ LOG_ERROR("还未初始化LastMessage缓存"); abort(); }
+        if(!_es_outbox)   { LOG_ERROR("还未初始化ESOutbox");    abort(); }
 
+        auto es_reaper_client = ESClientFactory::create(_es_hosts);
         auto *impl = new ConversationServiceImpl(
             _es_client, _mysql_client, _members_cache, _last_msg_cache, _mm_channels,
-            _identity_service_name, _media_service_name, _message_service_name, _cfg);
+            _identity_service_name, _media_service_name, _message_service_name, _cfg,
+            _es_outbox, es_reaper_client);
+        _service_impl = impl;
         if(_rpc_server->AddService(impl, brpc::ServiceOwnership::SERVER_OWNS_SERVICE) == -1) {
             LOG_ERROR("添加RPC服务失败!"); abort();
         }
@@ -1142,7 +1182,7 @@ public:
         if(!_reg_client)       { LOG_ERROR("还未初始化服务注册模块"); abort(); }
         if(!_rpc_server)       { LOG_ERROR("还未初始化RPC模块");      abort(); }
         return std::make_shared<ConversationServer>(_service_discover, _reg_client,
-                                                    _mysql_client, _rpc_server);
+                                                    _mysql_client, _rpc_server, _service_impl);
     }
 
 private:
@@ -1160,6 +1200,9 @@ private:
     std::string                             _message_service_name;
     ConversationServiceConfig               _cfg;
     std::shared_ptr<brpc::Server>           _rpc_server;
+    ESOutbox::ptr                           _es_outbox;
+    std::vector<std::string>                _es_hosts;
+    ConversationServiceImpl*                _service_impl = nullptr;
 };
 
 } // namespace chatnow
