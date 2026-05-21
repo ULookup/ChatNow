@@ -101,7 +101,7 @@ func TestSendTyping_PrivateChat_False(t *testing.T) {
 	assert.True(t, rsp.Header.Success)
 }
 
-func TestSendTyping_GroupChat_NoOp(t *testing.T) {
+func TestSendTyping_GroupChat_Success(t *testing.T) {
 	a, _, _ := fixture.RegisterAndLogin(t, HTTP)
 
 	req := &presence.TypingReq{
