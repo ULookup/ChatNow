@@ -83,7 +83,43 @@ route<pres::PresenceService_Stub, pres::TypingReq, pres::TypingRsp>(
     &pres::PresenceService_Stub::SendTyping);
 ```
 
-### 3. 无需改动
+### 3. OpenAPI 文档更新
+
+文件：`docs/api/openapi-presence.yaml`
+
+在 `paths` 下新增 `/service/presence/send_typing`，在 `components/schemas` 下新增 `TypingReq`：
+
+```yaml
+  /service/presence/send_typing:
+    post:
+      summary: 发送输入状态
+      description: user_id 从 JWT metadata 提取。仅 PRIVATE 会话生效，GROUP/CHANNEL 静默忽略。
+      tags: [Presence]
+      x-protobuf: { service: chatnow.presence.PresenceService, rpc: SendTyping, request: TypingReq, response: TypingRsp, file: proto/presence/presence_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/TypingReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+```
+
+Schemas 新增：
+
+```yaml
+    TypingReq:
+      x-protobuf: { message: TypingReq, file: proto/presence/presence_service.proto }
+      type: object
+      required: [request_id, conversation_id, is_typing]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        is_typing: { type: boolean }
+```
+
+### 4. 无需改动
 
 - **Push 服务**：`PushToUser` 已存在；`NotifyTyping` 包含在 `NotifyMessage` oneof 中，`PushToUser` 透传任意 `NotifyMessage`，无需特殊处理
 - **Proto**：`TypingReq`、`TypingRsp`、`NotifyTyping`、`TYPING_NOTIFY` 均已定义
@@ -108,3 +144,4 @@ route<pres::PresenceService_Stub, pres::TypingReq, pres::TypingRsp>(
 
 - Presence `SendTyping` 单测：验证 PRIVATE 会话写入 Redis + 调用 PushToUser；GROUP 会话仅写 Redis 不推送
 - Gateway 路由测试：验证 `/service/presence/send_typing` 正确转发
+- OpenAPI 文档：验证 `openapi-presence.yaml` 包含 SendTyping 端点及 TypingReq schema
