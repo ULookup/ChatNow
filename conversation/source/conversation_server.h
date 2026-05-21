@@ -114,6 +114,9 @@ public:
                 const auto& peer = req->member_ids(0);
                 cid = private_id_of_(auth.user_id, peer);
                 if (_mysql_conv->exists(cid)) {
+                    if (!require_member_(cid, auth.user_id))
+                        throw ServiceError(::chatnow::error::kConversationNotMember,
+                                           "conversation exists but you are not a member");
                     rsp->mutable_conversation()->set_conversation_id(cid);
                     rsp->mutable_conversation()->set_type(type_p);
                     return;        // 幂等
