@@ -1,0 +1,320 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Relationship API
+  version: 3.0.0
+  description: |
+    好友关系域。Proto: proto/relationship/relationship_service.proto
+    Service: chatnow.relationship.RelationshipService
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/relationship/list_friends:
+    post:
+      summary: 好友列表
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: ListFriends, request: ListFriendsReq, response: ListFriendsRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ListFriendsReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ListFriendsRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/send_friend_request:
+    post:
+      summary: 发送好友申请
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: SendFriendRequest, request: SendFriendReq, response: SendFriendRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SendFriendReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SendFriendRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/handle_friend_request:
+    post:
+      summary: 处理好友申请
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: HandleFriendRequest, request: HandleFriendReq, response: HandleFriendRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/HandleFriendReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/HandleFriendRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/remove_friend:
+    post:
+      summary: 删除好友
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: RemoveFriend, request: RemoveFriendReq, response: RemoveFriendRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/RemoveFriendReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/search_friends:
+    post:
+      summary: 搜索好友
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: SearchFriends, request: SearchFriendsReq, response: SearchFriendsRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SearchFriendsReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SearchFriendsRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/block_user:
+    post:
+      summary: 拉黑用户
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: BlockUser, request: BlockUserReq, response: BlockUserRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/BlockUserReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/unblock_user:
+    post:
+      summary: 取消拉黑
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: UnblockUser, request: UnblockUserReq, response: UnblockUserRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UnblockUserReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/list_blocked:
+    post:
+      summary: 黑名单列表
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: ListBlockedUsers, request: ListBlockedReq, response: ListBlockedRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ListBlockedReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ListBlockedRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/relationship/list_pending:
+    post:
+      summary: 待处理的好友申请
+      tags: [Relationship]
+      x-protobuf: { service: chatnow.relationship.RelationshipService, rpc: ListPendingRequests, request: ListPendingReq, response: ListPendingRsp, file: proto/relationship/relationship_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ListPendingReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ListPendingRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Success:
+      description: 成功（仅 ResponseHeader，无额外数据）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    ListFriendsReq:
+      x-protobuf: { message: ListFriendsReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      properties:
+        request_id: { type: string }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageRequest' }
+
+    ListFriendsRsp:
+      type: object
+      properties:
+        friend_list:
+          type: array
+          items: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageResponse' }
+
+    SendFriendReq:
+      x-protobuf: { message: SendFriendReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      required: [request_id, respondent_id]
+      properties:
+        request_id: { type: string }
+        respondent_id: { type: string }
+
+    SendFriendRsp:
+      type: object
+      properties:
+        notify_event_id: { type: string }
+
+    HandleFriendReq:
+      x-protobuf: { message: HandleFriendReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      required: [request_id, notify_event_id, agree, apply_user_id]
+      properties:
+        request_id: { type: string }
+        notify_event_id: { type: string }
+        agree: { type: boolean }
+        apply_user_id: { type: string }
+
+    HandleFriendRsp:
+      type: object
+      properties:
+        new_conversation_id: { type: string }
+
+    RemoveFriendReq:
+      x-protobuf: { message: RemoveFriendReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      required: [request_id, peer_id]
+      properties:
+        request_id: { type: string }
+        peer_id: { type: string }
+
+    SearchFriendsReq:
+      x-protobuf: { message: SearchFriendsReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      required: [request_id, search_key]
+      properties:
+        request_id: { type: string }
+        search_key: { type: string }
+
+    SearchFriendsRsp:
+      type: object
+      properties:
+        user_info:
+          type: array
+          items: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+
+    BlockUserReq:
+      x-protobuf: { message: BlockUserReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      required: [request_id, peer_id]
+      properties:
+        request_id: { type: string }
+        peer_id: { type: string }
+
+    UnblockUserReq:
+      x-protobuf: { message: UnblockUserReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      required: [request_id, peer_id]
+      properties:
+        request_id: { type: string }
+        peer_id: { type: string }
+
+    ListBlockedReq:
+      x-protobuf: { message: ListBlockedReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      properties:
+        request_id: { type: string }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageRequest' }
+
+    ListBlockedRsp:
+      type: object
+      properties:
+        blocked_list:
+          type: array
+          items: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageResponse' }
+
+    ListPendingReq:
+      x-protobuf: { message: ListPendingReq, file: proto/relationship/relationship_service.proto }
+      type: object
+      properties:
+        request_id: { type: string }
+
+    ListPendingRsp:
+      type: object
+      properties:
+        event:
+          type: array
+          items: { $ref: '#/components/schemas/FriendEvent' }
+
+    FriendEvent:
+      x-protobuf: { message: FriendEvent, file: proto/relationship/relationship_service.proto }
+      type: object
+      properties:
+        event_id: { type: string }
+        sender: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
