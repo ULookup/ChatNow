@@ -223,7 +223,8 @@ public:
             if(!_mysql_conv->update(c))
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "update failed");
-            if (!_es_conv->append_data(*c))
+            auto uids = _mysql_member->members(req->conversation_id());
+            if (!_es_conv->append_data(*c, uids))
                 metrics::g_degraded_es_write_total << 1;
 
             auto* out = rsp->mutable_conversation();
@@ -281,7 +282,9 @@ public:
                                    "set_quit failed");
             invalidate_members_cache_(req->conversation_id());
             auto updated_uids = _mysql_member->members(req->conversation_id());
-            _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+            if (!updated_uids.empty() &&
+                !_es_conv->update_member_ids(req->conversation_id(), updated_uids))
+                metrics::g_degraded_es_write_total << 1;
             // set_quit 内部已经维护 member_count（_update_session_member_count(-1)），
             // 不需要再 _mysql_conv->update。
         });
@@ -319,13 +322,14 @@ public:
             for (int i = 0; i < req->member_ids_size(); ++i) {
                 const auto& uid = req->member_ids(i);
                 auto m = _mysql_member->select_self(req->conversation_id(), uid);
+                bool ok = true;
                 if (m && !m->is_quit()) continue;     // 已是活跃成员，跳过
                 if (m && m->is_quit()) {
                     // 二次入群
-                    _mysql_member->rejoin(req->conversation_id(), uid,
-                                          ::chatnow::MemberRole::NORMAL,
-                                          auth.user_id,
-                                          ::chatnow::JoinSource::ADMIN_ADD);
+                    ok = _mysql_member->rejoin(req->conversation_id(), uid,
+                                              ::chatnow::MemberRole::NORMAL,
+                                              auth.user_id,
+                                              ::chatnow::JoinSource::ADMIN_ADD);
                 } else {
                     // 全新入群
                     ::chatnow::ConversationMember row(req->conversation_id(), uid,
@@ -333,12 +337,18 @@ public:
                         ::chatnow::MemberRole::NORMAL, now);
                     row.inviter_id(auth.user_id);
                     row.join_source(::chatnow::JoinSource::ADMIN_ADD);
-                    _mysql_member->append(row);
+                    ok = _mysql_member->append(row);
+                }
+                if (!ok) {
+                    rsp->add_failed_member_ids(uid);
+                    LOG_WARN("AddMembers 单个失败 cid={} uid={}", req->conversation_id(), uid);
                 }
             }
             invalidate_members_cache_(req->conversation_id());
             auto updated_uids = _mysql_member->members(req->conversation_id());
-            _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+            if (!updated_uids.empty() &&
+                !_es_conv->update_member_ids(req->conversation_id(), updated_uids))
+                metrics::g_degraded_es_write_total << 1;
         });
     }
 
@@ -371,7 +381,9 @@ public:
             if (removed > 0) {
                 invalidate_members_cache_(req->conversation_id());
                 auto updated_uids = _mysql_member->members(req->conversation_id());
-                _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+                if (!updated_uids.empty() &&
+                    !_es_conv->update_member_ids(req->conversation_id(), updated_uids))
+                    metrics::g_degraded_es_write_total << 1;
             }
         });
     }
@@ -540,16 +552,24 @@ public:
             if (!require_member_(req->conversation_id(), auth.user_id))
                 throw ServiceError(::chatnow::error::kConversationNotMember,
                                    "not a member");
-            // DAO 没有 list_active_members(cid)；用 members(cid) + 批量 select(cid, uids)
-            // 拼出活跃成员的全行数据（members() 已经过滤 is_quit=true）。
             auto uids = _mysql_member->members(req->conversation_id());
-            auto rows = _mysql_member->select(req->conversation_id(), uids);
+            int total = static_cast<int>(uids.size());
+
+            int limit = req->page().limit() > 0 ? req->page().limit() : 50;
+            if (limit > 200) limit = 200;
+            int start = req->page().cursor();
+            int end = std::min(start + limit, total);
+            std::vector<std::string> page_uids;
+            if (start < total)
+                page_uids.assign(uids.begin() + start, uids.begin() + end);
+
+            auto rows = _mysql_member->select(req->conversation_id(), page_uids);
 
             UserInfoMap umap;
-            (void)fetch_user_infos_(cntl, req->request_id(), uids, umap);
+            (void)fetch_user_infos_(cntl, req->request_id(), page_uids, umap);
 
             for (auto &m : rows) {
-                if (m.is_quit()) continue;            // 防御：批量 select 含已退群行
+                if (m.is_quit()) continue;
                 auto* item = rsp->add_members();
                 auto it = umap.find(m.user_id());
                 if (it != umap.end()) item->mutable_user_info()->CopyFrom(it->second);
@@ -557,8 +577,8 @@ public:
                 item->set_role(static_cast<::chatnow::conversation::MemberRole>(m.role()));
                 item->set_join_time_ms(_to_ms(m.join_time()));
             }
-            rsp->mutable_page()->set_has_more(false);
-            rsp->mutable_page()->set_total_count(rsp->members_size());
+            rsp->mutable_page()->set_has_more(end < total);
+            rsp->mutable_page()->set_total_count(total);
         });
     }
 
@@ -575,6 +595,7 @@ public:
             auto convs = _mysql_conv->select(cid_hits);
             for (auto &c : convs) {
                 if (c.status() == ConversationStatus::DISMISSED) continue;
+                if (!require_member_(c.conversation_id(), auth.user_id)) continue;
                 auto* out = rsp->add_conversations();
                 out->set_conversation_id(c.conversation_id());
                 out->set_type(static_cast<::chatnow::conversation::ConversationType>(c.conversation_type()));
