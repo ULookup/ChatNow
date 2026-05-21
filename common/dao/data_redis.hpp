@@ -159,18 +159,21 @@ public:
     }
 
     // --- SCAN ---
+    // 集群模式：for_each 一次遍历所有节点。不支持迭代续扫——cursor 非零时 abort。
     template <typename Out>
     long long scan(long long cursor, const std::string &pattern, long long count, Out out) {
         if (_rc) {
-            if (cursor == 0) {
-                _rc->for_each([&](sw::redis::Redis &r) {
-                    long long cur = 0;
-                    while (true) {
-                        cur = r.scan(cur, pattern, count, out);
-                        if (cur == 0) break;
-                    }
-                });
+            if (cursor != 0) {
+                LOG_ERROR("RedisCluster scan does not support iterative scan, cursor must be 0, got {}", cursor);
+                abort();
             }
+            _rc->for_each([&](sw::redis::Redis &r) {
+                long long cur = 0;
+                while (true) {
+                    cur = r.scan(cur, pattern, count, out);
+                    if (cur == 0) break;
+                }
+            });
             return 0;
         }
         return _r->scan(cursor, pattern, count, out);
