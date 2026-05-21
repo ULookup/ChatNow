@@ -768,8 +768,9 @@ private:
                              const std::string& caller_uid,
                              ::chatnow::message::MessagePreview& out)
     {
-        // L1 Redis cache: try cached last message first
-        auto cached = _last_msg_cache->get(cid + ":" + caller_uid);
+        // L1 Redis cache: key includes after_seq so advancing read cursor invalidates
+        std::string cache_key = cid + ":" + caller_uid + ":" + std::to_string(after_seq);
+        auto cached = _last_msg_cache->get(cache_key);
         if (cached) {
             if (parse_preview_json_(*cached, out)) return true;
         }
@@ -808,7 +809,7 @@ private:
         out.set_message_type(m.content().type());
         out.set_sent_at_ms(m.created_at_ms());
         out.set_status(m.status());
-        _last_msg_cache->set(cid + ":" + caller_uid, serialize_preview_json_(out));
+        _last_msg_cache->set(cache_key, serialize_preview_json_(out));
         return true;
     }
 
@@ -861,13 +862,15 @@ private:
     }
 
     static std::string serialize_preview_json_(const ::chatnow::message::MessagePreview &p) {
-        std::ostringstream oss;
-        oss << "{\"mid\":" << p.message_id()
-            << ",\"sid\":\"" << p.sender_id() << "\""
-            << ",\"type\":" << static_cast<int>(p.message_type())
-            << ",\"ts\":" << p.sent_at_ms()
-            << ",\"status\":" << static_cast<int>(p.status()) << "}";
-        return oss.str();
+        Json::Value root;
+        root["mid"] = static_cast<Json::Int64>(p.message_id());
+        root["sid"] = p.sender_id();
+        root["type"] = static_cast<int>(p.message_type());
+        root["ts"] = static_cast<Json::Int64>(p.sent_at_ms());
+        root["status"] = static_cast<int>(p.status());
+        std::string dst;
+        Serialize(root, dst);
+        return dst;
     }
 
     static bool parse_preview_json_(const std::string &json,
