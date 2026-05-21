@@ -1,0 +1,149 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Transmite API
+  version: 3.0.0
+  description: |
+    消息发送域。Proto: proto/transmite/transmite_service.proto
+    Service: chatnow.transmite.MsgTransmitService
+    超时 1000ms（快速通道）。
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/transmite/send:
+    post:
+      summary: 发送消息
+      description: 超时 1000ms。client_msg_id 用于客户端幂等去重。
+      tags: [Transmite]
+      x-protobuf: { service: chatnow.transmite.MsgTransmitService, rpc: SendMessage, request: SendMessageReq, response: SendMessageRsp, file: proto/transmite/transmite_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SendMessageReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SendMessageRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    MessageContent:
+      x-protobuf: { message: MessageContent, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        type: { type: integer, description: MessageType 枚举值，0=UNSPECIFIED, 1=TEXT, 2=IMAGE, 3=FILE, 4=AUDIO, 5=VIDEO, 6=LOCATION, 7=STICKER, 8=SYSTEM_NOTICE }
+        body:
+          oneOf:
+            - type: object
+              properties: { text: { type: string } }
+            - type: object
+              properties: { file_id: { type: string }, width: { type: integer }, height: { type: integer }, thumbnail_url: { type: string } }
+            - type: object
+              properties: { file_id: { type: string }, file_name: { type: string }, file_size: { type: integer, format: int64 }, mime_type: { type: string } }
+            - type: object
+              properties: { file_id: { type: string }, duration_sec: { type: integer } }
+            - type: object
+              properties: { file_id: { type: string }, duration_sec: { type: integer }, width: { type: integer }, height: { type: integer }, thumbnail_url: { type: string } }
+            - type: object
+              properties: { latitude: { type: number, format: double }, longitude: { type: number, format: double }, name: { type: string }, address: { type: string } }
+            - type: object
+              properties: { sticker_id: { type: string }, pack_id: { type: string } }
+            - type: object
+              properties: { text: { type: string }, notice_type: { type: string } }
+
+    ReplyRef:
+      x-protobuf: { message: ReplyRef, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        replied_message_id: { type: integer, format: int64 }
+        replied_sender_id: { type: string }
+        replied_message_type: { type: integer }
+        content_preview: { type: string }
+        is_recalled: { type: boolean }
+
+    ForwardInfo:
+      x-protobuf: { message: ForwardInfo, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        forward_from_user_id: { type: string }
+        forward_at_ms: { type: integer, format: int64 }
+        source_conversation_id: { type: string }
+
+    Message:
+      x-protobuf: { message: Message, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        message_id: { type: integer, format: int64 }
+        conversation_id: { type: string }
+        content: { $ref: '#/components/schemas/MessageContent' }
+        sender_id: { type: string }
+        created_at_ms: { type: integer, format: int64 }
+        edited_at_ms: { type: integer, format: int64 }
+        seq_id: { type: integer }
+        user_seq: { type: integer }
+        client_msg_id: { type: string }
+        status: { type: integer }
+        reply_to: { $ref: '#/components/schemas/ReplyRef' }
+        mentioned_user_ids: { type: array, items: { type: string } }
+        forward_info: { $ref: '#/components/schemas/ForwardInfo' }
+        reactions: { type: array, items: { $ref: '#/components/schemas/ReactionGroup' } }
+        is_pinned: { type: boolean }
+
+    ReactionGroup:
+      x-protobuf: { message: ReactionGroup, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        emoji: { type: string }
+        count: { type: integer }
+        recent_user_ids: { type: array, items: { type: string } }
+        self_reacted: { type: boolean }
+
+    SendMessageReq:
+      x-protobuf: { message: SendMessageReq, file: proto/transmite/transmite_service.proto }
+      type: object
+      required: [request_id, conversation_id, content]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        content: { $ref: '#/components/schemas/MessageContent' }
+        client_msg_id:
+          type: string
+          description: 客户端幂等键，用于去重
+        reply_to: { $ref: '#/components/schemas/ReplyRef' }
+        mentioned_user_ids:
+          type: array
+          items: { type: string }
+          description: '@提及的用户ID列表'
+        forward_info: { $ref: '#/components/schemas/ForwardInfo' }
+
+    SendMessageRsp:
+      type: object
+      properties:
+        message:
+          $ref: '#/components/schemas/Message'
+          description: 组装后的完整消息对象
