@@ -423,6 +423,9 @@ inline void GatewayServer::register_routes() {
     route<pres::PresenceService_Stub, pres::UnsubscribeReq, pres::UnsubscribeRsp>(
         "/service/presence/unsubscribe", _presence_svc, GatewayAuth::JWT_REQUIRED,
         &pres::PresenceService_Stub::UnsubscribePresence);
+    route<pres::PresenceService_Stub, pres::TypingReq, pres::TypingRsp>(
+        "/service/presence/send_typing", _presence_svc, GatewayAuth::JWT_REQUIRED,
+        &pres::PresenceService_Stub::SendTyping);
 
     // ====== 注册 HTTP handler ======
     for (auto& route : _routes) {
