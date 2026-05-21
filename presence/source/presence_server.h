@@ -285,22 +285,56 @@ public:
             h->set_error_code(::chatnow::error::kOK);
             h->set_request_id(req->request_id());
 
+            const auto& conv_id = req->conversation_id();
+
             if (req->is_typing()) {
                 auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
-                _redis->sadd("im:presence:typing:" + req->conversation_id(),
+                _redis->sadd("im:presence:typing:" + conv_id,
                              auth.user_id + ":" + std::to_string(now_ms));
-                _redis->expire("im:presence:typing:" + req->conversation_id(), std::chrono::seconds(10));
+                _redis->expire("im:presence:typing:" + conv_id, std::chrono::seconds(5));
             } else {
                 std::vector<std::string> members;
-                _redis->smembers("im:presence:typing:" + req->conversation_id(),
+                _redis->smembers("im:presence:typing:" + conv_id,
                                  std::inserter(members, members.end()));
                 for (const auto& m : members) {
                     if (m.find(auth.user_id + ":") == 0) {
-                        _redis->srem("im:presence:typing:" + req->conversation_id(), m);
+                        _redis->srem("im:presence:typing:" + conv_id, m);
                     }
                 }
             }
+
+            // 仅 PRIVATE 会话下发 typing 通知
+            if (conv_id.size() < 2 || conv_id[0] != 'p' || conv_id[1] != '_') return;
+
+            auto pos = conv_id.find('_', 2);  // 第二个下划线，分隔 lo 和 hi
+            if (pos == std::string::npos) return;
+
+            std::string lo = conv_id.substr(2, pos - 2);
+            std::string hi = conv_id.substr(pos + 1);
+            if (lo != auth.user_id && hi != auth.user_id) return;
+            std::string target = (lo == auth.user_id) ? hi : lo;
+
+            auto channel = _channels->choose(_push_service_name);
+            if (!channel) {
+                LOG_WARN("SendTyping 推送失败: Push 不可用 conv_id={}", conv_id);
+                return;
+            }
+
+            ::chatnow::push::NotifyMessage notify;
+            notify.set_notify_type(::chatnow::push::NotifyType::TYPING_NOTIFY);
+            auto* tn = notify.mutable_typing();
+            tn->set_user_id(auth.user_id);
+            tn->set_conversation_id(conv_id);
+            tn->set_is_typing(req->is_typing());
+
+            auto* closure = new SelfDeleteRpcClosure<::chatnow::push::PushToUserReq,
+                                                      ::chatnow::push::PushToUserRsp>();
+            closure->req.set_user_id(target);
+            closure->req.mutable_notify()->CopyFrom(notify);
+
+            ::chatnow::push::PushService_Stub stub(channel.get());
+            stub.PushToUser(&closure->cntl, &closure->req, &closure->rsp, closure);
         } catch (const ServiceError& e) {
             rsp->mutable_header()->set_success(false);
             rsp->mutable_header()->set_error_code(e.code());

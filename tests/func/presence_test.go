@@ -60,3 +60,57 @@ func TestUnsubscribePresence_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, rsp.Header.Success)
 }
+
+func TestSendTyping_PrivateChat_True(t *testing.T) {
+	a, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	b, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	cid := "p_" + a.UserID + "_" + b.UserID
+	if a.UserID > b.UserID {
+		cid = "p_" + b.UserID + "_" + a.UserID
+	}
+
+	req := &presence.TypingReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: cid,
+		IsTyping:       true,
+	}
+	rsp := &presence.TypingRsp{}
+	err := a.DoAuth("/service/presence/send_typing", req, rsp)
+	require.NoError(t, err)
+	assert.True(t, rsp.Header.Success)
+}
+
+func TestSendTyping_PrivateChat_False(t *testing.T) {
+	a, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	b, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	cid := "p_" + a.UserID + "_" + b.UserID
+	if a.UserID > b.UserID {
+		cid = "p_" + b.UserID + "_" + a.UserID
+	}
+
+	req := &presence.TypingReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: cid,
+		IsTyping:       false,
+	}
+	rsp := &presence.TypingRsp{}
+	err := a.DoAuth("/service/presence/send_typing", req, rsp)
+	require.NoError(t, err)
+	assert.True(t, rsp.Header.Success)
+}
+
+func TestSendTyping_GroupChat_Success(t *testing.T) {
+	a, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	req := &presence.TypingReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: "g_some_group_id",
+		IsTyping:       true,
+	}
+	rsp := &presence.TypingRsp{}
+	err := a.DoAuth("/service/presence/send_typing", req, rsp)
+	require.NoError(t, err)
+	assert.True(t, rsp.Header.Success)
+}
