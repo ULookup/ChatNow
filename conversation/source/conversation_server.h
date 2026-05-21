@@ -71,47 +71,6 @@ public:
           _es_outbox(es_outbox),
           _es_conv_reaper(std::make_shared<ESConversation>(es_reaper_client)) {}
 
-    /* brief: 解析 Outbox payload 并重放 ES 写入（Reaper 线程调用，使用独立 _es_conv_reaper） */
-    bool replay_es_write_(const std::string &payload) {
-        Json::Value root;
-        if (!UnSerialize(payload, root)) return false;
-        std::string op = root.get("op", "").asString();
-        std::string cid = root.get("cid", "").asString();
-
-        if (op == "upsert") {
-            std::string name = root.get("name", "").asString();
-            int type = root.get("type", 0).asInt();
-            std::string avatar = root.get("avatar", "").asString();
-            int status = root.get("status", 0).asInt();
-            long ut = root.get("ut", 0).asInt64();
-            static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
-            boost::posix_time::ptime update_time = epoch + boost::posix_time::seconds(ut);
-
-            chatnow::Conversation ent(cid, name,
-                static_cast<chatnow::ConversationType>(type),
-                update_time, 0, static_cast<chatnow::ConversationStatus>(status));
-            if (!avatar.empty()) ent.avatar_id(avatar);
-
-            std::vector<std::string> mids;
-            const auto &marr = root["mids"];
-            for (Json::ArrayIndex i = 0; i < marr.size(); ++i)
-                mids.push_back(marr[i].asString());
-
-            return _es_conv_reaper->append_data(ent, mids);
-        }
-        if (op == "delete") {
-            return _es_conv_reaper->remove(cid);
-        }
-        if (op == "upd_members") {
-            std::vector<std::string> mids;
-            const auto &marr = root["mids"];
-            for (Json::ArrayIndex i = 0; i < marr.size(); ++i)
-                mids.push_back(marr[i].asString());
-            return _es_conv_reaper->update_member_ids(cid, mids);
-        }
-        return false;
-    }
-
     ~ConversationServiceImpl() override = default;
 
     // —— 18 个 RPC 占位实现（T10–T14 逐步替换） ——
@@ -987,6 +946,56 @@ private:
     ConversationServiceConfig     _cfg;
     ESOutbox::ptr                          _es_outbox;
     ESConversation::ptr                    _es_conv_reaper;
+
+    /* brief: 解析 Outbox payload 并重放 ES 写入（Reaper 线程调用，使用独立 _es_conv_reaper） */
+    bool replay_es_write_(const std::string &payload) {
+        if (!_es_conv_reaper) {
+            LOG_ERROR("replay_es_write_ _es_conv_reaper is null");
+            return false;
+        }
+        Json::Value root;
+        if (!UnSerialize(payload, root)) {
+            LOG_WARN("replay_es_write_ failed to deserialize payload: {}", payload);
+            return false;
+        }
+        std::string op = root.get("op", "").asString();
+        std::string cid = root.get("cid", "").asString();
+
+        if (op == "upsert") {
+            std::string name = root.get("name", "").asString();
+            int type = root.get("type", 0).asInt();
+            std::string avatar = root.get("avatar", "").asString();
+            int status = root.get("status", 0).asInt();
+            long ut = root.get("ut", 0).asInt64();
+            static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
+            boost::posix_time::ptime update_time = epoch + boost::posix_time::seconds(ut);
+
+            chatnow::Conversation ent(cid, name,
+                static_cast<chatnow::ConversationType>(type),
+                update_time, 0, static_cast<chatnow::ConversationStatus>(status));
+            if (!avatar.empty()) ent.avatar_id(avatar);
+            ent.update_time(update_time);
+
+            std::vector<std::string> mids;
+            const auto &marr = root["mids"];
+            for (Json::ArrayIndex i = 0; i < marr.size(); ++i)
+                mids.push_back(marr[i].asString());
+
+            return _es_conv_reaper->append_data(ent, mids);
+        }
+        if (op == "delete") {
+            return _es_conv_reaper->remove(cid);
+        }
+        if (op == "upd_members") {
+            std::vector<std::string> mids;
+            const auto &marr = root["mids"];
+            for (Json::ArrayIndex i = 0; i < marr.size(); ++i)
+                mids.push_back(marr[i].asString());
+            return _es_conv_reaper->update_member_ids(cid, mids);
+        }
+        LOG_WARN("replay_es_write_ unknown op '{}' for cid={}", op, cid);
+        return false;
+    }
 
     /* brief: ES 直写 3 次指数退避重试，全失败入 Outbox */
     bool retry_es_write_(const std::string &outbox_payload,
