@@ -456,7 +456,7 @@ public:
                 // last_message：fail-soft（Message 不可达就留空）
                 ::chatnow::message::MessagePreview preview;
                 if (fetch_last_message_(cntl, req->request_id(), v.conversation_id,
-                                        v.last_read_seq, preview)) {
+                                        v.last_read_seq, auth.user_id, preview)) {
                     c->mutable_last_message()->CopyFrom(preview);
                 }
 
@@ -510,7 +510,7 @@ public:
             unsigned long after = self ? self->last_read_seq() : 0UL;
             ::chatnow::message::MessagePreview preview;
             if (fetch_last_message_(cntl, req->request_id(),
-                                    req->conversation_id(), after, preview)) {
+                                    req->conversation_id(), after, auth.user_id, preview)) {
                 out->mutable_last_message()->CopyFrom(preview);
             }
             if (self) fill_self_member_info_(*self, c->max_seq(), out->mutable_self());
@@ -734,10 +734,11 @@ private:
      *    spec §7 验收 #2 已记录为预期阻塞 */
     bool fetch_last_message_(brpc::Controller* in_cntl, const std::string& rid,
                              const std::string& cid, unsigned long after_seq,
+                             const std::string& caller_uid,
                              ::chatnow::message::MessagePreview& out)
     {
         // L1 Redis cache: try cached last message first
-        auto cached = _last_msg_cache->get(cid);
+        auto cached = _last_msg_cache->get(cid + ":" + caller_uid);
         if (cached) {
             if (parse_preview_json_(*cached, out)) return true;
         }
@@ -776,7 +777,7 @@ private:
         out.set_message_type(m.content().type());
         out.set_sent_at_ms(m.created_at_ms());
         out.set_status(m.status());
-        _last_msg_cache->set(cid, serialize_preview_json_(out));
+        _last_msg_cache->set(cid + ":" + caller_uid, serialize_preview_json_(out));
         return true;
     }
 
@@ -830,7 +831,7 @@ private:
 
     static std::string serialize_preview_json_(const ::chatnow::message::MessagePreview &p) {
         std::ostringstream oss;
-        oss << "{\"mid\":\"" << p.message_id() << "\""
+        oss << "{\"mid\":" << p.message_id()
             << ",\"sid\":\"" << p.sender_id() << "\""
             << ",\"type\":" << static_cast<int>(p.message_type())
             << ",\"ts\":" << p.sent_at_ms()
@@ -842,7 +843,7 @@ private:
                                     ::chatnow::message::MessagePreview &out) {
         Json::Value root;
         if (!UnSerialize(json, root)) return false;
-        out.set_message_id(root.get("mid", "").asString());
+        out.set_message_id(root.get("mid", 0).asInt64());
         out.set_sender_id(root.get("sid", "").asString());
         out.set_message_type(static_cast<::chatnow::message::MessageType>(
             root.get("type", 0).asInt()));
