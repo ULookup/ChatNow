@@ -135,7 +135,10 @@ message AddMembersReq {
     string conversation_id = 2;
     repeated string member_ids = 3;
 }
-message AddMembersRsp { chatnow.common.ResponseHeader header = 1; }
+message AddMembersRsp {
+    chatnow.common.ResponseHeader header = 1;
+    repeated string failed_member_ids = 2;
+}
 
 message RemoveMembersReq {
     string request_id = 1;
