@@ -312,6 +312,7 @@ public:
 
             std::string lo = conv_id.substr(2, pos - 2);
             std::string hi = conv_id.substr(pos + 1);
+            if (lo != auth.user_id && hi != auth.user_id) return;
             std::string target = (lo == auth.user_id) ? hi : lo;
 
             auto channel = _channels->choose(_push_service_name);
