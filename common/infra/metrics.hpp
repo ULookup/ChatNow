@@ -8,5 +8,6 @@ namespace chatnow::metrics {
 inline bvar::Adder<long> g_degraded_identity_total;
 inline bvar::Adder<long> g_degraded_message_total;
 inline bvar::Adder<long> g_degraded_es_write_total;
+inline bvar::Adder<long> g_es_retry_total;
 
 }  // namespace chatnow::metrics
