@@ -1,0 +1,248 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Media API
+  version: 3.0.0
+  description: |
+    媒体上传/下载域。Proto: proto/media/media_service.proto
+    Service: chatnow.media.MediaService
+    注意: 分片上传接口（InitMultipartUpload/ApplyPartUpload/CompleteMultipartUpload/AbortMultipartUpload）尚未暴露为 HTTP 路由。
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/media/apply_upload:
+    post:
+      summary: 申请上传
+      description: |
+        申请单段上传（≤100MB）。返回 presigned PUT URL。
+        若 content_hash 命中去重缓存，already_exists=true，无需再上传。
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: ApplyUpload, request: ApplyUploadReq, response: ApplyUploadRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ApplyUploadReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ApplyUploadRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/media/complete_upload:
+    post:
+      summary: 完成上传
+      description: 通知服务端客户端已完成 PUT，触发文件就绪处理。
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: CompleteUpload, request: CompleteUploadReq, response: CompleteUploadRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/CompleteUploadReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/CompleteUploadRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/media/apply_download:
+    post:
+      summary: 申请下载
+      description: 返回 presigned GET URL。
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: ApplyDownload, request: ApplyDownloadReq, response: ApplyDownloadRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ApplyDownloadReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ApplyDownloadRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/media/get_file_info:
+    post:
+      summary: 获取文件信息
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: GetFileInfo, request: GetFileInfoReq, response: GetFileInfoRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetFileInfoReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetFileInfoRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/media/speech_recognition:
+    post:
+      summary: 语音识别
+      description: 短音频 ASR，直接传 bytes，不经过 S3。
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: SpeechRecognition, request: SpeechRecognitionReq, response: SpeechRecognitionRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SpeechRecognitionReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SpeechRecognitionRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    MediaPurpose:
+      x-protobuf: { message: MediaPurpose, file: proto/media/media_service.proto }
+      type: integer
+      description: 0=UNSPECIFIED, 1=AVATAR, 2=GROUP_AVATAR, 3=CHAT, 4=STICKER
+
+    FileInfo:
+      x-protobuf: { message: FileInfo, file: proto/media/media_service.proto }
+      type: object
+      properties:
+        file_id: { type: string }
+        file_name: { type: string }
+        file_size: { type: integer, format: int64 }
+        mime_type: { type: string }
+        uploaded_at_ms: { type: integer, format: int64 }
+
+    ApplyUploadReq:
+      x-protobuf: { message: ApplyUploadReq, file: proto/media/media_service.proto }
+      type: object
+      required: [request_id, file_name, file_size, mime_type, content_hash]
+      properties:
+        request_id: { type: string }
+        file_name: { type: string }
+        file_size: { type: integer, format: int64 }
+        mime_type: { type: string }
+        content_hash:
+          type: string
+          description: 格式 "sha256:<64hex>"，用于去重和完整性校验
+        purpose: { $ref: '#/components/schemas/MediaPurpose' }
+
+    ApplyUploadRsp:
+      type: object
+      properties:
+        file_id: { type: string }
+        already_exists:
+          type: boolean
+          description: true=去重命中，无需上传
+        upload_url:
+          type: string
+          description: presigned PUT URL（dedup 时为空）
+        headers:
+          type: object
+          additionalProperties: { type: string }
+          description: 客户端 PUT 时必须携带的 HTTP headers
+        expires_in_sec: { type: integer }
+
+    CompleteUploadReq:
+      x-protobuf: { message: CompleteUploadReq, file: proto/media/media_service.proto }
+      type: object
+      required: [request_id, file_id]
+      properties:
+        request_id: { type: string }
+        file_id: { type: string }
+
+    CompleteUploadRsp:
+      type: object
+      properties:
+        file_info: { $ref: '#/components/schemas/FileInfo' }
+
+    ApplyDownloadReq:
+      x-protobuf: { message: ApplyDownloadReq, file: proto/media/media_service.proto }
+      type: object
+      required: [request_id, file_id]
+      properties:
+        request_id: { type: string }
+        file_id: { type: string }
+
+    ApplyDownloadRsp:
+      type: object
+      properties:
+        download_url:
+          type: string
+          description: presigned GET URL
+        expires_in_sec: { type: integer }
+        file_info: { $ref: '#/components/schemas/FileInfo' }
+
+    GetFileInfoReq:
+      x-protobuf: { message: GetFileInfoReq, file: proto/media/media_service.proto }
+      type: object
+      required: [request_id, file_id]
+      properties:
+        request_id: { type: string }
+        file_id: { type: string }
+
+    GetFileInfoRsp:
+      type: object
+      properties:
+        file_info: { $ref: '#/components/schemas/FileInfo' }
+
+    SpeechRecognitionReq:
+      x-protobuf: { message: SpeechRecognitionReq, file: proto/media/media_service.proto }
+      type: object
+      required: [request_id, speech_content]
+      properties:
+        request_id: { type: string }
+        speech_content:
+          type: string
+          format: byte
+          description: 音频二进制数据（base64 编码）
+
+    SpeechRecognitionRsp:
+      type: object
+      properties:
+        recognition_result:
+          type: string
+          description: 识别出的文字
