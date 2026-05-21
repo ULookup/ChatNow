@@ -12,6 +12,7 @@
 #include "infra/etcd.hpp"
 #include "mq/channel.hpp"
 #include "infra/logger.hpp"
+#include "infra/metrics.hpp"
 #include "utils/utils.hpp"
 #include "dao/data_es.hpp"
 #include "dao/data_redis.hpp"
@@ -173,7 +174,8 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "insert members failed");
             invalidate_members_cache_(cid);
-            (void)_es_conv->append_data(ent);
+            if (!_es_conv->append_data(ent))
+                metrics::g_degraded_es_write_total << 1;
 
             // 回填响应
             auto* out = rsp->mutable_conversation();
@@ -215,7 +217,8 @@ public:
             if(!_mysql_conv->update(c))
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "update failed");
-            (void)_es_conv->append_data(*c);
+            if (!_es_conv->append_data(*c))
+                metrics::g_degraded_es_write_total << 1;
 
             auto* out = rsp->mutable_conversation();
             out->set_conversation_id(c->conversation_id());
@@ -244,7 +247,8 @@ public:
                                            ::chatnow::ConversationStatus::DISMISSED))
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "update_status failed");
-            (void)_es_conv->remove(req->conversation_id());
+            if (!_es_conv->remove(req->conversation_id()))
+                metrics::g_degraded_es_write_total << 1;
             invalidate_members_cache_(req->conversation_id());
             // 推送 CONVERSATION_DISMISSED_NOTIFY 留待 Push 接入；本期 fail-soft 不推
         });
@@ -696,6 +700,7 @@ private:
         auto channel = _mm_channels->choose(_identity_service_name);
         if (!channel) {
             LOG_ERROR("rid={} identity 子服务节点不可达 svc={}", rid, _identity_service_name);
+            metrics::g_degraded_identity_total << 1;
             return false;
         }
         ::chatnow::identity::IdentityService_Stub stub(channel.get());
@@ -708,11 +713,13 @@ private:
         stub.GetMultiUserInfo(&out_cntl, &ireq, &irsp, nullptr);
         if (out_cntl.Failed()) {
             LOG_ERROR("rid={} GetMultiUserInfo brpc 失败: {}", rid, out_cntl.ErrorText());
+            metrics::g_degraded_identity_total << 1;
             return false;
         }
         if (!irsp.header().success()) {
             LOG_ERROR("rid={} GetMultiUserInfo 业务失败: code={} msg={}",
                       rid, irsp.header().error_code(), irsp.header().error_message());
+            metrics::g_degraded_identity_total << 1;
             return false;
         }
         for (auto &kv : irsp.users_info()) out.insert({kv.first, kv.second});
@@ -728,7 +735,10 @@ private:
                              ::chatnow::message::MessagePreview& out)
     {
         auto channel = _mm_channels->choose(_message_service_name);
-        if (!channel) return false;
+        if (!channel) {
+            metrics::g_degraded_message_total << 1;
+            return false;
+        }
         ::chatnow::message::MessageService_Stub stub(channel.get());
         ::chatnow::message::SyncMessagesReq  mreq;
         ::chatnow::message::SyncMessagesRsp  mrsp;
@@ -740,6 +750,7 @@ private:
         ::chatnow::auth::forward_auth_metadata(in_cntl, &out_cntl);
         stub.SyncMessages(&out_cntl, &mreq, &mrsp, nullptr);
         if (out_cntl.Failed() || !mrsp.header().success() || mrsp.messages_size() == 0) {
+            metrics::g_degraded_message_total << 1;
             return false;
         }
         // Message → MessagePreview 字段映射（content_preview 由 Message 服务生成，
