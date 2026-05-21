@@ -1,0 +1,660 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Conversation API
+  version: 3.0.0
+  description: |
+    会话管理域。Proto: proto/conversation/conversation_service.proto
+    Service: chatnow.conversation.ConversationService
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/conversation/list:
+    post:
+      summary: 会话列表
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: ListConversations, request: ListConversationsReq, response: ListConversationsRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ListConversationsReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ListConversationsRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/get:
+    post:
+      summary: 获取会话详情
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: GetConversation, request: GetConversationReq, response: GetConversationRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetConversationReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetConversationRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/create:
+    post:
+      summary: 创建会话
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: CreateConversation, request: CreateConversationReq, response: CreateConversationRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/CreateConversationReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/CreateConversationRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/update:
+    post:
+      summary: 更新会话信息
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: UpdateConversation, request: UpdateConversationReq, response: UpdateConversationRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UpdateConversationReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/UpdateConversationRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/dismiss:
+    post:
+      summary: 解散群聊
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: DismissConversation, request: DismissConversationReq, response: DismissConversationRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/DismissConversationReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/add_members:
+    post:
+      summary: 添加成员
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: AddMembers, request: AddMembersReq, response: AddMembersRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/AddMembersReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/remove_members:
+    post:
+      summary: 移除成员
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: RemoveMembers, request: RemoveMembersReq, response: RemoveMembersRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/RemoveMembersReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/transfer_owner:
+    post:
+      summary: 转让群主
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: TransferOwner, request: TransferOwnerReq, response: TransferOwnerRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/TransferOwnerReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/change_role:
+    post:
+      summary: 修改成员角色
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: ChangeMemberRole, request: ChangeMemberRoleReq, response: ChangeMemberRoleRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ChangeMemberRoleReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/list_members:
+    post:
+      summary: 成员列表
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: ListMembers, request: ListMembersReq, response: ListMembersRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ListMembersReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ListMembersRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/set_mute:
+    post:
+      summary: 设置免打扰
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: SetMute, request: SetMuteReq, response: SetMuteRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SetMuteReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SetMuteRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/set_pin:
+    post:
+      summary: 设置置顶
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: SetPin, request: SetPinReq, response: SetPinRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SetPinReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SetPinRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/set_visible:
+    post:
+      summary: 设置可见性
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: SetVisible, request: SetVisibleReq, response: SetVisibleRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SetVisibleReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SetVisibleRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/quit:
+    post:
+      summary: 退出会话
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: QuitConversation, request: QuitConversationReq, response: QuitConversationRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/QuitConversationReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/mark_read:
+    post:
+      summary: 标记已读
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: MarkRead, request: MarkReadReq, response: MarkReadRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/MarkReadReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/save_draft:
+    post:
+      summary: 保存草稿
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: SaveDraft, request: SaveDraftReq, response: SaveDraftRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SaveDraftReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SaveDraftRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/search:
+    post:
+      summary: 搜索会话
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: SearchConversations, request: SearchConversationsReq, response: SearchConversationsRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SearchConversationsReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SearchConversationsRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/conversation/get_member_ids:
+    post:
+      summary: 获取成员ID列表
+      tags: [Conversation]
+      x-protobuf: { service: chatnow.conversation.ConversationService, rpc: GetMemberIds, request: GetMemberIdsReq, response: GetMemberIdsRsp, file: proto/conversation/conversation_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetMemberIdsReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetMemberIdsRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Success:
+      description: 成功（仅 ResponseHeader，无额外数据）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    ConversationType:
+      x-protobuf: { message: ConversationType, file: proto/conversation/conversation_service.proto }
+      type: integer
+      description: 0=UNSPECIFIED, 1=PRIVATE, 2=GROUP, 3=CHANNEL
+
+    ConversationStatus:
+      x-protobuf: { message: ConversationStatus, file: proto/conversation/conversation_service.proto }
+      type: integer
+      description: 0=NORMAL, 1=ARCHIVED, 2=DISMISSED
+
+    MemberRole:
+      x-protobuf: { message: MemberRole, file: proto/conversation/conversation_service.proto }
+      type: integer
+      description: 0=MEMBER, 1=ADMIN, 2=OWNER
+
+    Conversation:
+      type: object
+      properties:
+        conversation_id: { type: string }
+        type: { $ref: '#/components/schemas/ConversationType' }
+        name: { type: string }
+        avatar_url: { type: string }
+        description: { type: string }
+        created_at_ms: { type: integer, format: int64 }
+        member_count: { type: integer }
+        top_member_ids:
+          type: array
+          items: { type: string }
+        status: { $ref: '#/components/schemas/ConversationStatus' }
+        last_message: { $ref: '#/components/schemas/MessagePreview' }
+        self: { $ref: '#/components/schemas/SelfMemberInfo' }
+
+    SelfMemberInfo:
+      type: object
+      properties:
+        role: { $ref: '#/components/schemas/MemberRole' }
+        joined_at_ms: { type: integer, format: int64 }
+        is_muted: { type: boolean }
+        is_pinned: { type: boolean }
+        pin_time_ms: { type: integer, format: int64 }
+        is_visible: { type: boolean }
+        last_read_seq: { type: integer }
+        unread_count: { type: integer }
+        draft: { type: string }
+
+    MemberItem:
+      type: object
+      properties:
+        user_info: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+        role: { $ref: '#/components/schemas/MemberRole' }
+        join_time_ms: { type: integer, format: int64 }
+
+    MessagePreview:
+      x-protobuf: { message: MessagePreview, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        message_id: { type: integer, format: int64 }
+        sender_id: { type: string }
+        message_type: { type: integer }
+        content_preview: { type: string }
+        sent_at_ms: { type: integer, format: int64 }
+        status: { type: integer }
+
+    ListConversationsReq:
+      x-protobuf: { message: ListConversationsReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      properties:
+        request_id: { type: string }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageRequest' }
+
+    ListConversationsRsp:
+      type: object
+      properties:
+        conversations:
+          type: array
+          items: { $ref: '#/components/schemas/Conversation' }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageResponse' }
+
+    GetConversationReq:
+      x-protobuf: { message: GetConversationReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+
+    GetConversationRsp:
+      type: object
+      properties:
+        conversation: { $ref: '#/components/schemas/Conversation' }
+
+    CreateConversationReq:
+      x-protobuf: { message: CreateConversationReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, type, member_ids]
+      properties:
+        request_id: { type: string }
+        type: { $ref: '#/components/schemas/ConversationType' }
+        name: { type: string }
+        avatar_url: { type: string }
+        description: { type: string }
+        member_ids:
+          type: array
+          items: { type: string }
+
+    CreateConversationRsp:
+      type: object
+      properties:
+        conversation: { $ref: '#/components/schemas/Conversation' }
+
+    UpdateConversationReq:
+      x-protobuf: { message: UpdateConversationReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        name: { type: string }
+        avatar_url: { type: string }
+        description: { type: string }
+        announcement: { type: string }
+
+    UpdateConversationRsp:
+      type: object
+      properties:
+        conversation: { $ref: '#/components/schemas/Conversation' }
+
+    DismissConversationReq:
+      x-protobuf: { message: DismissConversationReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+
+    AddMembersReq:
+      x-protobuf: { message: AddMembersReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, member_ids]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        member_ids:
+          type: array
+          items: { type: string }
+
+    RemoveMembersReq:
+      x-protobuf: { message: RemoveMembersReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, member_ids]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        member_ids:
+          type: array
+          items: { type: string }
+
+    TransferOwnerReq:
+      x-protobuf: { message: TransferOwnerReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, new_owner_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        new_owner_id: { type: string }
+
+    ChangeMemberRoleReq:
+      x-protobuf: { message: ChangeMemberRoleReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, target_user_id, role]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        target_user_id: { type: string }
+        role: { $ref: '#/components/schemas/MemberRole' }
+
+    ListMembersReq:
+      x-protobuf: { message: ListMembersReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageRequest' }
+
+    ListMembersRsp:
+      type: object
+      properties:
+        members:
+          type: array
+          items: { $ref: '#/components/schemas/MemberItem' }
+        page: { $ref: '../openapi-common.yaml#/components/schemas/PageResponse' }
+
+    SetMuteReq:
+      x-protobuf: { message: SetMuteReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, mute]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        mute: { type: boolean }
+
+    SetMuteRsp:
+      type: object
+      properties:
+        self: { $ref: '#/components/schemas/SelfMemberInfo' }
+
+    SetPinReq:
+      x-protobuf: { message: SetPinReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, pin]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        pin: { type: boolean }
+
+    SetPinRsp:
+      type: object
+      properties:
+        self: { $ref: '#/components/schemas/SelfMemberInfo' }
+
+    SetVisibleReq:
+      x-protobuf: { message: SetVisibleReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, visible]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        visible: { type: boolean }
+
+    SetVisibleRsp:
+      type: object
+      properties:
+        self: { $ref: '#/components/schemas/SelfMemberInfo' }
+
+    QuitConversationReq:
+      x-protobuf: { message: QuitConversationReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+
+    MarkReadReq:
+      x-protobuf: { message: MarkReadReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, last_read_seq]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        last_read_seq: { type: integer }
+
+    SaveDraftReq:
+      x-protobuf: { message: SaveDraftReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id, draft]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        draft: { type: string }
+
+    SaveDraftRsp:
+      type: object
+      properties:
+        self: { $ref: '#/components/schemas/SelfMemberInfo' }
+
+    SearchConversationsReq:
+      x-protobuf: { message: SearchConversationsReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, search_key]
+      properties:
+        request_id: { type: string }
+        search_key: { type: string }
+
+    SearchConversationsRsp:
+      type: object
+      properties:
+        conversations:
+          type: array
+          items: { $ref: '#/components/schemas/Conversation' }
+
+    GetMemberIdsReq:
+      x-protobuf: { message: GetMemberIdsReq, file: proto/conversation/conversation_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+
+    GetMemberIdsRsp:
+      type: object
+      properties:
+        member_ids:
+          type: array
+          items: { type: string }
