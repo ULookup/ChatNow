@@ -749,9 +749,16 @@ private:
         brpc::Controller out_cntl;
         ::chatnow::auth::forward_auth_metadata(in_cntl, &out_cntl);
         stub.SyncMessages(&out_cntl, &mreq, &mrsp, nullptr);
-        if (out_cntl.Failed() || !mrsp.header().success() || mrsp.messages_size() == 0) {
+        if (out_cntl.Failed()) {
             metrics::g_degraded_message_total << 1;
             return false;
+        }
+        if (!mrsp.header().success()) {
+            metrics::g_degraded_message_total << 1;
+            return false;
+        }
+        if (mrsp.messages_size() == 0) {
+            return false;  // normal: no new messages
         }
         // Message → MessagePreview 字段映射（content_preview 由 Message 服务生成，
         // 本服务这一路只返回结构化字段，preview 文本留空由前端兜底）。
