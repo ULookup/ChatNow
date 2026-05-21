@@ -557,7 +557,7 @@ public:
 
             int limit = req->page().limit() > 0 ? req->page().limit() : 50;
             if (limit > 200) limit = 200;
-            int start = req->page().cursor();
+            int start = std::max(0, req->page().cursor());
             int end = std::min(start + limit, total);
             std::vector<std::string> page_uids;
             if (start < total)
