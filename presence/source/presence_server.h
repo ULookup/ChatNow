@@ -316,7 +316,10 @@ public:
             std::string target = (lo == auth.user_id) ? hi : lo;
 
             auto channel = _channels->choose(_push_service_name);
-            if (!channel) return;
+            if (!channel) {
+                LOG_WARN("SendTyping 推送失败: Push 不可用 conv_id={}", conv_id);
+                return;
+            }
 
             ::chatnow::push::NotifyMessage notify;
             notify.set_notify_type(::chatnow::push::NotifyType::TYPING_NOTIFY);
