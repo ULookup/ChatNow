@@ -1,0 +1,381 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Identity API
+  version: 3.0.0
+  description: |
+    身份认证域。Proto: proto/identity/identity_service.proto
+    Service: chatnow.identity.IdentityService
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/identity/send_verify_code:
+    post:
+      summary: 发送验证码
+      tags: [Identity]
+      security: []
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: SendVerifyCode, request: SendVerifyCodeReq, response: SendVerifyCodeRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SendVerifyCodeReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SendVerifyCodeRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/register:
+    post:
+      summary: 注册
+      tags: [Identity]
+      security: []
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: Register, request: RegisterReq, response: RegisterRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/RegisterReq' }
+      responses:
+        '200':
+          description: 成功，返回 tokens 和用户信息
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/RegisterRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/login:
+    post:
+      summary: 登录
+      tags: [Identity]
+      security: []
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: Login, request: LoginReq, response: LoginRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/LoginReq' }
+      responses:
+        '200':
+          description: 成功，返回 tokens 和用户信息
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/LoginRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/refresh_token:
+    post:
+      summary: 刷新令牌
+      tags: [Identity]
+      security: []
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: RefreshToken, request: RefreshTokenReq, response: RefreshTokenRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/RefreshTokenReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/RefreshTokenRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/logout:
+    post:
+      summary: 登出
+      description: user_id/device_id 从 JWT 提取，body 仅需 request_id
+      tags: [Identity]
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: Logout, request: LogoutReq, response: LogoutRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/LogoutReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/get_profile:
+    post:
+      summary: 获取个人信息
+      description: user_id 为空时查自己
+      tags: [Identity]
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: GetProfile, request: GetProfileReq, response: GetProfileRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetProfileReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetProfileRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/update_profile:
+    post:
+      summary: 更新个人信息
+      tags: [Identity]
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: UpdateProfile, request: UpdateProfileReq, response: UpdateProfileRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UpdateProfileReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/UpdateProfileRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/search_users:
+    post:
+      summary: 搜索用户
+      tags: [Identity]
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: SearchUsers, request: SearchUsersReq, response: SearchUsersRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SearchUsersReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SearchUsersRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/identity/get_multi_info:
+    post:
+      summary: 批量获取用户信息
+      tags: [Identity]
+      x-protobuf: { service: chatnow.identity.IdentityService, rpc: GetMultiUserInfo, request: GetMultiUserInfoReq, response: GetMultiUserInfoRsp, file: proto/identity/identity_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetMultiUserInfoReq' }
+      responses:
+        '200':
+          description: 成功，返回 user_id -> UserInfo 映射
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetMultiUserInfoRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        HTTP Header: Authorization: Bearer <access_token>
+        从 /service/identity/login 或 /service/identity/register 获取
+
+  responses:
+    Success:
+      description: 成功（仅 ResponseHeader，无额外数据）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    AuthTokens:
+      x-protobuf: { message: AuthTokens, file: proto/identity/identity_service.proto }
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        access_expires_in_sec: { type: integer }
+        refresh_expires_in_sec: { type: integer }
+
+    UsernamePassword:
+      type: object
+      properties:
+        username: { type: string }
+        password: { type: string }
+
+    PhoneVerifyCode:
+      type: object
+      properties:
+        phone: { type: string }
+        verify_code_id: { type: string }
+        verify_code: { type: string }
+
+    RegisterReq:
+      x-protobuf: { message: RegisterReq, file: proto/identity/identity_service.proto }
+      type: object
+      required: [request_id, nickname]
+      properties:
+        request_id: { type: string }
+        nickname: { type: string }
+        credential:
+          oneOf:
+            - { $ref: '#/components/schemas/UsernamePassword' }
+            - { $ref: '#/components/schemas/PhoneVerifyCode' }
+
+    RegisterRsp:
+      type: object
+      properties:
+        user_id: { type: string }
+        tokens: { $ref: '#/components/schemas/AuthTokens' }
+        user_info: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+
+    LoginReq:
+      x-protobuf: { message: LoginReq, file: proto/identity/identity_service.proto }
+      type: object
+      required: [request_id]
+      properties:
+        request_id: { type: string }
+        device_id:
+          type: string
+          description: 设备ID，透传入 JWT payload
+        device_name: { type: string }
+        credential:
+          oneOf:
+            - { $ref: '#/components/schemas/UsernamePassword' }
+            - { $ref: '#/components/schemas/PhoneVerifyCode' }
+
+    LoginRsp:
+      type: object
+      properties:
+        tokens: { $ref: '#/components/schemas/AuthTokens' }
+        user_info: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+
+    LogoutReq:
+      type: object
+      properties:
+        request_id: { type: string }
+
+    SendVerifyCodeReq:
+      x-protobuf: { message: SendVerifyCodeReq, file: proto/identity/identity_service.proto }
+      type: object
+      required: [request_id]
+      properties:
+        request_id: { type: string }
+        destination:
+          oneOf:
+            - type: object
+              properties: { email: { type: string } }
+            - type: object
+              properties: { phone: { type: string } }
+
+    SendVerifyCodeRsp:
+      type: object
+      properties:
+        verify_code_id: { type: string }
+
+    RefreshTokenReq:
+      type: object
+      required: [request_id, refresh_token]
+      properties:
+        request_id: { type: string }
+        refresh_token: { type: string }
+
+    RefreshTokenRsp:
+      type: object
+      properties:
+        tokens: { $ref: '#/components/schemas/AuthTokens' }
+
+    GetProfileReq:
+      type: object
+      properties:
+        request_id: { type: string }
+        user_id:
+          type: string
+          description: 空=查自己
+
+    GetProfileRsp:
+      type: object
+      properties:
+        user_info: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+
+    UpdateProfileReq:
+      type: object
+      properties:
+        request_id: { type: string }
+        nickname: { type: string }
+        bio: { type: string }
+        avatar_file_id: { type: string }
+        phone: { type: string }
+
+    UpdateProfileRsp:
+      type: object
+      properties:
+        user_info: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+
+    SearchUsersReq:
+      type: object
+      required: [request_id, search_key]
+      properties:
+        request_id: { type: string }
+        search_key: { type: string }
+
+    SearchUsersRsp:
+      type: object
+      properties:
+        user_info:
+          type: array
+          items: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+
+    GetMultiUserInfoReq:
+      type: object
+      required: [request_id, users_id]
+      properties:
+        request_id: { type: string }
+        users_id:
+          type: array
+          items: { type: string }
+
+    GetMultiUserInfoRsp:
+      type: object
+      properties:
+        users_info:
+          type: object
+          additionalProperties: { $ref: '../openapi-common.yaml#/components/schemas/UserInfo' }
+          description: user_id -> UserInfo 映射
