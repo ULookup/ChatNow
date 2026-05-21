@@ -369,12 +369,9 @@ public:
             if (!target || target->is_quit())
                 throw ServiceError(::chatnow::error::kConversationNotMember,
                                    "new owner must be a member");
-            _mysql_member->update_role(req->conversation_id(), req->new_owner_id(),
-                                       ::chatnow::MemberRole::OWNER);
-            _mysql_member->update_role(req->conversation_id(), auth.user_id,
-                                       ::chatnow::MemberRole::ADMIN);
-            auto c = _mysql_conv->select(req->conversation_id());
-            if (c) { c->owner_id(req->new_owner_id()); _mysql_conv->update(c); }
+            if (!_mysql_member->transfer_owner(req->conversation_id(), auth.user_id, req->new_owner_id()))
+                throw ServiceError(::chatnow::error::kSystemInternalError,
+                                   "transfer_owner failed");
         });
     }
 

@@ -414,6 +414,44 @@ public:
         return true;
     }
 
+    /* brief: 原子转让群主 — 一个事务内完成 role 交换 + conversation.owner_id 更新
+     *  - FOR UPDATE 锁住两行 member + 一行 conversation，防并发转让
+     *  - 校验 old_owner 确实是 OWNER、new_owner 是活跃成员
+     *  - 成功返回 true，失败返回 false
+     */
+    bool transfer_owner(const std::string &cid,
+                        const std::string &old_owner_id,
+                        const std::string &new_owner_id) {
+        try {
+            odb::transaction trans(_db->begin());
+
+            using MQuery = odb::query<ConversationMember>;
+            auto m1 = _db->query_one<ConversationMember>(
+                (MQuery::conversation_id == cid && MQuery::user_id == old_owner_id) + " FOR UPDATE");
+            auto m2 = _db->query_one<ConversationMember>(
+                (MQuery::conversation_id == cid && MQuery::user_id == new_owner_id) + " FOR UPDATE");
+
+            if (!m1 || !m2 || m2->is_quit()) { trans.commit(); return false; }
+            if (m1->role() != MemberRole::OWNER) { trans.commit(); return false; }
+
+            m1->role(MemberRole::ADMIN);
+            m2->role(MemberRole::OWNER);
+            _db->update(*m1);
+            _db->update(*m2);
+
+            using ConvQuery = odb::query<Conversation>;
+            auto c = _db->query_one<Conversation>(
+                ConvQuery::conversation_id == cid);
+            if (c) { c->owner_id(new_owner_id); _db->update(*c); }
+
+            trans.commit();
+            return true;
+        } catch (std::exception &e) {
+            LOG_ERROR("transfer_owner 失败 {}-{}-{}: {}", cid, old_owner_id, new_owner_id, e.what());
+            return false;
+        }
+    }
+
     /* brief: 我的会话列表（置顶 -> 最近活跃；过滤已退群与隐藏）
      *  - ORDER BY 不再依赖已删字段 c.last_message_time
      *  - 用 c.max_seq 排序，保证活跃群优先（max_seq 越大越活跃）
