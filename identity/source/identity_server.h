@@ -7,6 +7,9 @@
 #include "dao/data_es.hpp"      // es数据管理客户端封装
 #include "dao/mysql_user.hpp"   // mysql数据管理客户端封装
 #include "dao/data_redis.hpp"   // redis数据管理客户端封装
+#include "infra/metrics.hpp"
+#include <thread>
+#include <chrono>
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
@@ -39,19 +42,72 @@ public:
                         const std::shared_ptr<MailClient> &mail_client,
                         const std::shared_ptr<auth::JwtCodec> &jwt_codec,
                         const std::shared_ptr<auth::JwtStore> &jwt_store,
-                        const std::string &media_public_url_prefix)
+                        const std::string &media_public_url_prefix,
+                        const ESOutbox::ptr &es_outbox,
+                        const std::shared_ptr<elasticlient::Client> &es_reaper_client)
         : _mysql_user(std::make_shared<UserTable>(mysql_client)),
           _es_user(std::make_shared<ESUser>(es_client)),
           _redis_codes(std::make_shared<Codes>(redis_client)),
           _mail_client(mail_client),
           _jwt_codec(jwt_codec),
           _jwt_store(jwt_store),
-          _media_public_url_prefix(media_public_url_prefix)
+          _media_public_url_prefix(media_public_url_prefix),
+          _es_outbox(es_outbox),
+          _es_user_reaper(std::make_shared<ESUser>(es_reaper_client))
     {
         _es_user->create_index();
     }
 
     ~IdentityServiceImpl() override = default;
+
+    void start_es_outbox_reaper() {
+        _es_reaper_running = std::make_shared<std::atomic<bool>>(true);
+        _es_reaper_thread = std::make_shared<std::thread>([this]() {
+            while (*_es_reaper_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                try {
+                    auto items = _es_outbox->peek(50);
+                    for (const auto &item : items) {
+                        if (replay_es_write_(item))
+                            _es_outbox->remove(item);
+                    }
+                } catch (std::exception &e) {
+                    LOG_WARN("ESOutbox reaper 异常: {}", e.what());
+                }
+            }
+        });
+    }
+
+    void stop_es_outbox_reaper() {
+        if (_es_reaper_running) *_es_reaper_running = false;
+        if (_es_reaper_thread && _es_reaper_thread->joinable())
+            _es_reaper_thread->join();
+    }
+
+    bool replay_es_write_(const std::string &payload) {
+        if (!_es_user_reaper) {
+            LOG_ERROR("ESOutbox replay: _es_user_reaper is null");
+            return false;
+        }
+        Json::Value root;
+        if (!UnSerialize(payload, root)) {
+            LOG_WARN("ESOutbox replay: failed to parse payload");
+            return false;
+        }
+        std::string op = root.get("op", "").asString();
+        if (op == "upsert") {
+            return _es_user_reaper->append_data(
+                root.get("uid", "").asString(),
+                root.get("mail", "").asString(),
+                root.get("phone", "").asString(),
+                root.get("nick", "").asString(),
+                root.get("desc", "").asString(),
+                root.get("avatar", "").asString(),
+                root.get("status", 0).asInt());
+        }
+        LOG_WARN("ESOutbox replay: unknown op '{}'", op);
+        return false;
+    }
 
     /* brief: IdentityService.Login —— 用户名密码登录，签发 access+refresh */
     void Login(::google::protobuf::RpcController* controller,
@@ -272,7 +328,11 @@ public:
                     throw ServiceError(::chatnow::error::kSystemInternalError,
                                        "db insert failed");
                 }
-                _es_user->append_data(user_id, "", phone, nickname, "", "");
+                std::string ob_payload = outbox_payload_upsert_(
+                    user_id, "", phone, nickname, "", "", 0);
+                retry_es_write_(ob_payload, [&]() {
+                    return _es_user->append_data(user_id, "", phone, nickname, "", "");
+                });
             } else if (request->has_phone_code()) {
                 throw ServiceError(::chatnow::error::kNotImplemented,
                                    "phone_code register not yet supported");
@@ -418,9 +478,15 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "db update failed");
             }
-            _es_user->append_data(user->user_id(), user->mail(), user->phone(),
-                                  user->nickname(), user->description(),
-                                  user->avatar_id());
+            std::string ob_payload = outbox_payload_upsert_(
+                user->user_id(), user->mail(), user->phone(),
+                user->nickname(), user->description(),
+                user->avatar_id(), 0);
+            retry_es_write_(ob_payload, [&]() {
+                return _es_user->append_data(user->user_id(), user->mail(), user->phone(),
+                                             user->nickname(), user->description(),
+                                             user->avatar_id());
+            });
             fill_user_info(response->mutable_user_info(), *user);
         });
     }
@@ -470,6 +536,50 @@ private:
     std::shared_ptr<auth::JwtCodec>     _jwt_codec;
     std::shared_ptr<auth::JwtStore>     _jwt_store;
     std::string                         _media_public_url_prefix;
+    ESOutbox::ptr                          _es_outbox;
+    std::shared_ptr<ESUser>                _es_user_reaper;
+    std::shared_ptr<std::atomic<bool>>     _es_reaper_running;
+    std::shared_ptr<std::thread>           _es_reaper_thread;
+
+    bool retry_es_write_(const std::string &outbox_payload,
+                         std::function<bool()> es_op)
+    {
+        for (int i = 0; i < 3; ++i) {
+            if (es_op()) return true;
+            if (i < 2) {
+                metrics::g_es_retry_total << 1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << i)));
+            }
+        }
+        if (_es_outbox) {
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            _es_outbox->enqueue(outbox_payload, static_cast<long long>(now_ms));
+        }
+        metrics::g_degraded_es_write_total << 1;
+        return false;
+    }
+
+    static std::string outbox_payload_upsert_(const std::string &uid,
+                                               const std::string &mail,
+                                               const std::string &phone,
+                                               const std::string &nickname,
+                                               const std::string &description,
+                                               const std::string &avatar_id,
+                                               int status) {
+        Json::Value root;
+        root["op"] = "upsert";
+        root["uid"] = uid;
+        root["mail"] = mail;
+        root["phone"] = phone;
+        root["nick"] = nickname;
+        root["desc"] = description;
+        root["avatar"] = avatar_id;
+        root["status"] = status;
+        std::string dst;
+        Serialize(root, dst);
+        return dst;
+    }
 
     // ---- 输入校验 ----
     static bool nickname_check(const std::string &nickname) {
