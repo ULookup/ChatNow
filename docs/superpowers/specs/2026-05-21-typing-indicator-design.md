@@ -16,7 +16,7 @@
 | Proto: `TypingReq`, `TypingRsp`, `NotifyTyping`, `TYPING_NOTIFY` | 已定义 |
 | Presence: `SendTyping` 写 Redis `im:presence:typing:{conv_id}` | 已实现 |
 | Push: `PushToUser` WebSocket 下发 | 已实现 |
-| Push: `NotifyTyping` 处理逻辑 | **未实现** |
+| Push: `PushToUser` 透传任意 NotifyMessage | 已实现，无需改动 |
 | Gateway: `/service/presence/send_typing` 路由 | **未实现** |
 
 ## 数据流
