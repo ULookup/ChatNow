@@ -48,6 +48,7 @@ public:
     ConversationServiceImpl(const std::shared_ptr<elasticlient::Client> &es_client,
                             const std::shared_ptr<odb::core::database> &mysql_client,
                             const Members::ptr &members_cache,
+                            const LastMessage::ptr &last_msg_cache,
                             const ServiceManager::ptr &channel_manager,
                             const std::string &identity_service_name,
                             const std::string &media_service_name,
@@ -57,6 +58,7 @@ public:
           _mysql_conv(std::make_shared<ConversationTable>(mysql_client)),
           _mysql_member(std::make_shared<ConversationMemberTable>(mysql_client)),
           _members_cache(members_cache),
+          _last_msg_cache(last_msg_cache),
           _identity_service_name(identity_service_name),
           _media_service_name(media_service_name),
           _message_service_name(message_service_name),
@@ -734,6 +736,12 @@ private:
                              const std::string& cid, unsigned long after_seq,
                              ::chatnow::message::MessagePreview& out)
     {
+        // L1 Redis cache: try cached last message first
+        auto cached = _last_msg_cache->get(cid);
+        if (cached) {
+            if (parse_preview_json_(*cached, out)) return true;
+        }
+
         auto channel = _mm_channels->choose(_message_service_name);
         if (!channel) {
             metrics::g_degraded_message_total << 1;
@@ -768,6 +776,7 @@ private:
         out.set_message_type(m.content().type());
         out.set_sent_at_ms(m.created_at_ms());
         out.set_status(m.status());
+        _last_msg_cache->set(cid, serialize_preview_json_(out));
         return true;
     }
 
@@ -819,11 +828,35 @@ private:
         if (m.has_draft()) out->set_draft(m.draft());
     }
 
+    static std::string serialize_preview_json_(const ::chatnow::message::MessagePreview &p) {
+        std::ostringstream oss;
+        oss << "{\"mid\":\"" << p.message_id() << "\""
+            << ",\"sid\":\"" << p.sender_id() << "\""
+            << ",\"type\":" << static_cast<int>(p.message_type())
+            << ",\"ts\":" << p.sent_at_ms()
+            << ",\"status\":" << static_cast<int>(p.status()) << "}";
+        return oss.str();
+    }
+
+    static bool parse_preview_json_(const std::string &json,
+                                    ::chatnow::message::MessagePreview &out) {
+        Json::Value root;
+        if (!UnSerialize(json, root)) return false;
+        out.set_message_id(root.get("mid", "").asString());
+        out.set_sender_id(root.get("sid", "").asString());
+        out.set_message_type(static_cast<::chatnow::message::MessageType>(
+            root.get("type", 0).asInt()));
+        out.set_sent_at_ms(root.get("ts", 0).asInt64());
+        out.set_status(root.get("status", 0).asInt());
+        return true;
+    }
+
 private:
     ESConversation::ptr           _es_conv;
     ConversationTable::ptr        _mysql_conv;
     ConversationMemberTable::ptr  _mysql_member;
     Members::ptr                  _members_cache;
+    LastMessage::ptr              _last_msg_cache;
     std::string                   _identity_service_name;
     std::string                   _media_service_name;
     std::string                   _message_service_name;
@@ -872,6 +905,7 @@ public:
             _redis_client = std::make_shared<RedisClient>(redis);
         }
         _members_cache = std::make_shared<Members>(_redis_client);
+        _last_msg_cache = std::make_shared<LastMessage>(_redis_client);
     }
     void make_mysql_object(const std::string &user, const std::string &password,
                            const std::string &host, const std::string &dbname,
@@ -908,9 +942,10 @@ public:
         if(!_mysql_client) { LOG_ERROR("还未初始化MySQL模块");   abort(); }
         if(!_mm_channels)  { LOG_ERROR("还未初始化信道管理模块"); abort(); }
         if(!_members_cache){ LOG_ERROR("还未初始化Members缓存");  abort(); }
+        if(!_last_msg_cache){ LOG_ERROR("还未初始化LastMessage缓存"); abort(); }
 
         auto *impl = new ConversationServiceImpl(
-            _es_client, _mysql_client, _members_cache, _mm_channels,
+            _es_client, _mysql_client, _members_cache, _last_msg_cache, _mm_channels,
             _identity_service_name, _media_service_name, _message_service_name, _cfg);
         if(_rpc_server->AddService(impl, brpc::ServiceOwnership::SERVER_OWNS_SERVICE) == -1) {
             LOG_ERROR("添加RPC服务失败!"); abort();
@@ -942,6 +977,7 @@ private:
     std::string                             _redis_seeds;
     RedisClient::ptr       _redis_client;
     Members::ptr                            _members_cache;
+    LastMessage::ptr                        _last_msg_cache;
     std::shared_ptr<odb::core::database>    _mysql_client;
     Discovery::ptr                          _service_discover;
     Registry::ptr                           _reg_client;
