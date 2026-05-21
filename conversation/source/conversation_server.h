@@ -13,6 +13,8 @@
 #include "mq/channel.hpp"
 #include "infra/logger.hpp"
 #include "infra/metrics.hpp"
+#include <thread>
+#include <chrono>
 #include "utils/utils.hpp"
 #include "dao/data_es.hpp"
 #include "dao/data_redis.hpp"
@@ -53,7 +55,9 @@ public:
                             const std::string &identity_service_name,
                             const std::string &media_service_name,
                             const std::string &message_service_name,
-                            const ConversationServiceConfig &cfg)
+                            const ConversationServiceConfig &cfg,
+                            const ESOutbox::ptr &es_outbox,
+                            const std::shared_ptr<elasticlient::Client> &es_reaper_client)
         : _es_conv(std::make_shared<ESConversation>(es_client)),
           _mysql_conv(std::make_shared<ConversationTable>(mysql_client)),
           _mysql_member(std::make_shared<ConversationMemberTable>(mysql_client)),
@@ -63,7 +67,50 @@ public:
           _media_service_name(media_service_name),
           _message_service_name(message_service_name),
           _mm_channels(channel_manager),
-          _cfg(cfg) {}
+          _cfg(cfg),
+          _es_outbox(es_outbox),
+          _es_conv_reaper(std::make_shared<ESConversation>(es_reaper_client)) {}
+
+    /* brief: 解析 Outbox payload 并重放 ES 写入（Reaper 线程调用，使用独立 _es_conv_reaper） */
+    bool replay_es_write_(const std::string &payload) {
+        Json::Value root;
+        if (!UnSerialize(payload, root)) return false;
+        std::string op = root.get("op", "").asString();
+        std::string cid = root.get("cid", "").asString();
+
+        if (op == "upsert") {
+            std::string name = root.get("name", "").asString();
+            int type = root.get("type", 0).asInt();
+            std::string avatar = root.get("avatar", "").asString();
+            int status = root.get("status", 0).asInt();
+            long ut = root.get("ut", 0).asInt64();
+            static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
+            boost::posix_time::ptime update_time = epoch + boost::posix_time::seconds(ut);
+
+            chatnow::Conversation ent(cid, name,
+                static_cast<chatnow::ConversationType>(type),
+                update_time, 0, static_cast<chatnow::ConversationStatus>(status));
+            if (!avatar.empty()) ent.avatar_id(avatar);
+
+            std::vector<std::string> mids;
+            const auto &marr = root["mids"];
+            for (Json::ArrayIndex i = 0; i < marr.size(); ++i)
+                mids.push_back(marr[i].asString());
+
+            return _es_conv_reaper->append_data(ent, mids);
+        }
+        if (op == "delete") {
+            return _es_conv_reaper->remove(cid);
+        }
+        if (op == "upd_members") {
+            std::vector<std::string> mids;
+            const auto &marr = root["mids"];
+            for (Json::ArrayIndex i = 0; i < marr.size(); ++i)
+                mids.push_back(marr[i].asString());
+            return _es_conv_reaper->update_member_ids(cid, mids);
+        }
+        return false;
+    }
 
     ~ConversationServiceImpl() override = default;
 
@@ -886,6 +933,47 @@ private:
         return true;
     }
 
+    static std::string outbox_payload_upsert_(const chatnow::Conversation &c,
+                                               const std::vector<std::string> &mids) {
+        Json::Value root;
+        root["op"] = "upsert";
+        root["cid"] = c.conversation_id();
+        root["name"] = c.conversation_name();
+        root["type"] = static_cast<int>(c.conversation_type());
+        root["avatar"] = c.avatar_id();
+        root["status"] = static_cast<int>(c.status());
+        static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
+        root["ut"] = static_cast<Json::Int64>((c.update_time() - epoch).total_seconds());
+        Json::Value marr(Json::arrayValue);
+        for (const auto &uid : mids) marr.append(uid);
+        root["mids"] = marr;
+        std::string dst;
+        Serialize(root, dst);
+        return dst;
+    }
+
+    static std::string outbox_payload_delete_(const std::string &cid) {
+        Json::Value root;
+        root["op"] = "delete";
+        root["cid"] = cid;
+        std::string dst;
+        Serialize(root, dst);
+        return dst;
+    }
+
+    static std::string outbox_payload_upd_members_(const std::string &cid,
+                                                    const std::vector<std::string> &mids) {
+        Json::Value root;
+        root["op"] = "upd_members";
+        root["cid"] = cid;
+        Json::Value marr(Json::arrayValue);
+        for (const auto &uid : mids) marr.append(uid);
+        root["mids"] = marr;
+        std::string dst;
+        Serialize(root, dst);
+        return dst;
+    }
+
 private:
     ESConversation::ptr           _es_conv;
     ConversationTable::ptr        _mysql_conv;
@@ -897,6 +985,29 @@ private:
     std::string                   _message_service_name;
     ServiceManager::ptr           _mm_channels;
     ConversationServiceConfig     _cfg;
+    ESOutbox::ptr                          _es_outbox;
+    ESConversation::ptr                    _es_conv_reaper;
+
+    /* brief: ES 直写 3 次指数退避重试，全失败入 Outbox */
+    bool retry_es_write_(const std::string &outbox_payload,
+                         std::function<bool()> es_op)
+    {
+        for (int i = 0; i < 3; ++i) {
+            if (es_op()) return true;
+            if (i < 2) {
+                metrics::g_es_retry_total << 1;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << i)));
+            }
+        }
+        // 3 次全失败，入 Outbox
+        if (_es_outbox) {
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            _es_outbox->enqueue(outbox_payload, static_cast<long long>(now_ms));
+        }
+        metrics::g_degraded_es_write_total << 1;
+        return false;
+    }
 };
 
 class ConversationServer
