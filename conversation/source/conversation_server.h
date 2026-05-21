@@ -186,8 +186,10 @@ public:
             all_member_ids.push_back(auth.user_id);
             for (int i = 0; i < req->member_ids_size(); ++i)
                 all_member_ids.push_back(req->member_ids(i));
-            if (!_es_conv->append_data(ent, all_member_ids))
-                metrics::g_degraded_es_write_total << 1;
+            std::string ob_payload = outbox_payload_upsert_(ent, all_member_ids);
+            retry_es_write_(ob_payload, [&]() {
+                return _es_conv->append_data(ent, all_member_ids);
+            });
 
             // 回填响应
             auto* out = rsp->mutable_conversation();
@@ -230,8 +232,10 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "update failed");
             auto uids = _mysql_member->members(req->conversation_id());
-            if (!_es_conv->append_data(*c, uids))
-                metrics::g_degraded_es_write_total << 1;
+            std::string ob_payload = outbox_payload_upsert_(*c, uids);
+            retry_es_write_(ob_payload, [&]() {
+                return _es_conv->append_data(*c, uids);
+            });
 
             auto* out = rsp->mutable_conversation();
             out->set_conversation_id(c->conversation_id());
@@ -260,8 +264,10 @@ public:
                                            ::chatnow::ConversationStatus::DISMISSED))
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "update_status failed");
-            if (!_es_conv->remove(req->conversation_id()))
-                metrics::g_degraded_es_write_total << 1;
+            std::string ob_payload = outbox_payload_delete_(req->conversation_id());
+            retry_es_write_(ob_payload, [&]() {
+                return _es_conv->remove(req->conversation_id());
+            });
             invalidate_members_cache_(req->conversation_id());
             // 推送 CONVERSATION_DISMISSED_NOTIFY 留待 Push 接入；本期 fail-soft 不推
         });
@@ -288,9 +294,13 @@ public:
                                    "set_quit failed");
             invalidate_members_cache_(req->conversation_id());
             auto updated_uids = _mysql_member->members(req->conversation_id());
-            if (!updated_uids.empty() &&
-                !_es_conv->update_member_ids(req->conversation_id(), updated_uids))
-                metrics::g_degraded_es_write_total << 1;
+            if (!updated_uids.empty()) {
+                std::string ob_payload = outbox_payload_upd_members_(
+                    req->conversation_id(), updated_uids);
+                retry_es_write_(ob_payload, [&]() {
+                    return _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+                });
+            }
             // set_quit 内部已经维护 member_count（_update_session_member_count(-1)），
             // 不需要再 _mysql_conv->update。
         });
@@ -352,9 +362,13 @@ public:
             }
             invalidate_members_cache_(req->conversation_id());
             auto updated_uids = _mysql_member->members(req->conversation_id());
-            if (!updated_uids.empty() &&
-                !_es_conv->update_member_ids(req->conversation_id(), updated_uids))
-                metrics::g_degraded_es_write_total << 1;
+            if (!updated_uids.empty()) {
+                std::string ob_payload = outbox_payload_upd_members_(
+                    req->conversation_id(), updated_uids);
+                retry_es_write_(ob_payload, [&]() {
+                    return _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+                });
+            }
         });
     }
 
@@ -387,9 +401,13 @@ public:
             if (removed > 0) {
                 invalidate_members_cache_(req->conversation_id());
                 auto updated_uids = _mysql_member->members(req->conversation_id());
-                if (!updated_uids.empty() &&
-                    !_es_conv->update_member_ids(req->conversation_id(), updated_uids))
-                    metrics::g_degraded_es_write_total << 1;
+                if (!updated_uids.empty()) {
+                    std::string ob_payload = outbox_payload_upd_members_(
+                        req->conversation_id(), updated_uids);
+                    retry_es_write_(ob_payload, [&]() {
+                        return _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+                    });
+                }
             }
         });
     }
