@@ -441,8 +441,9 @@ public:
 
             using ConvQuery = odb::query<Conversation>;
             auto c = _db->query_one<Conversation>(
-                ConvQuery::conversation_id == cid);
-            if (c) { c->owner_id(new_owner_id); _db->update(*c); }
+                (ConvQuery::conversation_id == cid) + " FOR UPDATE");
+            if (!c) { trans.commit(); return false; }
+            c->owner_id(new_owner_id); _db->update(*c);
 
             trans.commit();
             return true;
