@@ -835,29 +835,31 @@ class ESOutbox
 {
 public:
     using ptr = std::shared_ptr<ESOutbox>;
-    ESOutbox(const RedisClient::ptr &c) : _c(c) {}
+    ESOutbox(const RedisClient::ptr &c, const std::string &key)
+        : _c(c), _key(key) {}
+    ESOutbox(const RedisClient::ptr &c) : ESOutbox(c, "im:es:outbox") {}
 
     void enqueue(const std::string &payload, long long score_ts) {
-        try { _c->zadd(kEsOutboxKey, payload, static_cast<double>(score_ts)); }
+        try { _c->zadd(_key, payload, static_cast<double>(score_ts)); }
         catch(std::exception &e) { LOG_ERROR("ESOutbox.enqueue 失败: {}", e.what()); }
     }
 
     std::vector<std::string> peek(long limit = 50) {
         std::vector<std::string> res;
         try {
-            _c->zrange(kEsOutboxKey, 0, limit - 1, std::back_inserter(res));
+            _c->zrange(_key, 0, limit - 1, std::back_inserter(res));
         } catch(std::exception &e) { LOG_ERROR("ESOutbox.peek 失败: {}", e.what()); }
         return res;
     }
 
     void remove(const std::string &payload) {
-        try { _c->zrem(kEsOutboxKey, payload); }
+        try { _c->zrem(_key, payload); }
         catch(std::exception &e) { LOG_ERROR("ESOutbox.remove 失败: {}", e.what()); }
     }
 
 private:
     RedisClient::ptr _c;
-    static constexpr const char *kEsOutboxKey     = "im:es:outbox";
+    std::string _key;
 };
 
 // =============================================================================
