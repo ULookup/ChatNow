@@ -229,6 +229,7 @@ public:
             .append("avatar_id",         "keyword", "standard", false)
             .append("status",            "integer", "standard", false)
             .append("update_time",       "long",    "standard", false)
+            .append("member_ids",        "keyword", "standard", false)
             .create();
         if(!ret) {
             LOG_ERROR("会话搜索索引创建失败");
@@ -238,17 +239,23 @@ public:
         return true;
     }
 
-    bool append_data(const chatnow::Conversation &c) {
+    bool append_data(const chatnow::Conversation &c,
+                     const std::vector<std::string> &member_ids = {}) {
         static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
         long ts = (c.update_time() - epoch).total_seconds();
-        bool ret = ESInsert(_client, "chat_session")
-            .append("chat_session_id",   c.conversation_id())
-            .append("chat_session_name", c.conversation_name())
-            .append("chat_session_type", static_cast<int>(c.conversation_type()))
-            .append("avatar_id",         c.avatar_id())
-            .append("status",            static_cast<int>(c.status()))
-            .append("update_time",       ts)
-            .insert(c.conversation_id());
+        ESInsert builder(_client, "chat_session");
+        builder.append("chat_session_id",   c.conversation_id())
+               .append("chat_session_name", c.conversation_name())
+               .append("chat_session_type", static_cast<int>(c.conversation_type()))
+               .append("avatar_id",         c.avatar_id())
+               .append("status",            static_cast<int>(c.status()))
+               .append("update_time",       ts);
+        if (!member_ids.empty()) {
+            Json::Value mids(Json::arrayValue);
+            for (const auto &uid : member_ids) mids.append(uid);
+            builder.append("member_ids", mids);
+        }
+        bool ret = builder.insert(c.conversation_id());
         if(!ret) {
             LOG_ERROR("会话搜索数据插入/更新失败 cid={}", c.conversation_id());
             return false;
@@ -258,6 +265,19 @@ public:
 
     bool remove(const std::string &cid) {
         return ESRemove(_client, "chat_session").remove(cid);
+    }
+
+    bool update_member_ids(const std::string &cid,
+                           const std::vector<std::string> &member_ids) {
+        Json::Value mids(Json::arrayValue);
+        for (const auto &uid : member_ids) mids.append(uid);
+        ESUpdate updater(_client, "chat_session");
+        updater.set("member_ids", mids);
+        bool ret = updater.update(cid);
+        if (!ret) {
+            LOG_ERROR("ES update_member_ids 失败 cid={}", cid);
+        }
+        return ret;
     }
 
     std::vector<std::string> search(const std::string &key,
@@ -274,6 +294,25 @@ public:
             builder.append_must_term("chat_session_type",
                                      std::to_string(static_cast<int>(type.value())));
         }
+        Json::Value json_session = builder.search();
+        if(!json_session.isArray()) return res;
+        for(int i = 0; i < (int)json_session.size(); ++i) {
+            res.push_back(json_session[i]["_source"]["chat_session_id"].asString());
+        }
+        return res;
+    }
+
+    std::vector<std::string> search(const std::string &key,
+                                    const std::string &caller_uid,
+                                    int size = 20)
+    {
+        std::vector<std::string> res;
+        ESSearch builder(_client, "chat_session");
+        builder.append_must_match("chat_session_name", key)
+               .append_must_term("status", std::to_string(0))
+               .append_must_term("member_ids", caller_uid)
+               .sort_by("update_time", "desc")
+               .page(0, size);
         Json::Value json_session = builder.search();
         if(!json_session.isArray()) return res;
         for(int i = 0; i < (int)json_session.size(); ++i) {

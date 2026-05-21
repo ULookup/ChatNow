@@ -176,7 +176,11 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "insert members failed");
             invalidate_members_cache_(cid);
-            if (!_es_conv->append_data(ent))
+            std::vector<std::string> all_member_ids;
+            all_member_ids.push_back(auth.user_id);
+            for (int i = 0; i < req->member_ids_size(); ++i)
+                all_member_ids.push_back(req->member_ids(i));
+            if (!_es_conv->append_data(ent, all_member_ids))
                 metrics::g_degraded_es_write_total << 1;
 
             // 回填响应
@@ -276,6 +280,8 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "set_quit failed");
             invalidate_members_cache_(req->conversation_id());
+            auto updated_uids = _mysql_member->members(req->conversation_id());
+            _es_conv->update_member_ids(req->conversation_id(), updated_uids);
             // set_quit 内部已经维护 member_count（_update_session_member_count(-1)），
             // 不需要再 _mysql_conv->update。
         });
@@ -331,6 +337,8 @@ public:
                 }
             }
             invalidate_members_cache_(req->conversation_id());
+            auto updated_uids = _mysql_member->members(req->conversation_id());
+            _es_conv->update_member_ids(req->conversation_id(), updated_uids);
         });
     }
 
@@ -360,7 +368,11 @@ public:
                 _mysql_member->set_quit(req->conversation_id(), uid);
                 ++removed;
             }
-            if (removed > 0) invalidate_members_cache_(req->conversation_id());
+            if (removed > 0) {
+                invalidate_members_cache_(req->conversation_id());
+                auto updated_uids = _mysql_member->members(req->conversation_id());
+                _es_conv->update_member_ids(req->conversation_id(), updated_uids);
+            }
         });
     }
 
@@ -558,13 +570,11 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            auto cid_hits = _es_conv->search(req->search_key(), std::nullopt, 50);
+            auto cid_hits = _es_conv->search(req->search_key(), auth.user_id, 50);
             if (cid_hits.empty()) return;
-            // 仅返回 caller 是成员的会话
             auto convs = _mysql_conv->select(cid_hits);
             for (auto &c : convs) {
-                if (!require_member_(c.conversation_id(), auth.user_id)) continue;
-                if (c.status() == ConversationStatus::DISMISSED)         continue;
+                if (c.status() == ConversationStatus::DISMISSED) continue;
                 auto* out = rsp->add_conversations();
                 out->set_conversation_id(c.conversation_id());
                 out->set_type(static_cast<::chatnow::conversation::ConversationType>(c.conversation_type()));
