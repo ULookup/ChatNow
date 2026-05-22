@@ -726,6 +726,8 @@ private:
             reinterpret_cast<const unsigned char*>(in.data()),
             static_cast<int>(in.size()));
         if (n < 0) return "";
+        int pads = static_cast<int>(std::count(in.begin(), in.end(), '='));
+        if (n > pads) n -= pads;
         out.resize(static_cast<size_t>(n));
         return out;
     }
