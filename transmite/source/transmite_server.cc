@@ -28,21 +28,17 @@ DEFINE_int32(redis_db, 0, "Redis 选择的库");
 DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
 DEFINE_int32(redis_pool_size, 8, "Redis 连接池大小");
 
-DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
-DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
-DEFINE_string(mysql_pswd, "YHY060403", "MySQL服务器访问密码");
-DEFINE_string(mysql_db, "chatnow", "MySQL默认库名称");
-DEFINE_string(mysql_cset, "utf8", "MySQL客户端字符集");
-DEFINE_int32(mysql_port, 0, "MySQL服务器访问端口");
-DEFINE_int32(mysql_pool_count, 4, "MySQL连接池最大连接数量");
-
 DEFINE_string(mq_user, "root", "消息队列服务器访问用户名");
-DEFINE_string(mq_pswd, "YHY060403", "消息队列服务器访问密码");
+DEFINE_string(mq_pswd, "", "消息队列服务器访问密码（可通过 CHATNOW_MQ_PSWD 环境变量设置）");
 DEFINE_string(mq_host, "127.0.0.1:5672", "消息队列服务器访问地址");
 // publisher-only：exchange 必须与 message 服务 mq_msg_exchange 一致
 DEFINE_string(mq_msg_exchange, "chat_msg_exchange", "持久化消息的发布交换机名称（FANOUT，必须与 message.mq_msg_exchange 完全一致）");
 DEFINE_string(mq_msg_queue, "", "publisher-only：留空，避免声明孤儿队列");
 DEFINE_string(mq_msg_binding_key, "", "publisher-only：留空");
+
+DEFINE_int32(rate_limit_user_max, 600, "用户每分钟最大消息数");
+DEFINE_int32(rate_limit_session_max, 3000, "会话每分钟最大消息数");
+DEFINE_int32(rate_limit_window_sec, 60, "限流窗口秒数");
 
 
 
@@ -50,6 +46,16 @@ int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
+
+    // 环境变量兜底：配置文件中不应含密码
+    if (FLAGS_mq_pswd.empty()) {
+        const char *env = std::getenv("CHATNOW_MQ_PSWD");
+        if (env && env[0] != '\0') FLAGS_mq_pswd = env;
+    }
+    if (FLAGS_mq_pswd.empty()) {
+        LOG_ERROR("MQ 密码未设置（请通过 -mq_pswd 或 CHATNOW_MQ_PSWD 环境变量提供）");
+        return 1;
+    }
 
     chatnow::TransmiteServerBuilder tsb;
     // 注意：先初始化 Redis（worker_id 自动分配依赖 Redis），再初始化 ID 生成器

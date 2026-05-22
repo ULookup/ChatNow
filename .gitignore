@@ -1,0 +1,15 @@
+# Build
+build/
+
+# Config with secrets — tracked as .example only
+conf/*.conf
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
