@@ -416,7 +416,7 @@ private:
         if (auth.access_token().empty() || auth.device_id().empty()) {
             LOG_WARN("WS CLIENT_AUTH 缺字段");
             try { conn->close(websocketpp::close::status::unsupported_data,
-                              "access_token/device_id required"); } catch(...) {}
+                              "access_token/device_id required"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
             return;
         }
 
@@ -427,7 +427,7 @@ private:
         } catch (const chatnow::ServiceError &e) {
             LOG_WARN("WS JWT 验签失败: {}", e.what());
             try { conn->close(websocketpp::close::status::unsupported_data,
-                              "auth failed"); } catch(...) {}
+                              "auth failed"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
             return;
         }
 
@@ -927,6 +927,7 @@ public:
         _ws_server->set_access_channels(websocketpp::log::alevel::none);
         _ws_server->clear_error_channels(websocketpp::log::elevel::none);
         _ws_server->init_asio();
+        _ws_server->set_max_message_size(65536);  // 64KB limit
         _ws_server->set_reuse_addr(true);
         _ws_server->set_open_handler([this](websocketpp::connection_hdl hdl) {
             LOG_DEBUG("WS 连接建立 {}", (size_t)_ws_server->get_con_from_hdl(hdl).get());
@@ -1008,6 +1009,9 @@ public:
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
         if (!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
+        if (port == ws_port) {
+            LOG_WARN("Push: rpc_port and ws_port are both {}, may conflict", port);
+        }
         _connections = std::make_shared<Connection>();
         _rpc_server = std::make_shared<brpc::Server>();
         _push_service = new PushServiceImpl(
