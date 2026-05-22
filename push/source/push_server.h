@@ -31,6 +31,7 @@
 #include "message/message_service.pb.h"
 #include "message/message_internal.pb.h"
 #include <sw/redis++/redis++.h>
+#include "picojson/picojson.h"
 #include <openssl/evp.h>
 #include <algorithm>
 #include <thread>
@@ -562,7 +563,11 @@ public:
                     for (const auto &member : batch) {
                         std::string b64, peer;
                         std::vector<std::string> uids;
-                        _parse_outbox_member(member, b64, uids, peer);
+                        if (!_parse_outbox_member(member, b64, uids, peer)) {
+                            LOG_WARN("CrossInstanceOutbox: skip malformed member");
+                            _cross_outbox->remove(member);
+                            continue;
+                        }
 
                         chatnow::message::internal::InternalMessage internal_msg;
                         if (!internal_msg.ParseFromString(_utils_base64_decode(b64))) {
@@ -679,32 +684,35 @@ public:
     }
 
 private:
-    void _parse_outbox_member(const std::string &member,
+    bool _parse_outbox_member(const std::string &member,
                                std::string &b64,
                                std::vector<std::string> &uids,
                                std::string &peer) {
-        auto pos_k = member.find("\"k\":\"");
-        auto pos_u = member.find("\"u\":[");
-        auto pos_p = member.find("\"p\":\"");
-        if (pos_k != std::string::npos && pos_u != std::string::npos) {
-            b64 = member.substr(pos_k + 5, pos_u - pos_k - 8);
+        picojson::value j;
+        std::string err = picojson::parse(j, member);
+        if (!err.empty()) {
+            LOG_WARN("CrossInstanceOutbox JSON parse failed: {}", err);
+            return false;
         }
-        if (pos_p != std::string::npos) {
-            peer = member.substr(pos_p + 5, member.size() - pos_p - 7);
+        if (!j.is<picojson::object>()) return false;
+
+        const auto &obj = j.get<picojson::object>();
+        auto it_k = obj.find("k");
+        if (it_k != obj.end() && it_k->second.is<std::string>()) {
+            b64 = it_k->second.get<std::string>();
         }
-        if (pos_u != std::string::npos) {
-            size_t arr_end = member.find(']', pos_u);
-            if (arr_end != std::string::npos) {
-                std::string arr = member.substr(pos_u + 5, arr_end - pos_u - 5);
-                size_t start = 0;
-                while ((start = arr.find('"', start)) != std::string::npos) {
-                    size_t end = arr.find('"', start + 1);
-                    if (end == std::string::npos) break;
-                    uids.push_back(arr.substr(start + 1, end - start - 1));
-                    start = end + 1;
-                }
+        auto it_p = obj.find("p");
+        if (it_p != obj.end() && it_p->second.is<std::string>()) {
+            peer = it_p->second.get<std::string>();
+        }
+        auto it_u = obj.find("u");
+        if (it_u != obj.end() && it_u->second.is<picojson::array>()) {
+            const auto &arr = it_u->second.get<picojson::array>();
+            for (const auto &elem : arr) {
+                if (elem.is<std::string>()) uids.push_back(elem.get<std::string>());
             }
         }
+        return !b64.empty();
     }
 
     static std::string _utils_base64_encode(const std::string &in) {
