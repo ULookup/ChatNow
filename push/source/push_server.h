@@ -78,7 +78,9 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
-    ~PushServiceImpl() { stop_cross_outbox_reaper(); }
+    ~PushServiceImpl() {
+        stop_cross_outbox_reaper();  // joins _cross_reaper_thread before 'this' destroyed
+    }
 
     void PushToUser(google::protobuf::RpcController* base_cntl,
                     const PushToUserReq* request,
@@ -649,7 +651,7 @@ public:
     void reap_stale_routes_(const std::string &push_service_dir,
                             std::shared_ptr<etcd::Client> etcd_client,
                             LeaderElection::ptr stale_reaper_election,
-                            std::atomic<bool> *running) {
+                            std::shared_ptr<std::atomic<bool>> running) {
         while (running && running->load()) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
             if (!stale_reaper_election || !stale_reaper_election->is_leader())
@@ -784,13 +786,13 @@ public:
     PushServer(const Discovery::ptr &disc,
                const Registry::ptr &reg,
                const std::shared_ptr<brpc::Server> &rpc,
-               server_t *ws_server,
+               std::unique_ptr<server_t> ws_server,
                const MQClient::ptr &mq_client,
                const Subscriber::ptr &push_subscriber,
                PushServiceImpl *push_service = nullptr,
                std::thread *stale_reaper_thread = nullptr,
-               std::atomic<bool> *stale_reaper_running = nullptr)
-        : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(ws_server),
+               std::shared_ptr<std::atomic<bool>> stale_reaper_running = nullptr)
+        : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(std::move(ws_server)),
           _mq_client(mq_client), _push_subscriber(push_subscriber), _push_service(push_service),
           _stale_reaper_thread(stale_reaper_thread), _stale_reaper_running(stale_reaper_running) {}
     ~PushServer() = default;
@@ -806,6 +808,8 @@ public:
             _rpc_server->Stop(0);
         });
         _rpc_server->RunUntilAskedToQuit();
+        // IMPORTANT: MQ subscriber MUST stop before brpc server shutdown.
+        // The MQ callback captures a raw _push_service pointer (owned by brpc via SERVER_OWNS_SERVICE).
         _push_subscriber.reset();
         _mq_client.reset();
         _ws_server->stop();
@@ -831,13 +835,13 @@ private:
     Discovery::ptr _service_discover;
     Registry::ptr _reg_client;
     std::shared_ptr<brpc::Server> _rpc_server;
-    server_t *_ws_server;
+    std::unique_ptr<server_t> _ws_server;
     MQClient::ptr _mq_client;
     Subscriber::ptr _push_subscriber;
     PushServiceImpl *_push_service{nullptr};
     std::thread _ws_thread;
     std::thread *_stale_reaper_thread{nullptr};
-    std::atomic<bool> *_stale_reaper_running{nullptr};
+    std::shared_ptr<std::atomic<bool>> _stale_reaper_running;
 };
 
 class PushServerBuilder
@@ -913,15 +917,16 @@ public:
     }
 
     void make_ws_object(uint16_t ws_port) {
-        _ws_server.set_access_channels(websocketpp::log::alevel::none);
-        _ws_server.clear_error_channels(websocketpp::log::elevel::none);
-        _ws_server.init_asio();
-        _ws_server.set_reuse_addr(true);
-        _ws_server.set_open_handler([this](websocketpp::connection_hdl hdl) {
-            LOG_DEBUG("WS 连接建立 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get());
+        _ws_server = std::make_unique<server_t>();
+        _ws_server->set_access_channels(websocketpp::log::alevel::none);
+        _ws_server->clear_error_channels(websocketpp::log::elevel::none);
+        _ws_server->init_asio();
+        _ws_server->set_reuse_addr(true);
+        _ws_server->set_open_handler([this](websocketpp::connection_hdl hdl) {
+            LOG_DEBUG("WS 连接建立 {}", (size_t)_ws_server->get_con_from_hdl(hdl).get());
         });
-        _ws_server.set_close_handler([this](websocketpp::connection_hdl hdl) {
-            auto conn = _ws_server.get_con_from_hdl(hdl);
+        _ws_server->set_close_handler([this](websocketpp::connection_hdl hdl) {
+            auto conn = _ws_server->get_con_from_hdl(hdl);
             std::string uid, did, jti;
             if (_connections && _connections->client(conn, uid, did, jti)) {
                 _connections->remove(conn);
@@ -930,12 +935,12 @@ public:
                 LOG_DEBUG("WS 关闭 uid={} did={}", uid, did);
             }
         });
-        _ws_server.set_message_handler([this](websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
-            auto conn = _ws_server.get_con_from_hdl(hdl);
+        _ws_server->set_message_handler([this](websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
+            auto conn = _ws_server->get_con_from_hdl(hdl);
             NotifyMessage notify;
             if (!notify.ParseFromString(msg->get_payload())) {
                 LOG_WARN("WS payload 反序列化失败，关闭连接");
-                _ws_server.close(hdl, websocketpp::close::status::unsupported_data,
+                _ws_server->close(hdl, websocketpp::close::status::unsupported_data,
                                  "payload invalid");
                 return;
             }
@@ -945,7 +950,7 @@ public:
             if (!_connections->client(conn, uid_known, did_known, jti_known)) {
                 if (notify.notify_type() != NotifyType::CLIENT_AUTH || !notify.has_client_auth()) {
                     LOG_WARN("WS 首条非 CLIENT_AUTH，关闭连接");
-                    _ws_server.close(hdl, websocketpp::close::status::unsupported_data,
+                    _ws_server->close(hdl, websocketpp::close::status::unsupported_data,
                                      "auth required");
                     return;
                 }
@@ -1017,9 +1022,9 @@ public:
         // WS server — 先于 MQ 订阅
         make_ws_object(ws_port);
         std::error_code ec;
-        _ws_server.listen(ws_port, ec);
+        _ws_server->listen(ws_port, ec);
         if (ec) { LOG_ERROR("Push: WS 监听失败 {}", ec.message()); abort(); }
-        _ws_server.start_accept();
+        _ws_server->start_accept();
 
         // MQ 订阅
         auto callback_inner = std::bind(&PushServiceImpl::onPushMessage, _push_service,
@@ -1042,10 +1047,10 @@ public:
         // Stale route reaper
         if (_stale_reaper_election) {
             _stale_reaper_election->start();
-            _stale_reaper_running = true;
-            _stale_reaper_thread = std::thread([this]() {
+            _stale_reaper_running = std::make_shared<std::atomic<bool>>(true);
+            _stale_reaper_thread = std::thread([this, running = _stale_reaper_running]() {
                 _push_service->reap_stale_routes_(_push_service_dir, _etcd_client,
-                                                  _stale_reaper_election, &_stale_reaper_running);
+                                                  _stale_reaper_election, running);
             });
         }
 
@@ -1056,12 +1061,12 @@ public:
         return std::make_shared<PushServer>(std::move(_service_discover),
                                             std::move(_reg_client),
                                             std::move(_rpc_server),
-                                            &_ws_server,
+                                            std::move(_ws_server),
                                             std::move(_mq_client),
                                             std::move(_push_subscriber),
                                             _push_service,
-                                            &_stale_reaper_thread,
-                                            &_stale_reaper_running);
+                                            std::move(_stale_reaper_thread),
+                                            _stale_reaper_running);
     }
 
 private:
@@ -1093,10 +1098,10 @@ private:
     std::string _push_service_dir;
     LeaderElection::ptr _stale_reaper_election;
     std::thread _stale_reaper_thread;
-    std::atomic<bool> _stale_reaper_running{false};
+    std::shared_ptr<std::atomic<bool>> _stale_reaper_running;
 
     Connection::ptr _connections;
-    server_t _ws_server;
+    std::unique_ptr<server_t> _ws_server;
     PushServiceImpl *_push_service{nullptr};
     std::shared_ptr<brpc::Server> _rpc_server;
 };
