@@ -197,6 +197,7 @@ namespace key
     inline constexpr const char* kDeviceSet  = "im:dev:";           // uid        -> SET<device_id>
     inline constexpr const char* kReadAck    = "im:read:";          // mid        -> SET<uid>
     inline constexpr const char* kMembers    = "im:conversation:members:"; // cid -> SET<user_id>
+    inline constexpr const char* kMembersSentinel = "im:conversation:sentinel:"; // cid -> "1" (负缓存)
     inline constexpr const char* kRateUser   = "im:rl:user:";       // uid        -> 令牌桶
     inline constexpr const char* kRateSsid   = "im:rl:ssid:";       // ssid       -> 令牌桶
     inline constexpr const char* kOnline     = "im:online:";        // uid        -> HASH { device_id: instance_id }
@@ -643,12 +644,27 @@ public:
         try { _c->expire(key::kMembers + ssid, randomized_ttl(ttl)); }
         catch (std::exception &e) { LOG_ERROR("Members.touch_ttl 失败 {}: {}", ssid, e.what()); }
     }
-    void warm_sentinel(const std::string &ssid, std::chrono::seconds ttl = std::chrono::seconds(60)) {
+    /* brief: 设置会话不存在哨兵（负缓存），独立 key，不与成员数据混合 */
+    void set_sentinel(const std::string &ssid, std::chrono::seconds ttl = std::chrono::seconds(60)) {
         try {
-            std::string k = key::kMembers + ssid;
-            _c->sadd(k, "__sentinel__");
-            _c->expire(k, randomized_ttl(ttl));
-        } catch (std::exception &e) { LOG_ERROR("Members.warm_sentinel 失败 {}: {}", ssid, e.what()); }
+            _c->set(key::kMembersSentinel + ssid, "1", randomized_ttl(ttl));
+        } catch (std::exception &e) {
+            LOG_ERROR("Members.set_sentinel 失败 {}: {}", ssid, e.what());
+        }
+    }
+
+    /* brief: 检查哨兵是否存在（会话确认不存在） */
+    bool is_sentinel(const std::string &ssid) {
+        try {
+            return _c->get(key::kMembersSentinel + ssid).has_value();
+        } catch (std::exception &e) {
+            LOG_ERROR("Members.is_sentinel 失败 {}: {}", ssid, e.what());
+            return false;
+        }
+    }
+
+    void warm_sentinel(const std::string &ssid, std::chrono::seconds ttl = std::chrono::seconds(60)) {
+        set_sentinel(ssid, ttl);
     }
 private:
     RedisClient::ptr _c;
@@ -725,18 +741,19 @@ public:
     RateLimiter(const RedisClient::ptr &c) : _c(c) {}
 
     /**
-     * brief: 滑动窗口 incr-and-check
+     * brief: 滑动窗口 incr-and-check（Lua 原子 INCR+EXPIRE）
      *   - window_sec 内最多允许 max_count 次操作
      *   - 命中限制返回 false（业务可返回 429 / RATE_LIMITED）
      */
     bool allow(const std::string &key_full, int max_count, int window_sec) {
         try {
-            long long cur = _c->incr(key_full);
-            _c->expire(key_full, std::chrono::seconds(window_sec));
+            std::vector<std::string> keys = {key_full};
+            std::vector<std::string> args = {std::to_string(window_sec)};
+            long long cur = _c->eval<long long>(kRateLimitScript, keys.begin(), keys.end(),
+                                                args.begin(), args.end());
             return cur <= max_count;
         } catch(std::exception &e) {
             LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
-            // 限流器失败时默认放行，避免雪崩
             return true;
         }
     }
@@ -748,7 +765,16 @@ public:
     }
 private:
     RedisClient::ptr _c;
+    static const std::string kRateLimitScript;
 };
+
+inline const std::string RateLimiter::kRateLimitScript = R"(
+    local current = redis.call('INCR', KEYS[1])
+    if current == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+    end
+    return current
+)";
 
 // =============================================================================
 // 推送投递 outbox 兜底（message → push_queue 投递失败时持久化，由后台 reaper 重投）
