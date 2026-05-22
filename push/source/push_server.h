@@ -379,6 +379,7 @@ public:
         LOG_INFO("Push 关停: 开始清理 OnlineRoute...");
         // SCAN all online keys and unbind those belonging to this instance.
         // Cluster mode: for_each traverses all nodes via RedisClient::scan().
+        // OPTIMIZE: batch hgetall per SCAN page via pipeline to reduce shutdown latency
         long long cursor = 0;
         do {
             std::vector<std::string> keys;
@@ -484,13 +485,15 @@ private:
     void _write_presence_online_(const std::string &uid, const std::string &did) {
         try {
             std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
-            _redis->hset(k, "state", "ONLINE");
-            _redis->hset(k, "last_active_at_ms", std::to_string(
+            auto pipe = _redis->pipeline();
+            pipe.hset(k, "state", "ONLINE");
+            pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            _redis->expire(k, std::chrono::seconds(120));
+            pipe.expire(k, std::chrono::seconds(120));
+            pipe.exec();
         } catch (std::exception &e) {
-            LOG_WARN("Presence 写入失败 uid={} did={}: {}", uid, did, e.what());
+            LOG_WARN("Presence write failed uid={} did={}: {}", uid, did, e.what());
         }
     }
 
