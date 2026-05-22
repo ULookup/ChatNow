@@ -225,7 +225,7 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for (const auto &uid : internal_msg.member_id_list()) {
-            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+            auto route = resolve_route(uid);
             if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
 
             bool any_local = false;
@@ -259,7 +259,7 @@ public:
         // 2) 跨实例：按 Push 实例 ID 分组
         std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
         for (const auto &uid : remote_uids) {
-            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+            auto route = resolve_route(uid);
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string peer = (it != route.device_to_instance.end()) ? it->second : "";
@@ -321,8 +321,19 @@ public:
             const auto &ack = notify.msg_push_ack();
             if (ack.user_seq() == 0 || ack.user_id().empty() ||
                 ack.conversation_id().empty() || ack.device_id().empty()) {
-                LOG_WARN("收到非法 MSG_PUSH_ACK uid={} did={} seq={}",
+                LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={}",
                          ack.user_id(), ack.device_id(), ack.user_seq());
+                return;
+            }
+
+            std::string conn_uid, conn_did, conn_jti;
+            if (!_connections->client(conn, conn_uid, conn_did, conn_jti)) {
+                LOG_WARN("MSG_PUSH_ACK: no connection identity");
+                return;
+            }
+            if (conn_uid != ack.user_id() || conn_did != ack.device_id()) {
+                LOG_WARN("MSG_PUSH_ACK: identity mismatch ack_uid={} ack_did={} conn_uid={} conn_did={}",
+                         ack.user_id(), ack.device_id(), conn_uid, conn_did);
                 return;
             }
             if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
@@ -342,8 +353,8 @@ public:
             closure->req.set_seq_id(ack.user_seq());
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
-            meta.set_user_id(ack.user_id());
-            meta.set_device_id(ack.device_id());
+            meta.set_user_id(conn_uid);
+            meta.set_device_id(conn_did);
             meta.set_trace_id(::chatnow::utils::gen_trace_id());
             std::string data;
             meta.SerializeToString(&data);
@@ -481,6 +492,7 @@ private:
     }
 
     RouteEntry resolve_route(const std::string &uid) {
+        if (!_online_route) return RouteEntry{};
         std::string cache_key = "route:" + uid;
 
         //  L1 hit → fast path (~ns)
@@ -579,7 +591,7 @@ public:
                         // 按实例分组重发
                         std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
                         for (const auto &uid : uids) {
-                            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+                            auto route = resolve_route(uid);
                             for (const auto &did : route.device_ids) {
                                 auto it = route.device_to_instance.find(did);
                                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
@@ -648,10 +660,15 @@ public:
                 auto resp = etcd_client->ls(push_service_dir).get();
                 if (resp.is_ok()) {
                     for (size_t i = 0; i < resp.keys().size(); ++i)
-                        online_instances.push_back(resp.value(i).as_string());
+                        online_instances.push_back(resp.key(i));
                 }
             } catch (std::exception &e) {
                 LOG_WARN("StaleRoute reaper: etcd ls 失败: {}", e.what());
+                continue;
+            }
+
+            if (online_instances.empty()) {
+                LOG_WARN("StaleRoute reaper: empty instance list, skip cleanup");
                 continue;
             }
 
