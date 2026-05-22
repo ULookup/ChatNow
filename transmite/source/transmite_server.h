@@ -30,6 +30,7 @@
 #include <atomic>
 #include <chrono>
 #include <optional>
+#include <memory>
 #include <thread>
 
 namespace chatnow
@@ -37,6 +38,11 @@ namespace chatnow
 
 // 大群门限：>= LARGE_GROUP_THRESHOLD 时启用读扩散，仅写 message 主表
 inline constexpr size_t LARGE_GROUP_THRESHOLD = 200;
+
+struct MembersResult {
+    std::vector<std::string> members;
+    bool confirmed_empty = false;  // 哨兵确认会话不存在，调用方不应重试
+};
 
 class TransmiteServiceImpl : public chatnow::transmite::MsgTransmitService
 {
@@ -55,7 +61,10 @@ public:
                         const RedisClient::ptr &redis,
                         LocalCache<std::vector<std::string>>::ptr local_members_cache = nullptr,
                         LocalCache<std::string>::ptr local_user_cache = nullptr,
-                        InflightRegistry::ptr inflight_registry = nullptr)
+                        InflightRegistry::ptr inflight_registry = nullptr,
+                        int rate_limit_user_max = 600,
+                        int rate_limit_session_max = 3000,
+                        int rate_limit_window_sec = 60)
                         : _identity_service_name(identity_service_name),
                         _conversation_service_name(conversation_service_name),
                         _message_service_name(message_service_name),
@@ -70,13 +79,16 @@ public:
                         _redis(redis),
                         _local_members_cache(std::move(local_members_cache)),
                         _local_user_cache(std::move(local_user_cache)),
-                        _inflight_registry(std::move(inflight_registry)) {}
+                        _inflight_registry(std::move(inflight_registry)),
+                        _rate_limit_user_max(rate_limit_user_max),
+                        _rate_limit_session_max(rate_limit_session_max),
+                        _rate_limit_window_sec(rate_limit_window_sec) {}
     ~TransmiteServiceImpl() = default;
 
     void SendMessage(google::protobuf::RpcController *controller,
                 const ::chatnow::transmite::SendMessageReq *request,
                 ::chatnow::transmite::SendMessageRsp *response,
-                ::google::protobuf::Closure *done)
+                ::google::protobuf::Closure *done) override
     {
         brpc::ClosureGuard rpc_guard(done);
 
@@ -137,18 +149,40 @@ public:
             try {
                 auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
                 if (!result) {
-                    // key 已存在 → 重复消息
                     auto cached = _redis->get(idem_key);
                     if (cached && cached.value() != "pending") {
-                        LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
-                        response->mutable_header()->set_request_id(rid);
-                        response->mutable_header()->set_success(true);
-                        response->mutable_message()->set_message_id(
-                            std::stoull(cached.value()));
-                        return;
+                        uint64_t old_msg_id = 0;
+                        bool parse_ok = false;
+                        try {
+                            old_msg_id = std::stoull(cached.value());
+                            parse_ok = true;
+                        } catch (const std::exception&) {
+                            LOG_WARN("请求ID: {} - 幂等缓存值异常，删除后降级: {}", rid, cached.value());
+                            try { _redis->del(idem_key); } catch (...) {}
+                            idem_key_set = false;
+                        }
+                        if (parse_ok) {
+                            LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
+                            response->mutable_header()->set_request_id(rid);
+                            response->mutable_header()->set_success(true);
+                            response->mutable_message()->set_message_id(old_msg_id);
+                            return;
+                        }
+                        // parse failed: deleted corrupt key, fall through — need to re-acquire idem lock
+                        try {
+                            auto retry_result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
+                            if (!retry_result) {
+                                LOG_WARN("请求ID: {} - client_msg_id={} 幂等降级失败", rid, client_msg_id);
+                                return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
+                            }
+                        } catch (std::exception &e2) {
+                            LOG_WARN("请求ID: {} - Redis 幂等降级异常: {}（fail-open）", rid, e2.what());
+                        }
+                        idem_key_set = true;
+                    } else {
+                        LOG_WARN("请求ID: {} - client_msg_id={} 幂等冲突（前一条未完成）", rid, client_msg_id);
+                        return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                     }
-                    LOG_WARN("请求ID: {} - client_msg_id={} 幂等冲突（前一条未完成）", rid, client_msg_id);
-                    return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                 }
             } catch (std::exception &e) {
                 LOG_WARN("请求ID: {} - Redis 幂等检查异常: {}（fail-open）", rid, e.what());
@@ -158,11 +192,11 @@ public:
 
         // ④ 限流检查（用户级 + 会话级）
         if (_rate_limiter) {
-            if (!_rate_limiter->allow_user(uid, 600, 60)) {
+            if (!_rate_limiter->allow_user(uid, _rate_limit_user_max, _rate_limit_window_sec)) {
                 LOG_WARN("请求ID: {} - 用户级限流命中 uid={}", rid, uid);
                 return err_response(rid, chatnow::error::kSystemUnavailable, "rate_limited");
             }
-            if (!_rate_limiter->allow_session(chat_ssid, 3000, 60)) {
+            if (!_rate_limiter->allow_session(chat_ssid, _rate_limit_session_max, _rate_limit_window_sec)) {
                 LOG_WARN("请求ID: {} - 会话级限流命中 ssid={}", rid, chat_ssid);
                 return err_response(rid, chatnow::error::kSystemUnavailable, "rate_limited");
             }
@@ -186,12 +220,14 @@ public:
         chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &profile_cntl);
         identity_stub.GetProfile(&profile_cntl, &profile_req, &profile_rsp, brpc::DoNothing());
 
-        std::vector<std::string> member_id_list;
+        MembersResult members_result;
         for (int retry = 0; retry < 3; ++retry) {
-            member_id_list = resolve_members(chat_ssid, static_cast<brpc::Controller*>(controller));
-            if (!member_id_list.empty()) break;
+            members_result = resolve_members(chat_ssid, rid, static_cast<brpc::Controller*>(controller));
+            if (!members_result.members.empty()) break;
+            if (members_result.confirmed_empty) break;  // 哨兵确认会话不存在，不重试
             if (retry < 2) std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
+        std::vector<std::string> member_id_list = std::move(members_result.members);
 
         brpc::Join(profile_cntl.call_id());
         if (profile_cntl.Failed() || !profile_rsp.header().success()) {
@@ -226,7 +262,9 @@ public:
 
         msg->set_message_id(_id_generator->Next());
         msg->set_conversation_id(chat_ssid);
-        msg->set_created_at_ms(static_cast<int64_t>(time(nullptr)) * 1000);
+        auto now = std::chrono::system_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+        msg->set_created_at_ms(static_cast<int64_t>(ms));
         msg->mutable_content()->CopyFrom(request->content());
         msg->set_sender_id(uid);
         msg->set_seq_id(session_seq);
@@ -316,75 +354,77 @@ public:
         }
     }
 
-    std::vector<std::string> resolve_members(const std::string &chat_session_id,
-                                               brpc::Controller *caller_cntl = nullptr) {
-        std::string mkey = "members:" + chat_session_id;
+    MembersResult resolve_members(const std::string &chat_session_id, const std::string &rid,
+                              brpc::Controller *caller_cntl = nullptr) {
+    std::string mkey = "members:" + chat_session_id;
 
-        // ① L1 hit → fast path
-        if (_local_members_cache) {
-            auto local = _local_members_cache->get(mkey);
-            if (local.has_value()) {
-                auto &members = *local;
-                if (members.size() == 1 && members[0] == "__sentinel__") return {};
-                return members;
-            }
+    // ① L1 hit → fast path
+    if (_local_members_cache) {
+        auto local = _local_members_cache->get(mkey);
+        if (local.has_value()) {
+            auto &members = *local;
+            if (members.size() == 1 && members[0] == "__sentinel__")
+                return {{}, true};
+            return {members, false};
         }
+    }
 
-        // ② L1 miss → InflightRegistry per-key lock
-        auto guard = _inflight_registry ? _inflight_registry->acquire(chat_session_id)
-                                        : InflightRegistry::Guard{};
-        std::unique_lock<std::mutex> lk(guard.mu ? *guard.mu : _dummy_mu_);
+    if (_inflight_registry) {
+        // ===== 有 InflightRegistry：per-key 进程内互斥 =====
+        auto guard = _inflight_registry->acquire(chat_session_id);
+        std::unique_lock<std::mutex> lk(*guard.mu);
 
         auto release_guard = [&]() {
             if (lk.owns_lock()) lk.unlock();
             guard = InflightRegistry::Guard{};
         };
 
-        // ③ Double-check L1
+        // Double-check L1
         if (_local_members_cache) {
             auto local = _local_members_cache->get(mkey);
             if (local.has_value()) {
                 release_guard();
                 auto &members = *local;
-                if (members.size() == 1 && members[0] == "__sentinel__") return {};
-                return members;
+                if (members.size() == 1 && members[0] == "__sentinel__")
+                    return {{}, true};
+                return {members, false};
             }
         }
 
-        // ④ Double-check L2 Redis
+        // Double-check L2 Redis
         auto members = _members_cache->list(chat_session_id);
         if (!members.empty()) {
             release_guard();
-            if (members.size() == 1 && members[0] == "__sentinel__") {
-                if (_local_members_cache)
-                    _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
-                return {};
-            }
             if (_local_members_cache)
                 _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
-            return members;
+            return {members, false};
         }
 
-        // ⑤ L2 miss → RedisMutex cross-instance stampede protection
+        // L2 空但哨兵存在 → 确认不存在
+        if (_members_cache->is_sentinel(chat_session_id)) {
+            release_guard();
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+            return {{}, true};
+        }
+
+        // L2 miss → RedisMutex + RPC
         RedisMutex warm_mutex(_redis, "warm:members:" + chat_session_id, 5000);
         if (!warm_mutex.try_lock(std::chrono::milliseconds(100))) {
             release_guard();
-            return {};  // another instance is warming; caller retries (no recursion)
+            return {};  // 其他实例正在预热，调用方重试
         }
 
-        // ⑥ RPC to fetch members (INSIDE the mutex)
-        auto result = fetch_members_from_conversation_service_(chat_session_id, caller_cntl);
+        auto result = fetch_members_from_conversation_service_(chat_session_id, rid, caller_cntl);
         if (!result.has_value()) {
-            // RPC failed — don't cache, just release and return empty
             warm_mutex.unlock();
             release_guard();
             return {};
         }
         members = std::move(*result);
 
-        // ⑦ Warm L2 + L1 (INSIDE the mutex)
         if (members.empty()) {
-            _members_cache->warm_sentinel(chat_session_id);
+            _members_cache->set_sentinel(chat_session_id);
             if (_local_members_cache)
                 _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
         } else {
@@ -395,10 +435,63 @@ public:
 
         warm_mutex.unlock();
         release_guard();
-        return members;
-    }
+        return {members, members.empty()};
+    } else {
+        // ===== 无 InflightRegistry：跳过进程内锁，仅靠 RedisMutex 跨实例防惊群 =====
 
-    std::string resolve_user_info(const std::string &uid) {
+        // L2 Redis check
+        auto members = _members_cache->list(chat_session_id);
+        if (!members.empty()) {
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
+            return {members, false};
+        }
+
+        // L2 空但哨兵存在
+        if (_members_cache->is_sentinel(chat_session_id)) {
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+            return {{}, true};
+        }
+
+        // RedisMutex 前快速 L1 double-check（无锁）
+        if (_local_members_cache) {
+            auto local = _local_members_cache->get(mkey);
+            if (local.has_value()) {
+                auto &m = *local;
+                if (m.size() == 1 && m[0] == "__sentinel__") return {{}, true};
+                return {m, false};
+            }
+        }
+
+        RedisMutex warm_mutex(_redis, "warm:members:" + chat_session_id, 5000);
+        if (!warm_mutex.try_lock(std::chrono::milliseconds(100))) {
+            return {};  // 其他实例正在预热
+        }
+
+        auto result = fetch_members_from_conversation_service_(chat_session_id, rid, caller_cntl);
+        if (!result.has_value()) {
+            warm_mutex.unlock();
+            return {};
+        }
+        members = std::move(*result);
+
+        if (members.empty()) {
+            _members_cache->set_sentinel(chat_session_id);
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+        } else {
+            _members_cache->warm(chat_session_id, members);
+            if (_local_members_cache)
+                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
+        }
+
+        warm_mutex.unlock();
+        return {members, members.empty()};
+    }
+}
+
+    std::string resolve_user_info(const std::string &uid) const {
         if (!_local_user_cache) return "";
         std::string ukey = "user:" + uid;
         auto cached = _local_user_cache->get(ukey);
@@ -413,7 +506,7 @@ public:
     }
 
     std::optional<std::vector<std::string>> fetch_members_from_conversation_service_(
-        const std::string &chat_session_id, brpc::Controller *caller_cntl) {
+        const std::string &chat_session_id, const std::string &rid, brpc::Controller *caller_cntl) {
         auto conv_channel = _mm_channels->choose(_conversation_service_name);
         if (!conv_channel) {
             LOG_ERROR("conversation_service 节点缺失 (warming members for {})", chat_session_id);
@@ -426,7 +519,7 @@ public:
         if (caller_cntl) {
             chatnow::auth::forward_auth_metadata(caller_cntl, &member_cntl);
         }
-        member_req.set_request_id(chat_session_id);
+        member_req.set_request_id(rid);
         member_req.set_conversation_id(chat_session_id);
         conv_stub.GetMemberIds(&member_cntl, &member_req, &member_rsp, brpc::DoNothing());
         brpc::Join(member_cntl.call_id());
@@ -458,7 +551,9 @@ private:
     LocalCache<std::vector<std::string>>::ptr _local_members_cache;
     LocalCache<std::string>::ptr _local_user_cache;
     InflightRegistry::ptr _inflight_registry;
-    std::mutex _dummy_mu_;
+    int _rate_limit_user_max = 600;
+    int _rate_limit_session_max = 3000;
+    int _rate_limit_window_sec = 60;
 };
 
 class TransmiteServer
@@ -544,6 +639,7 @@ public:
             LOG_INFO("Snowflake worker_id={} epoch_ms={}", worker_id, epoch_ms);
         } catch(std::exception &e) {
             LOG_ERROR("构造分布式有序ID生成器失败: {}", e.what());
+            abort();
         }
     }
     /* brief: 设置实例标识（host:pid），用于 worker_id 租约识别 */
@@ -656,7 +752,7 @@ public:
             abort();
         }
         _rpc_server = std::make_shared<brpc::Server>();
-        TransmiteServiceImpl *transmite_service = new TransmiteServiceImpl(_identity_service_name,
+        auto transmite_service = std::make_unique<TransmiteServiceImpl>(_identity_service_name,
                                                                         _conversation_service_name,
                                                                         _message_service_name,
                                                                         _mm_channels,
@@ -670,8 +766,11 @@ public:
                                                                         _redis_client,
                                                                         _local_members_cache,
                                                                         _local_user_cache,
-                                                                        _inflight_registry);
-        int ret = _rpc_server->AddService(transmite_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
+                                                                        _inflight_registry,
+                                                                        FLAGS_rate_limit_user_max,
+                                                                        FLAGS_rate_limit_session_max,
+                                                                        FLAGS_rate_limit_window_sec);
+        int ret = _rpc_server->AddService(transmite_service.release(), brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if(ret == -1) {
             LOG_ERROR("添加RPC服务失败!");
             abort();

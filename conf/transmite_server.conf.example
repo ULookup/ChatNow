@@ -17,16 +17,13 @@
 -redis_seeds=127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381,127.0.0.1:6382,127.0.0.1:6383,127.0.0.1:6384
 -redis_keep_alive=true
 -redis_pool_size=8
--mysql_host=127.0.0.1
--mysql_user=root
--mysql_pswd=YHY060403
--mysql_db=chatnow
--mysql_cset=utf8
--mysql_port=0
--mysql_pool_count=4
 -mq_user=root
--mq_pswd=YHY060403
+-mq_pswd=<SET_VIA_ENV_OR_FLAG>
 -mq_host=127.0.0.1:5672
 -mq_msg_exchange=chat_msg_exchange
 -mq_msg_queue=
 -mq_msg_binding_key=
+# 限流配置（可选）
+# -rate_limit_user_max=600
+# -rate_limit_session_max=3000
+# -rate_limit_window_sec=60
