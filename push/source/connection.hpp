@@ -93,6 +93,23 @@ public:
         return it->second.send_mu;
     }
 
+    /* brief: 批量取指定设备的 send mutex（一次加锁，避免 N 次全局 mutex 争用） */
+    std::vector<std::shared_ptr<std::mutex>> send_mutexes(
+        const std::string &uid, const std::string &device_id) {
+        std::unique_lock<std::mutex> lock(_mutex);
+        std::vector<std::shared_ptr<std::mutex>> res;
+        auto dit = _uid_device_connections.find(uid);
+        if (dit == _uid_device_connections.end()) return res;
+        auto vdit = dit->second.find(device_id);
+        if (vdit == dit->second.end()) return res;
+        res.reserve(vdit->second.size());
+        for (const auto &c : vdit->second) {
+            auto it = _conn_clients.find(c);
+            if (it != _conn_clients.end()) res.push_back(it->second.send_mu);
+        }
+        return res;
+    }
+
     void touch(const server_t::connection_ptr &conn) {
         std::unique_lock<std::mutex> lock(_mutex);
         auto it = _conn_clients.find(conn);

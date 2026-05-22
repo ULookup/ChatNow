@@ -165,22 +165,20 @@ public:
             long long now_ts = static_cast<long long>(time(nullptr));
             for (const auto &uid : request->user_id_list()) {
                 auto route = resolve_route(uid);
-                for (const auto &did : route.device_ids) {
-                    std::string payload;
-                    if (is_chat_msg) {
-                        NotifyMessage per_user = base_notify;
-                        auto it = uid2seq.find(uid);
-                        if (it != uid2seq.end()) {
-                            per_user.mutable_new_message_info()->mutable_message_info()
-                                ->set_user_seq(it->second);
-                        }
-                        payload = per_user.SerializeAsString();
-                    } else {
-                        payload = base_notify.SerializeAsString();
-                    }
-                    if (_local_send(uid, did, payload) > 0) ++total;
+                auto it = uid2seq.find(uid);
 
-                    auto it = uid2seq.find(uid);
+                std::string payload;
+                if (is_chat_msg && it != uid2seq.end()) {
+                    NotifyMessage per_user = base_notify;
+                    per_user.mutable_new_message_info()->mutable_message_info()
+                        ->set_user_seq(it->second);
+                    payload = per_user.SerializeAsString();
+                } else {
+                    payload = base_notify.SerializeAsString();
+                }
+
+                for (const auto &did : route.device_ids) {
+                    if (_local_send(uid, did, payload) > 0) ++total;
                     if (it != uid2seq.end() && _unacked) {
                         _unacked->push(uid, did, it->second,
                                        _utils_base64_encode(payload), now_ts);
@@ -230,21 +228,27 @@ public:
             auto route = resolve_route(uid);
             if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
 
+            auto itu = uid2seq.find(uid);
+
+            // Pre-serialize payload per-user instead of per-device
+            std::string user_payload;
+            if (itu != uid2seq.end()) {
+                NotifyMessage per_user = notify_template;
+                per_user.mutable_new_message_info()->mutable_message_info()
+                    ->set_user_seq(itu->second);
+                user_payload = per_user.SerializeAsString();
+            }
+
             bool any_local = false;
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                 if (inst == _instance_id) {
-                    auto it = uid2seq.find(uid);
-                    if (it != uid2seq.end()) {
-                        NotifyMessage per_user = notify_template;
-                        per_user.mutable_new_message_info()->mutable_message_info()
-                            ->set_user_seq(it->second);
-                        std::string payload = per_user.SerializeAsString();
-                        if (_local_send(uid, did, payload) > 0) any_local = true;
+                    if (itu != uid2seq.end()) {
+                        if (_local_send(uid, did, user_payload) > 0) any_local = true;
                         if (_unacked) {
-                            _unacked->push(uid, did, it->second,
-                                           _utils_base64_encode(payload), now_ts);
+                            _unacked->push(uid, did, itu->second,
+                                           _utils_base64_encode(user_payload), now_ts);
                         }
                     } else {
                         // 大群读扩散：无 user_seq，仅下发
@@ -259,31 +263,29 @@ public:
         if (remote_uids.empty()) return ConsumeAction::Ack;
 
         // 2) 跨实例：按 Push 实例 ID 分组
-        std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
+        std::unordered_map<std::string, std::unordered_set<std::string>> peer_to_uids;
         for (const auto &uid : remote_uids) {
             auto route = resolve_route(uid);
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string peer = (it != route.device_to_instance.end()) ? it->second : "";
                 if (peer.empty() || peer == _instance_id) continue;
-                auto &vec = peer_to_uids[peer];
-                if (std::find(vec.begin(), vec.end(), uid) == vec.end())
-                    vec.push_back(uid);
+                peer_to_uids[peer].insert(uid);
             }
         }
 
         // 3) 每个对端一次 PushBatch（异步 brpc::DoNothing）
+        std::string internal_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
         for (auto &kv : peer_to_uids) {
             const std::string &peer = kv.first;
-            const auto &uids = kv.second;
+            std::vector<std::string> uids(kv.second.begin(), kv.second.end());
             auto channel = _mm_channels->choose(peer);
             if (!channel) {
                 LOG_WARN("Push-Consumer: 对端 {} 不可达", peer);
                 for (const auto &u : uids)
                     if (_online_route) _online_route->unbind(u, "", peer);
                 if (_cross_outbox) {
-                    std::string b64 = _utils_base64_encode(internal_msg.SerializeAsString());
-                    _cross_outbox->enqueue(b64, uids, peer, now_ts);
+                    _cross_outbox->enqueue(internal_b64, uids, peer, now_ts);
                 }
                 continue;
             }
@@ -300,15 +302,14 @@ public:
                 p->set_user_seq(it->second);
             }
             std::string peer_id = peer;
-            std::string payload_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
             closure->on_done = [peer_id, uids, outbox = _cross_outbox,
-                                online = _online_route, payload_b64, now_ts]
+                                online = _online_route, internal_b64, now_ts]
                 (brpc::Controller *c, const PushBatchRsp &) {
                 if (c->Failed()) {
                     LOG_WARN("PushBatch 跨实例失败 peer={}: {}", peer_id, c->ErrorText());
                     for (const auto &u : uids)
                         if (online) online->unbind(u, "", peer_id);
-                    if (outbox) outbox->enqueue(payload_b64, uids, peer_id, now_ts);
+                    if (outbox) outbox->enqueue(internal_b64, uids, peer_id, now_ts);
                 }
             };
             stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
@@ -521,10 +522,11 @@ private:
 
         //  L2 Redis: hgetall + build RouteEntry
         RouteEntry route;
-        auto devices = _online_route->devices(uid);
-        route.device_ids = std::move(devices);
-        for (const auto &did : route.device_ids) {
-            route.device_to_instance[did] = _online_route->device_instance(uid, did);
+        auto dmap = _online_route->device_instances_map(uid);
+        route.device_ids.reserve(dmap.size());
+        for (const auto &[did, inst] : dmap) {
+            route.device_ids.push_back(did);
+            route.device_to_instance[did] = inst;
         }
         if (_local_route_cache) {
             _local_route_cache->set(cache_key, route, randomized_ttl(std::chrono::seconds(2)));
@@ -535,17 +537,18 @@ private:
         return route;
     }
 
-    /* brief: 本实例直接通过 WS 下发；返回送达连接数 */
+    /* brief: 本实例直接通过 WS 下发；返回送达连接数（批量取 mutex 减少全局锁争用） */
     int _local_send(const std::string &uid, const std::string &device_id,
                     const std::string &payload) {
         auto conns = _connections->connections(uid, device_id);
+        auto mutexes = _connections->send_mutexes(uid, device_id);
         int sent = 0;
-        for (auto &c : conns) {
+        for (size_t i = 0; i < conns.size() && i < mutexes.size(); ++i) {
             try {
+                auto &c = conns[i];
                 if (!c || c->get_state() != websocketpp::session::state::value::open) continue;
-                auto mu = _connections->send_mutex(c);
-                if (!mu) continue;
-                std::lock_guard<std::mutex> lock(*mu);
+                if (!mutexes[i]) continue;
+                std::lock_guard<std::mutex> lock(*mutexes[i]);
                 c->send(payload, websocketpp::frame::opcode::value::binary);
                 ++sent;
             } catch (std::exception &e) {
