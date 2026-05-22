@@ -31,6 +31,7 @@
 #include "message/message_service.pb.h"
 #include "message/message_internal.pb.h"
 #include <sw/redis++/redis++.h>
+#include <openssl/evp.h>
 #include <algorithm>
 #include <thread>
 #include <chrono>
@@ -707,38 +708,25 @@ private:
     }
 
     static std::string _utils_base64_encode(const std::string &in) {
-        static const char kTbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        std::string out;
-        out.reserve(((in.size() + 2) / 3) * 4);
-        for (size_t i = 0; i < in.size(); i += 3) {
-            unsigned long val = (unsigned char)in[i] << 16;
-            if (i + 1 < in.size()) val |= (unsigned char)in[i + 1] << 8;
-            if (i + 2 < in.size()) val |= (unsigned char)in[i + 2];
-            out += kTbl[(val >> 18) & 0x3F];
-            out += kTbl[(val >> 12) & 0x3F];
-            out += (i + 1 < in.size()) ? kTbl[(val >> 6) & 0x3F] : '=';
-            out += (i + 2 < in.size()) ? kTbl[val & 0x3F] : '=';
-        }
+        int cap = ((in.size() + 2) / 3) * 4;
+        std::string out(cap, '\0');
+        int n = EVP_EncodeBlock(
+            reinterpret_cast<unsigned char*>(out.data()),
+            reinterpret_cast<const unsigned char*>(in.data()),
+            static_cast<int>(in.size()));
+        out.resize(static_cast<size_t>(n));
         return out;
     }
     static std::string _utils_base64_decode(const std::string &in) {
-        static const unsigned char kDec[128] = {
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,62,64,64,64,63,52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
-            64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,64,
-            64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64
-        };
-        std::string out;
-        out.reserve((in.size() / 4) * 3);
-        for (size_t i = 0; i < in.size(); i += 4) {
-            unsigned long val = 0;
-            for (int j = 0; j < 4; ++j) {
-                if (in[i + j] != '=') val = (val << 6) | kDec[(unsigned char)in[i + j]];
-            }
-            out += (char)((val >> 16) & 0xFF);
-            if (in[i + 2] != '=') out += (char)((val >> 8) & 0xFF);
-            if (in[i + 3] != '=') out += (char)(val & 0xFF);
-        }
+        if (in.empty()) return "";
+        int cap = (static_cast<int>(in.size()) / 4) * 3 + 1;
+        std::string out(cap, '\0');
+        int n = EVP_DecodeBlock(
+            reinterpret_cast<unsigned char*>(out.data()),
+            reinterpret_cast<const unsigned char*>(in.data()),
+            static_cast<int>(in.size()));
+        if (n < 0) return "";
+        out.resize(static_cast<size_t>(n));
         return out;
     }
 
