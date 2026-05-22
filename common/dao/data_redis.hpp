@@ -23,6 +23,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "infra/logger.hpp"
@@ -709,6 +710,16 @@ public:
         try {
             _c->hkeys(key::kOnline + uid, std::back_inserter(res));
         } catch(std::exception &e) { LOG_ERROR("OnlineRoute.devices 失败 {}: {}", uid, e.what()); }
+        return res;
+    }
+    /* brief: 取用户所有在线设备及对应实例 → device_id → instance_id 映射（单次 HGETALL） */
+    std::unordered_map<std::string, std::string> device_instances_map(const std::string &uid) {
+        std::unordered_map<std::string, std::string> res;
+        try {
+            _c->hgetall(key::kOnline + uid, std::inserter(res, res.end()));
+        } catch (std::exception &e) {
+            LOG_ERROR("OnlineRoute.device_instances_map 失败 {}: {}", uid, e.what());
+        }
         return res;
     }
     /* brief: 取设备所在 Push 实例 */

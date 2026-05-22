@@ -1,5 +1,7 @@
-cmake_minimum_required(VERSION 3.1.3)
+cmake_minimum_required(VERSION 3.12)
 project(push_server)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(target "push_server")
 # 1. proto
@@ -8,16 +10,18 @@ set(proto_files common/types.proto common/error.proto common/envelope.proto comm
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
     string(REPLACE ".proto" ".pb.cc" proto_cc ${proto_file})
-    if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}${proto_cc})
-        add_custom_command(
-            PRE_BUILD
-            COMMAND protoc
-            ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR} -I ${proto_path} --experimental_allow_proto3_optional ${proto_path}/${proto_file}
-            DEPENDS ${proto_path}/${proto_file}
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${proto_cc}
-            COMMENT "生成Push Protobuf代码:" ${CMAKE_CURRENT_BINARY_DIR}/${proto_cc}
-        )
-    endif()
+    string(REPLACE ".proto" ".pb.h" proto_h ${proto_file})
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${proto_cc}
+               ${CMAKE_CURRENT_BINARY_DIR}/${proto_h}
+        COMMAND protoc
+        ARGS --cpp_out=${CMAKE_CURRENT_BINARY_DIR}
+             -I ${proto_path}
+             --experimental_allow_proto3_optional
+             ${proto_path}/${proto_file}
+        DEPENDS ${proto_path}/${proto_file}
+        COMMENT "Generating protobuf: ${proto_file}"
+    )
     list(APPEND proto_srcs ${CMAKE_CURRENT_BINARY_DIR}/${proto_cc})
 endforeach()
 
@@ -33,8 +37,9 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lhiredis -lredis++
     -lpthread -lboost_system)
 
-include_directories(${CMAKE_CURRENT_BINARY_DIR})
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
+target_include_directories(${target} PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 
 INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)

@@ -31,6 +31,8 @@
 #include "message/message_service.pb.h"
 #include "message/message_internal.pb.h"
 #include <sw/redis++/redis++.h>
+#include "picojson/picojson.h"
+#include <openssl/evp.h>
 #include <algorithm>
 #include <thread>
 #include <chrono>
@@ -76,7 +78,10 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
-    ~PushServiceImpl() { stop_cross_outbox_reaper(); }
+    static constexpr int kPresenceTtlSec = 120;
+    ~PushServiceImpl() {
+        stop_cross_outbox_reaper();  // joins _cross_reaper_thread before 'this' destroyed
+    }
 
     void PushToUser(google::protobuf::RpcController* base_cntl,
                     const PushToUserReq* request,
@@ -161,22 +166,20 @@ public:
             long long now_ts = static_cast<long long>(time(nullptr));
             for (const auto &uid : request->user_id_list()) {
                 auto route = resolve_route(uid);
-                for (const auto &did : route.device_ids) {
-                    std::string payload;
-                    if (is_chat_msg) {
-                        NotifyMessage per_user = base_notify;
-                        auto it = uid2seq.find(uid);
-                        if (it != uid2seq.end()) {
-                            per_user.mutable_new_message_info()->mutable_message_info()
-                                ->set_user_seq(it->second);
-                        }
-                        payload = per_user.SerializeAsString();
-                    } else {
-                        payload = base_notify.SerializeAsString();
-                    }
-                    if (_local_send(uid, did, payload) > 0) ++total;
+                auto it = uid2seq.find(uid);
 
-                    auto it = uid2seq.find(uid);
+                std::string payload;
+                if (is_chat_msg && it != uid2seq.end()) {
+                    NotifyMessage per_user = base_notify;
+                    per_user.mutable_new_message_info()->mutable_message_info()
+                        ->set_user_seq(it->second);
+                    payload = per_user.SerializeAsString();
+                } else {
+                    payload = base_notify.SerializeAsString();
+                }
+
+                for (const auto &did : route.device_ids) {
+                    if (_local_send(uid, did, payload) > 0) ++total;
                     if (it != uid2seq.end() && _unacked) {
                         _unacked->push(uid, did, it->second,
                                        _utils_base64_encode(payload), now_ts);
@@ -223,24 +226,30 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for (const auto &uid : internal_msg.member_id_list()) {
-            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+            auto route = resolve_route(uid);
             if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
+
+            auto itu = uid2seq.find(uid);
+
+            // Pre-serialize payload per-user instead of per-device
+            std::string user_payload;
+            if (itu != uid2seq.end()) {
+                NotifyMessage per_user = notify_template;
+                per_user.mutable_new_message_info()->mutable_message_info()
+                    ->set_user_seq(itu->second);
+                user_payload = per_user.SerializeAsString();
+            }
 
             bool any_local = false;
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                 if (inst == _instance_id) {
-                    auto it = uid2seq.find(uid);
-                    if (it != uid2seq.end()) {
-                        NotifyMessage per_user = notify_template;
-                        per_user.mutable_new_message_info()->mutable_message_info()
-                            ->set_user_seq(it->second);
-                        std::string payload = per_user.SerializeAsString();
-                        if (_local_send(uid, did, payload) > 0) any_local = true;
+                    if (itu != uid2seq.end()) {
+                        if (_local_send(uid, did, user_payload) > 0) any_local = true;
                         if (_unacked) {
-                            _unacked->push(uid, did, it->second,
-                                           _utils_base64_encode(payload), now_ts);
+                            _unacked->push(uid, did, itu->second,
+                                           _utils_base64_encode(user_payload), now_ts);
                         }
                     } else {
                         // 大群读扩散：无 user_seq，仅下发
@@ -255,31 +264,29 @@ public:
         if (remote_uids.empty()) return ConsumeAction::Ack;
 
         // 2) 跨实例：按 Push 实例 ID 分组
-        std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
+        std::unordered_map<std::string, std::unordered_set<std::string>> peer_to_uids;
         for (const auto &uid : remote_uids) {
-            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+            auto route = resolve_route(uid);
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string peer = (it != route.device_to_instance.end()) ? it->second : "";
                 if (peer.empty() || peer == _instance_id) continue;
-                auto &vec = peer_to_uids[peer];
-                if (std::find(vec.begin(), vec.end(), uid) == vec.end())
-                    vec.push_back(uid);
+                peer_to_uids[peer].insert(uid);
             }
         }
 
         // 3) 每个对端一次 PushBatch（异步 brpc::DoNothing）
+        std::string internal_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
         for (auto &kv : peer_to_uids) {
             const std::string &peer = kv.first;
-            const auto &uids = kv.second;
+            std::vector<std::string> uids(kv.second.begin(), kv.second.end());
             auto channel = _mm_channels->choose(peer);
             if (!channel) {
                 LOG_WARN("Push-Consumer: 对端 {} 不可达", peer);
                 for (const auto &u : uids)
                     if (_online_route) _online_route->unbind(u, "", peer);
                 if (_cross_outbox) {
-                    std::string b64 = _utils_base64_encode(internal_msg.SerializeAsString());
-                    _cross_outbox->enqueue(b64, uids, peer, now_ts);
+                    _cross_outbox->enqueue(internal_b64, uids, peer, now_ts);
                 }
                 continue;
             }
@@ -296,15 +303,14 @@ public:
                 p->set_user_seq(it->second);
             }
             std::string peer_id = peer;
-            std::string payload_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
             closure->on_done = [peer_id, uids, outbox = _cross_outbox,
-                                online = _online_route, payload_b64, now_ts]
+                                online = _online_route, internal_b64, now_ts]
                 (brpc::Controller *c, const PushBatchRsp &) {
                 if (c->Failed()) {
                     LOG_WARN("PushBatch 跨实例失败 peer={}: {}", peer_id, c->ErrorText());
                     for (const auto &u : uids)
                         if (online) online->unbind(u, "", peer_id);
-                    if (outbox) outbox->enqueue(payload_b64, uids, peer_id, now_ts);
+                    if (outbox) outbox->enqueue(internal_b64, uids, peer_id, now_ts);
                 }
             };
             stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
@@ -319,8 +325,19 @@ public:
             const auto &ack = notify.msg_push_ack();
             if (ack.user_seq() == 0 || ack.user_id().empty() ||
                 ack.conversation_id().empty() || ack.device_id().empty()) {
-                LOG_WARN("收到非法 MSG_PUSH_ACK uid={} did={} seq={}",
+                LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={}",
                          ack.user_id(), ack.device_id(), ack.user_seq());
+                return;
+            }
+
+            std::string conn_uid, conn_did, conn_jti;
+            if (!_connections->client(conn, conn_uid, conn_did, conn_jti)) {
+                LOG_WARN("MSG_PUSH_ACK: no connection identity");
+                return;
+            }
+            if (conn_uid != ack.user_id() || conn_did != ack.device_id()) {
+                LOG_WARN("MSG_PUSH_ACK: identity mismatch ack_uid={} ack_did={} conn_uid={} conn_did={}",
+                         ack.user_id(), ack.device_id(), conn_uid, conn_did);
                 return;
             }
             if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
@@ -340,8 +357,8 @@ public:
             closure->req.set_seq_id(ack.user_seq());
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
-            meta.set_user_id(ack.user_id());
-            meta.set_device_id(ack.device_id());
+            meta.set_user_id(conn_uid);
+            meta.set_device_id(conn_did);
             meta.set_trace_id(::chatnow::utils::gen_trace_id());
             std::string data;
             meta.SerializeToString(&data);
@@ -360,9 +377,10 @@ public:
     }
 
     void shutdown_cleanup() {
-        LOG_INFO("Push 关停: 开始清理 OnlineRoute...");
+        LOG_INFO("Push shutdown: cleaning OnlineRoute...");
         // SCAN all online keys and unbind those belonging to this instance.
         // Cluster mode: for_each traverses all nodes via RedisClient::scan().
+        // OPTIMIZE: batch hgetall per SCAN page via pipeline to reduce shutdown latency
         long long cursor = 0;
         do {
             std::vector<std::string> keys;
@@ -379,7 +397,7 @@ public:
                 if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
             }
         } while (cursor != 0);
-        LOG_INFO("Push 关停: OnlineRoute + L1 缓存已清理");
+        LOG_INFO("Push shutdown: OnlineRoute + L1 cache cleaned");
     }
 
     /* brief: 给特定设备推送 KICKED 通知 */
@@ -397,9 +415,9 @@ private:
     void _handle_client_auth_(const NotifyClientAuth &auth,
                               server_t::connection_ptr conn) {
         if (auth.access_token().empty() || auth.device_id().empty()) {
-            LOG_WARN("WS CLIENT_AUTH 缺字段");
+            LOG_WARN("WS CLIENT_AUTH missing fields");
             try { conn->close(websocketpp::close::status::unsupported_data,
-                              "access_token/device_id required"); } catch(...) {}
+                              "access_token/device_id required"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
             return;
         }
 
@@ -408,9 +426,9 @@ private:
         try {
             claims = _jwt_codec->verify(auth.access_token());
         } catch (const chatnow::ServiceError &e) {
-            LOG_WARN("WS JWT 验签失败: {}", e.what());
+            LOG_WARN("WS JWT verify failed: {}", e.what());
             try { conn->close(websocketpp::close::status::unsupported_data,
-                              "auth failed"); } catch(...) {}
+                              "auth failed"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
             return;
         }
 
@@ -424,7 +442,7 @@ private:
         // 写 Presence（Push 为写入端）
         _write_presence_online_(uid, did);
 
-        LOG_INFO("WS 鉴权成功 uid={} device={}", uid, did);
+        LOG_INFO("WS auth success uid={} device={}", uid, did);
 
         // 携带 last_user_seq 时立即触发补送
         if (auth.has_last_user_seq() && auth.last_user_seq() > 0) {
@@ -468,17 +486,20 @@ private:
     void _write_presence_online_(const std::string &uid, const std::string &did) {
         try {
             std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
-            _redis->hset(k, "state", "ONLINE");
-            _redis->hset(k, "last_active_at_ms", std::to_string(
+            auto pipe = _redis->pipeline();
+            pipe.hset(k, "state", "ONLINE");
+            pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            _redis->expire(k, std::chrono::seconds(120));
+            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
+            pipe.exec();
         } catch (std::exception &e) {
-            LOG_WARN("Presence 写入失败 uid={} did={}: {}", uid, did, e.what());
+            LOG_WARN("Presence write failed uid={} did={}: {}", uid, did, e.what());
         }
     }
 
     RouteEntry resolve_route(const std::string &uid) {
+        if (!_online_route) return RouteEntry{};
         std::string cache_key = "route:" + uid;
 
         //  L1 hit → fast path (~ns)
@@ -505,10 +526,11 @@ private:
 
         //  L2 Redis: hgetall + build RouteEntry
         RouteEntry route;
-        auto devices = _online_route->devices(uid);
-        route.device_ids = std::move(devices);
-        for (const auto &did : route.device_ids) {
-            route.device_to_instance[did] = _online_route->device_instance(uid, did);
+        auto dmap = _online_route->device_instances_map(uid);
+        route.device_ids.reserve(dmap.size());
+        for (const auto &[did, inst] : dmap) {
+            route.device_ids.push_back(did);
+            route.device_to_instance[did] = inst;
         }
         if (_local_route_cache) {
             _local_route_cache->set(cache_key, route, randomized_ttl(std::chrono::seconds(2)));
@@ -519,17 +541,18 @@ private:
         return route;
     }
 
-    /* brief: 本实例直接通过 WS 下发；返回送达连接数 */
+    /* brief: 本实例直接通过 WS 下发；返回送达连接数（批量取 mutex 减少全局锁争用） */
     int _local_send(const std::string &uid, const std::string &device_id,
                     const std::string &payload) {
         auto conns = _connections->connections(uid, device_id);
+        auto mutexes = _connections->send_mutexes(uid, device_id);
         int sent = 0;
-        for (auto &c : conns) {
+        for (size_t i = 0; i < conns.size() && i < mutexes.size(); ++i) {
             try {
+                auto &c = conns[i];
                 if (!c || c->get_state() != websocketpp::session::state::value::open) continue;
-                auto mu = _connections->send_mutex(c);
-                if (!mu) continue;
-                std::lock_guard<std::mutex> lock(*mu);
+                if (!mutexes[i]) continue;
+                std::lock_guard<std::mutex> lock(*mutexes[i]);
                 c->send(payload, websocketpp::frame::opcode::value::binary);
                 ++sent;
             } catch (std::exception &e) {
@@ -561,7 +584,11 @@ public:
                     for (const auto &member : batch) {
                         std::string b64, peer;
                         std::vector<std::string> uids;
-                        _parse_outbox_member(member, b64, uids, peer);
+                        if (!_parse_outbox_member(member, b64, uids, peer)) {
+                            LOG_WARN("CrossInstanceOutbox: skip malformed member");
+                            _cross_outbox->remove(member);
+                            continue;
+                        }
 
                         chatnow::message::internal::InternalMessage internal_msg;
                         if (!internal_msg.ParseFromString(_utils_base64_decode(b64))) {
@@ -573,7 +600,7 @@ public:
                         // 按实例分组重发
                         std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
                         for (const auto &uid : uids) {
-                            auto route = _online_route ? resolve_route(uid) : RouteEntry{};
+                            auto route = resolve_route(uid);
                             for (const auto &did : route.device_ids) {
                                 auto it = route.device_to_instance.find(did);
                                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
@@ -631,7 +658,7 @@ public:
     void reap_stale_routes_(const std::string &push_service_dir,
                             std::shared_ptr<etcd::Client> etcd_client,
                             LeaderElection::ptr stale_reaper_election,
-                            std::atomic<bool> *running) {
+                            std::shared_ptr<std::atomic<bool>> running) {
         while (running && running->load()) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
             if (!stale_reaper_election || !stale_reaper_election->is_leader())
@@ -642,10 +669,15 @@ public:
                 auto resp = etcd_client->ls(push_service_dir).get();
                 if (resp.is_ok()) {
                     for (size_t i = 0; i < resp.keys().size(); ++i)
-                        online_instances.push_back(resp.value(i).as_string());
+                        online_instances.push_back(resp.key(i));
                 }
             } catch (std::exception &e) {
                 LOG_WARN("StaleRoute reaper: etcd ls 失败: {}", e.what());
+                continue;
+            }
+
+            if (online_instances.empty()) {
+                LOG_WARN("StaleRoute reaper: empty instance list, skip cleanup");
                 continue;
             }
 
@@ -678,67 +710,59 @@ public:
     }
 
 private:
-    void _parse_outbox_member(const std::string &member,
+    bool _parse_outbox_member(const std::string &member,
                                std::string &b64,
                                std::vector<std::string> &uids,
                                std::string &peer) {
-        auto pos_k = member.find("\"k\":\"");
-        auto pos_u = member.find("\"u\":[");
-        auto pos_p = member.find("\"p\":\"");
-        if (pos_k != std::string::npos && pos_u != std::string::npos) {
-            b64 = member.substr(pos_k + 5, pos_u - pos_k - 8);
+        picojson::value j;
+        std::string err = picojson::parse(j, member);
+        if (!err.empty()) {
+            LOG_WARN("CrossInstanceOutbox JSON parse failed: {}", err);
+            return false;
         }
-        if (pos_p != std::string::npos) {
-            peer = member.substr(pos_p + 5, member.size() - pos_p - 7);
+        if (!j.is<picojson::object>()) return false;
+
+        const auto &obj = j.get<picojson::object>();
+        auto it_k = obj.find("k");
+        if (it_k != obj.end() && it_k->second.is<std::string>()) {
+            b64 = it_k->second.get<std::string>();
         }
-        if (pos_u != std::string::npos) {
-            size_t arr_end = member.find(']', pos_u);
-            if (arr_end != std::string::npos) {
-                std::string arr = member.substr(pos_u + 5, arr_end - pos_u - 5);
-                size_t start = 0;
-                while ((start = arr.find('"', start)) != std::string::npos) {
-                    size_t end = arr.find('"', start + 1);
-                    if (end == std::string::npos) break;
-                    uids.push_back(arr.substr(start + 1, end - start - 1));
-                    start = end + 1;
-                }
+        auto it_p = obj.find("p");
+        if (it_p != obj.end() && it_p->second.is<std::string>()) {
+            peer = it_p->second.get<std::string>();
+        }
+        auto it_u = obj.find("u");
+        if (it_u != obj.end() && it_u->second.is<picojson::array>()) {
+            const auto &arr = it_u->second.get<picojson::array>();
+            for (const auto &elem : arr) {
+                if (elem.is<std::string>()) uids.push_back(elem.get<std::string>());
             }
         }
+        return !b64.empty();
     }
 
     static std::string _utils_base64_encode(const std::string &in) {
-        static const char kTbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        std::string out;
-        out.reserve(((in.size() + 2) / 3) * 4);
-        for (size_t i = 0; i < in.size(); i += 3) {
-            unsigned long val = (unsigned char)in[i] << 16;
-            if (i + 1 < in.size()) val |= (unsigned char)in[i + 1] << 8;
-            if (i + 2 < in.size()) val |= (unsigned char)in[i + 2];
-            out += kTbl[(val >> 18) & 0x3F];
-            out += kTbl[(val >> 12) & 0x3F];
-            out += (i + 1 < in.size()) ? kTbl[(val >> 6) & 0x3F] : '=';
-            out += (i + 2 < in.size()) ? kTbl[val & 0x3F] : '=';
-        }
+        int cap = ((in.size() + 2) / 3) * 4;
+        std::string out(cap, '\0');
+        int n = EVP_EncodeBlock(
+            reinterpret_cast<unsigned char*>(out.data()),
+            reinterpret_cast<const unsigned char*>(in.data()),
+            static_cast<int>(in.size()));
+        out.resize(static_cast<size_t>(n));
         return out;
     }
     static std::string _utils_base64_decode(const std::string &in) {
-        static const unsigned char kDec[128] = {
-            64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,64,
-            64,64,64,64,64,64,64,64,64,64,64,62,64,64,64,63,52,53,54,55,56,57,58,59,60,61,64,64,64,64,64,64,
-            64, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,64,64,64,64,64,
-            64,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,64,64,64,64,64
-        };
-        std::string out;
-        out.reserve((in.size() / 4) * 3);
-        for (size_t i = 0; i < in.size(); i += 4) {
-            unsigned long val = 0;
-            for (int j = 0; j < 4; ++j) {
-                if (in[i + j] != '=') val = (val << 6) | kDec[(unsigned char)in[i + j]];
-            }
-            out += (char)((val >> 16) & 0xFF);
-            if (in[i + 2] != '=') out += (char)((val >> 8) & 0xFF);
-            if (in[i + 3] != '=') out += (char)(val & 0xFF);
-        }
+        if (in.empty()) return "";
+        int cap = (static_cast<int>(in.size()) / 4) * 3 + 1;
+        std::string out(cap, '\0');
+        int n = EVP_DecodeBlock(
+            reinterpret_cast<unsigned char*>(out.data()),
+            reinterpret_cast<const unsigned char*>(in.data()),
+            static_cast<int>(in.size()));
+        if (n < 0) return "";
+        int pads = static_cast<int>(std::count(in.begin(), in.end(), '='));
+        if (n > pads) n -= pads;
+        out.resize(static_cast<size_t>(n));
         return out;
     }
 
@@ -769,16 +793,16 @@ public:
     PushServer(const Discovery::ptr &disc,
                const Registry::ptr &reg,
                const std::shared_ptr<brpc::Server> &rpc,
-               server_t *ws_server,
+               std::unique_ptr<server_t> ws_server,
                const MQClient::ptr &mq_client,
                const Subscriber::ptr &push_subscriber,
                PushServiceImpl *push_service = nullptr,
                std::thread *stale_reaper_thread = nullptr,
-               std::atomic<bool> *stale_reaper_running = nullptr)
-        : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(ws_server),
+               std::shared_ptr<std::atomic<bool>> stale_reaper_running = nullptr)
+        : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(std::move(ws_server)),
           _mq_client(mq_client), _push_subscriber(push_subscriber), _push_service(push_service),
           _stale_reaper_thread(stale_reaper_thread), _stale_reaper_running(stale_reaper_running) {}
-    ~PushServer() = default;
+    virtual ~PushServer() = default;
 
     void start() {
         _ws_thread = std::thread([this]() {
@@ -791,6 +815,8 @@ public:
             _rpc_server->Stop(0);
         });
         _rpc_server->RunUntilAskedToQuit();
+        // IMPORTANT: MQ subscriber MUST stop before brpc server shutdown.
+        // The MQ callback captures a raw _push_service pointer (owned by brpc via SERVER_OWNS_SERVICE).
         _push_subscriber.reset();
         _mq_client.reset();
         _ws_server->stop();
@@ -809,20 +835,20 @@ public:
 
         if (_ws_thread.joinable()) _ws_thread.join();
         _rpc_server->Join();
-        LOG_INFO("Push 关停完成");
+        LOG_INFO("Push shutdown complete");
     }
 
 private:
     Discovery::ptr _service_discover;
     Registry::ptr _reg_client;
     std::shared_ptr<brpc::Server> _rpc_server;
-    server_t *_ws_server;
+    std::unique_ptr<server_t> _ws_server;
     MQClient::ptr _mq_client;
     Subscriber::ptr _push_subscriber;
     PushServiceImpl *_push_service{nullptr};
     std::thread _ws_thread;
     std::thread *_stale_reaper_thread{nullptr};
-    std::atomic<bool> *_stale_reaper_running{nullptr};
+    std::shared_ptr<std::atomic<bool>> _stale_reaper_running;
 };
 
 class PushServerBuilder
@@ -898,15 +924,17 @@ public:
     }
 
     void make_ws_object(uint16_t ws_port) {
-        _ws_server.set_access_channels(websocketpp::log::alevel::none);
-        _ws_server.clear_error_channels(websocketpp::log::elevel::none);
-        _ws_server.init_asio();
-        _ws_server.set_reuse_addr(true);
-        _ws_server.set_open_handler([this](websocketpp::connection_hdl hdl) {
-            LOG_DEBUG("WS 连接建立 {}", (size_t)_ws_server.get_con_from_hdl(hdl).get());
+        _ws_server = std::make_unique<server_t>();
+        _ws_server->set_access_channels(websocketpp::log::alevel::none);
+        _ws_server->clear_error_channels(websocketpp::log::elevel::none);
+        _ws_server->init_asio();
+        _ws_server->set_max_message_size(65536);  // 64KB limit
+        _ws_server->set_reuse_addr(true);
+        _ws_server->set_open_handler([this](websocketpp::connection_hdl hdl) {
+            LOG_DEBUG("WS 连接建立 {}", (size_t)_ws_server->get_con_from_hdl(hdl).get());
         });
-        _ws_server.set_close_handler([this](websocketpp::connection_hdl hdl) {
-            auto conn = _ws_server.get_con_from_hdl(hdl);
+        _ws_server->set_close_handler([this](websocketpp::connection_hdl hdl) {
+            auto conn = _ws_server->get_con_from_hdl(hdl);
             std::string uid, did, jti;
             if (_connections && _connections->client(conn, uid, did, jti)) {
                 _connections->remove(conn);
@@ -915,12 +943,12 @@ public:
                 LOG_DEBUG("WS 关闭 uid={} did={}", uid, did);
             }
         });
-        _ws_server.set_message_handler([this](websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
-            auto conn = _ws_server.get_con_from_hdl(hdl);
+        _ws_server->set_message_handler([this](websocketpp::connection_hdl hdl, server_t::message_ptr msg) {
+            auto conn = _ws_server->get_con_from_hdl(hdl);
             NotifyMessage notify;
             if (!notify.ParseFromString(msg->get_payload())) {
                 LOG_WARN("WS payload 反序列化失败，关闭连接");
-                _ws_server.close(hdl, websocketpp::close::status::unsupported_data,
+                _ws_server->close(hdl, websocketpp::close::status::unsupported_data,
                                  "payload invalid");
                 return;
             }
@@ -930,7 +958,7 @@ public:
             if (!_connections->client(conn, uid_known, did_known, jti_known)) {
                 if (notify.notify_type() != NotifyType::CLIENT_AUTH || !notify.has_client_auth()) {
                     LOG_WARN("WS 首条非 CLIENT_AUTH，关闭连接");
-                    _ws_server.close(hdl, websocketpp::close::status::unsupported_data,
+                    _ws_server->close(hdl, websocketpp::close::status::unsupported_data,
                                      "auth required");
                     return;
                 }
@@ -982,6 +1010,9 @@ public:
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
         if (!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
+        if (port == ws_port) {
+            LOG_WARN("Push: rpc_port and ws_port are both {}, may conflict", port);
+        }
         _connections = std::make_shared<Connection>();
         _rpc_server = std::make_shared<brpc::Server>();
         _push_service = new PushServiceImpl(
@@ -1002,9 +1033,9 @@ public:
         // WS server — 先于 MQ 订阅
         make_ws_object(ws_port);
         std::error_code ec;
-        _ws_server.listen(ws_port, ec);
+        _ws_server->listen(ws_port, ec);
         if (ec) { LOG_ERROR("Push: WS 监听失败 {}", ec.message()); abort(); }
-        _ws_server.start_accept();
+        _ws_server->start_accept();
 
         // MQ 订阅
         auto callback_inner = std::bind(&PushServiceImpl::onPushMessage, _push_service,
@@ -1027,10 +1058,10 @@ public:
         // Stale route reaper
         if (_stale_reaper_election) {
             _stale_reaper_election->start();
-            _stale_reaper_running = true;
-            _stale_reaper_thread = std::thread([this]() {
+            _stale_reaper_running = std::make_shared<std::atomic<bool>>(true);
+            _stale_reaper_thread = std::thread([this, running = _stale_reaper_running]() {
                 _push_service->reap_stale_routes_(_push_service_dir, _etcd_client,
-                                                  _stale_reaper_election, &_stale_reaper_running);
+                                                  _stale_reaper_election, running);
             });
         }
 
@@ -1041,12 +1072,12 @@ public:
         return std::make_shared<PushServer>(std::move(_service_discover),
                                             std::move(_reg_client),
                                             std::move(_rpc_server),
-                                            &_ws_server,
+                                            std::move(_ws_server),
                                             std::move(_mq_client),
                                             std::move(_push_subscriber),
                                             _push_service,
-                                            &_stale_reaper_thread,
-                                            &_stale_reaper_running);
+                                            std::move(_stale_reaper_thread),
+                                            _stale_reaper_running);
     }
 
 private:
@@ -1078,10 +1109,10 @@ private:
     std::string _push_service_dir;
     LeaderElection::ptr _stale_reaper_election;
     std::thread _stale_reaper_thread;
-    std::atomic<bool> _stale_reaper_running{false};
+    std::shared_ptr<std::atomic<bool>> _stale_reaper_running;
 
     Connection::ptr _connections;
-    server_t _ws_server;
+    std::unique_ptr<server_t> _ws_server;
     PushServiceImpl *_push_service{nullptr};
     std::shared_ptr<brpc::Server> _rpc_server;
 };
