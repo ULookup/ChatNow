@@ -2,6 +2,8 @@
 cmake_minimum_required(VERSION 3.1.3)
 # 2. 声明工程名称
 project(message_server)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(target "message_server")
 # 3. 检测并生成框架代码
@@ -14,7 +16,7 @@ foreach(proto_file ${proto_files})
     # 3.3 如果没有生成，则预定义生成指令 -- 用于在构建项目之前先生成框架代码
     string(REPLACE ".proto" ".pb.cc" proto_cc ${proto_file})
     string(REPLACE ".proto" ".pb.h" proto_hh ${proto_file})
-    if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}${proto_cc})
+    if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/${proto_cc})
         add_custom_command(
             PRE_BUILD
             COMMAND protoc
@@ -76,7 +78,7 @@ endif()
 # 5. 声明目标及依赖
 if(test_files)
     add_executable(${test_client} ${test_files} ${proto_srcs})
-    target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
+    target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl -ljsoncpp)
 endif()
 
 # 6. 设置头文件默认搜索路径

@@ -69,8 +69,6 @@ int main(int argc, char *argv[])
                             FLAGS_mq_push_binding_key);
     msb.make_es_publisher(FLAGS_mq_es_exchange, FLAGS_mq_es_queue,
                           FLAGS_mq_es_binding_key);
-    msb.make_es_index_subscriber(FLAGS_mq_es_exchange, FLAGS_mq_es_queue,
-                                   FLAGS_mq_es_binding_key);
     msb.make_es_object({FLAGS_es_host});
     msb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host,
                           FLAGS_mysql_db, FLAGS_mysql_cset,

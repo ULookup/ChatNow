@@ -63,21 +63,6 @@ public:
         }
     }
 
-    int count_by_conversation(const std::string &cid) {
-        try {
-            odb::transaction trans(_db->begin());
-            using query = odb::query<MessagePin>;
-            odb::result<MessagePin> r(_db->query<MessagePin>(query::session_id == cid));
-            int n = 0;
-            for(auto it = r.begin(); it != r.end(); ++it) ++n;
-            trans.commit();
-            return n;
-        } catch(std::exception &e) {
-            LOG_ERROR("MessagePin.count_by_conversation cid={}: {}", cid, e.what());
-            return 0;
-        }
-    }
-
     std::vector<unsigned long> list_by_conversation(const std::string &cid, int limit = 10) {
         std::vector<unsigned long> res;
         try {

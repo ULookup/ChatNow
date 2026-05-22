@@ -56,6 +56,7 @@ inline constexpr int     kMaxLimit        = 100;
 inline constexpr int     kMaxSearchLimit  = 50;
 inline constexpr int     kMaxEmojiBytes   = 16;
 inline constexpr const char *kSystemUserId = "__system__";
+static const boost::posix_time::ptime kEpoch(boost::gregorian::date(1970, 1, 1));
 
 class MessageServiceImpl : public chatnow::message::MessageService {
 public:
@@ -101,9 +102,10 @@ public:
             if (req->limit() <= 0 || req->limit() > kMaxLimit)
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
                                               "limit out of range");
-            if (req->before_seq() == 0)
+            if (req->before_seq() < 0)
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
-                                              "before_seq must > 0");
+                                              "before_seq must >= 0");
+            // before_seq == 0 表示从最新消息开始
             require_member_(req->conversation_id(), auth.user_id);
 
             auto db_msgs = _mysql_msg->select_history(req->conversation_id(),
@@ -167,14 +169,17 @@ public:
             if (req->message_ids_size() == 0 || req->message_ids_size() > kMaxLimit)
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
                                               "message_ids size out of range");
+            if (req->conversation_id().empty())
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "conversation_id required");
+            require_member_(req->conversation_id(), auth.user_id);
+
             std::vector<unsigned long> mids;
             for (int i = 0; i < req->message_ids_size(); ++i)
                 mids.push_back(static_cast<unsigned long>(req->message_ids(i)));
-            auto db_msgs = _mysql_msg->select_by_ids(mids);
+            auto db_msgs = _mysql_msg->select_by_ids(req->conversation_id(), mids);
 
             for (auto &m : db_msgs) {
-                auto self = _mysql_member->select_self(m.session_id(), auth.user_id);
-                if (!self || self->is_quit()) continue;
                 auto *out = rsp->add_messages();
                 convert_db_message_to_proto_(m, out);
             }
@@ -193,19 +198,22 @@ public:
             if (req->keyword().empty())
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageContentInvalid,
                                               "keyword empty");
+            if (req->keyword().size() > 500)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "keyword too long");
             if (req->limit() <= 0 || req->limit() > kMaxSearchLimit)
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
                                               "limit out of range");
             require_member_(req->conversation_id(), auth.user_id);
 
-            auto es_results = _es_msg->search(req->keyword(), req->conversation_id(),
-                                              req->limit());
-            for (auto &m : es_results) {
+            auto result = _es_msg->search_with_cursor(req->keyword(), req->conversation_id(),
+                                                       req->limit(), req->cursor());
+            for (auto &m : result.messages) {
                 auto *out = rsp->add_messages();
                 convert_db_message_to_proto_(m, out);
             }
-            rsp->set_has_more(false);
-            rsp->set_next_cursor("");
+            rsp->set_has_more(result.has_more);
+            rsp->set_next_cursor(result.next_cursor);
         });
     }
 
@@ -215,28 +223,25 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
+            require_member_(req->conversation_id(), auth.user_id);
+
             auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
-            if (!msg)
-                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid not found");
-            if (msg->session_id() != req->conversation_id())
-                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "cid mismatch");
+            if (!msg || msg->session_id() != req->conversation_id())
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "message not found");
             if (msg->status() == ::chatnow::MessageStatus::REVOKED)
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageAlreadyRecalled,
                                               "already recalled");
             if (msg->status() == ::chatnow::MessageStatus::DELETED)
-                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "deleted");
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "message deleted");
 
             auto role = conv_role_(req->conversation_id(), auth.user_id);
             bool is_admin = (role == MemberRole::OWNER || role == MemberRole::ADMIN);
-            bool is_self  = (msg->user_id() == auth.user_id);
-            namespace pt = boost::posix_time;
-            pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
-            int64_t created_ms = (msg->create_time() - epoch).total_milliseconds();
-            int64_t age_ms = now_ms_() - created_ms;
             if (!is_admin) {
-                if (!is_self)
+                if (msg->user_id() != auth.user_id)
                     throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
-                                                  "not msg author");
+                                                  "not permitted");
+                int64_t created_ms = (msg->create_time() - kEpoch).total_milliseconds();
+                int64_t age_ms = now_ms_() - created_ms;
                 if (age_ms >= kRecallTimeoutMs)
                     throw ::chatnow::ServiceError(::chatnow::error::kMessageRecallTimeout,
                                                   "exceed 120s window");
@@ -262,10 +267,15 @@ public:
             auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
             if (!msg) throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
             require_member_(msg->session_id(), auth.user_id);
-            if (!_mysql_reaction->insert(static_cast<unsigned long>(req->message_id()),
-                                         auth.user_id, req->emoji()))
-                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                              "reaction insert failed");
+            try {
+                if (!_mysql_reaction->insert(static_cast<unsigned long>(req->message_id()),
+                                             auth.user_id, req->emoji()))
+                    throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
+                                                  "reaction insert failed");
+            } catch (const odb::object_already_persistent &) {
+                LOG_DEBUG("AddReaction duplicate mid={} uid={} emoji={}",
+                          req->message_id(), auth.user_id, req->emoji());
+            }
 
             publish_reaction_notify_(msg->user_id(), msg->session_id(),
                                      req->message_id(),
@@ -333,9 +343,6 @@ public:
             auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
             if (!msg || msg->session_id() != req->conversation_id())
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
-            if (_mysql_pin->count_by_conversation(req->conversation_id()) >= kPinLimit)
-                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
-                                              "pin limit exceeded (10)");
 
             if (!_mysql_pin->insert(req->conversation_id(),
                                     static_cast<unsigned long>(req->message_id()),
@@ -388,6 +395,7 @@ public:
         });
     }
 
+        // 仅删除当前用户的 user_timeline 记录，不影响其他成员或共享 message 表
     void DeleteMessages(::google::protobuf::RpcController* base_cntl,
                         const DeleteMessagesReq* req, DeleteMessagesRsp* rsp,
                         ::google::protobuf::Closure* done) override {
@@ -408,6 +416,7 @@ public:
         });
     }
 
+        // 仅清除当前用户的 user_timeline 记录，不影响其他成员或共享 message 表
     void ClearConversation(::google::protobuf::RpcController* base_cntl,
                            const ClearConversationReq* req, ClearConversationRsp* rsp,
                            ::google::protobuf::Closure* done) override {
@@ -428,8 +437,12 @@ public:
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
             if (req->client_msg_id().empty()) return;
+            if (req->client_msg_id().size() > 128)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "client_msg_id too long");
             auto msg = _mysql_msg->select_by_client_msg(auth.user_id, req->client_msg_id());
             if (!msg) return;
+            require_member_(msg->session_id(), auth.user_id);
             convert_db_message_to_proto_(*msg, rsp->mutable_message());
         });
     }
@@ -489,8 +502,8 @@ public:
                 file_id = ct.audio().file_id();
                 break;
             default:
-                LOG_ERROR("DB-Consumer: 未知消息类型 mid={}", mid);
-                return ConsumeAction::NackDiscard;
+                LOG_ERROR("DB-Consumer: 未知消息类型 mid={} type={}", mid, static_cast<int>(msg_type));
+                return ConsumeAction::NackRequeue;
         }
 
         if (msg_type != chatnow::message::TEXT && file_id.empty()) {
@@ -536,17 +549,7 @@ public:
             }
         }
 
-        // 落库：先消息后 timeline（各自事务感知；时序依赖而非强原子）
-        try {
-            _mysql_msg->insert(msg);
-        } catch (const odb::object_already_persistent &) {
-            LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
-            return ConsumeAction::Ack;
-        } catch (std::exception &e) {
-            LOG_ERROR("DB-Consumer: 消息落库失败 mid={}: {}", mid, e.what());
-            if (redelivered) return ConsumeAction::NackDiscard;
-            return ConsumeAction::NackRequeue;
-        }
+        // 落库：先 timeline 后 message（重试时 timeline 幂等）
         if (!timeline_list.empty()) {
             try {
                 _mysql_user_timeline->insert(timeline_list);
@@ -555,7 +558,24 @@ public:
                           timeline_list.size(), e.what());
                 if (redelivered) return ConsumeAction::NackDiscard;
                 return ConsumeAction::NackRequeue;
+            } catch (...) {
+                LOG_ERROR("DB-Consumer: timeline 落库未知异常 mid={}", mid);
+                if (redelivered) return ConsumeAction::NackDiscard;
+                return ConsumeAction::NackRequeue;
             }
+        }
+        try {
+            _mysql_msg->insert(msg);
+        } catch (const odb::object_already_persistent &) {
+            LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
+        } catch (std::exception &e) {
+            LOG_ERROR("DB-Consumer: 消息落库失败 mid={}: {}", mid, e.what());
+            if (redelivered) return ConsumeAction::NackDiscard;
+            return ConsumeAction::NackRequeue;
+        } catch (...) {
+            LOG_ERROR("DB-Consumer: 消息落库未知异常 mid={}", mid);
+            if (redelivered) return ConsumeAction::NackDiscard;
+            return ConsumeAction::NackRequeue;
         }
 
         LOG_INFO("DB-Consumer: 存储成功 mid={} cid={} seq={}", mid,
@@ -563,24 +583,26 @@ public:
 
         // 发布到 Push 队列，由 Push 服务进行 WS 下发
         if (_push_publisher) {
+            long long now_sec = static_cast<long long>(time(nullptr));
             std::string push_payload = internal_msg.SerializeAsString();
             auto outbox = _push_outbox;
             std::map<std::string, std::string> push_headers;
             ::chatnow::mq::mq_inject_trace_headers(push_headers);
             try {
                 _push_publisher->publish_confirm(push_payload, push_headers,
-                    [push_payload, outbox](PublishStatus st, const std::string &err) {
+                    [push_payload, outbox, now_sec](PublishStatus st, const std::string &err) {
                         if (st != PublishStatus::Acked && outbox)
-                            outbox->enqueue(push_payload, static_cast<long long>(time(nullptr)));
+                            outbox->enqueue(push_payload, now_sec);
                     });
             } catch (std::exception &e) {
                 LOG_ERROR("DB-Consumer: 发布 Push 事件异常 mid={}: {}", mid, e.what());
-                if (outbox) outbox->enqueue(push_payload, static_cast<long long>(time(nullptr)));
+                if (outbox) outbox->enqueue(push_payload, now_sec);
             }
         }
 
         // 发布 ESIndexEvent（仅文本消息入 ES；fail-soft）
         if (msg_type == chatnow::message::TEXT && !content_text.empty() && _es_publisher) {
+            long long now_es_sec = static_cast<long long>(time(nullptr));
             chatnow::message::internal::ESIndexEvent es_event;
             es_event.set_message_id(msg_pb.message_id());
             es_event.set_conversation_id(msg_pb.conversation_id());
@@ -591,16 +613,17 @@ public:
             es_event.set_message_type(msg_type);
 
             std::string es_payload = es_event.SerializeAsString();
+            auto es_outbox = _es_outbox;
             try {
                 _es_publisher->publish_confirm(es_payload, {},
-                    [es_payload, outbox = _es_outbox](PublishStatus st, const std::string &err) {
-                        if (st != PublishStatus::Acked && outbox)
-                            outbox->enqueue(es_payload, static_cast<long long>(time(nullptr)));
+                    [es_payload, es_outbox, now_es_sec](PublishStatus st, const std::string &err) {
+                        if (st != PublishStatus::Acked && es_outbox)
+                            es_outbox->enqueue(es_payload, now_es_sec);
                     });
             } catch (std::exception &e) {
                 LOG_ERROR("DB-Consumer: 发布 ESIndexEvent 异常 mid={}: {}", mid, e.what());
-                if (_es_outbox)
-                    _es_outbox->enqueue(es_payload, static_cast<long long>(time(nullptr)));
+                if (es_outbox)
+                    es_outbox->enqueue(es_payload, now_es_sec);
             }
         }
 
@@ -645,7 +668,10 @@ private:
 
     /* 要求 auth.user_id 是 cid 的成员，否则抛 kConversationNotMember */
     void require_member_(const std::string &cid, const std::string &uid) {
-        if (uid == kSystemUserId) return;
+        if (uid == kSystemUserId) {
+            LOG_DEBUG("system user bypass membership check for cid={}", cid);
+            return;
+        }
         auto self = _mysql_member->select_self(cid, uid);
         if (!self || self->is_quit()) {
             throw ::chatnow::ServiceError(
@@ -677,9 +703,7 @@ private:
         out->set_status(static_cast<chatnow::message::MessageStatus>(static_cast<int>(db.status())));
         // message_type 已移至 content.type()，在下方 switch 中统一设置
 
-        namespace pt = boost::posix_time;
-        pt::ptime epoch(boost::gregorian::date(1970, 1, 1));
-        int64_t ms = (db.create_time() - epoch).total_milliseconds();
+        int64_t ms = (db.create_time() - kEpoch).total_milliseconds();
         if (ms < 0) ms = 0;
         out->set_created_at_ms(ms);
 
@@ -706,8 +730,9 @@ private:
                 content->mutable_audio()->set_file_id(db.file_id());
                 break;
             default:
+                LOG_WARN("未知消息类型 mid={} type={}", db.message_id(), static_cast<int>(db.message_type()));
                 content->set_type(chatnow::message::TEXT);
-                content->mutable_text()->set_text(db.content());
+                content->mutable_text()->set_text("[unsupported message type]");
                 break;
         }
     }
@@ -754,8 +779,11 @@ private:
     }
 
     int64_t now_ms_() {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
+        static auto start = std::chrono::steady_clock::now();
+        static int64_t base_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+        auto elapsed = std::chrono::steady_clock::now() - start;
+        return base_ms + std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
     }
 
     // ====== notify 发布辅助（fail-soft） ======
@@ -798,13 +826,14 @@ private:
             auto channel = _mm_channels ? _mm_channels->choose("/service/push_service") : nullptr;
             if (!channel) { LOG_WARN("push channel unavailable; skip reaction notify"); return; }
             chatnow::push::PushService_Stub stub(channel.get());
-            auto *closure = new ::chatnow::SelfDeleteRpcClosure<
-                chatnow::push::PushToUserReq, chatnow::push::PushToUserRsp>();
+            auto closure = std::make_unique< ::chatnow::SelfDeleteRpcClosure<
+                chatnow::push::PushToUserReq, chatnow::push::PushToUserRsp>>();
             closure->req.set_request_id("reaction-notify");
             closure->req.set_user_id(target_uid);
             *closure->req.mutable_notify() = nm;
             closure->cntl.set_timeout_ms(500);
-            stub.PushToUser(&closure->cntl, &closure->req, &closure->rsp, closure);
+            stub.PushToUser(&closure->cntl, &closure->req, &closure->rsp, closure.get());
+            closure.release();
         } catch (std::exception &e) {
             LOG_ERROR("publish_reaction_notify exception target={} mid={}: {}", target_uid, mid, e.what());
         }
@@ -857,7 +886,10 @@ private:
 
 // ===== Server 与 Builder =====
 
+class MessageServerBuilder;
+
 class MessageServer {
+    friend class MessageServerBuilder;
 public:
     using ptr = std::shared_ptr<MessageServer>;
     MessageServer(const std::shared_ptr<brpc::Server> &server,
@@ -865,26 +897,17 @@ public:
                   const Registry::ptr &registry,
                   const MQClient::ptr &mq_client,
                   LeaderElection::ptr push_reaper_election = nullptr,
-                  LeaderElection::ptr es_reaper_election = nullptr,
-                  std::thread *push_reaper_thread = nullptr,
-                  std::thread *es_reaper_thread = nullptr,
-                  std::atomic<bool> *push_reaper_running = nullptr,
-                  std::atomic<bool> *es_reaper_running = nullptr)
-        : _rpc_server(server), _service_impl(impl),
+                  LeaderElection::ptr es_reaper_election = nullptr)
+        : _rpc_server(server),
           _registry(registry), _mq_client(mq_client),
           _push_reaper_election(std::move(push_reaper_election)),
-          _es_reaper_election(std::move(es_reaper_election)),
-          _push_reaper_thread(push_reaper_thread),
-          _es_reaper_thread(es_reaper_thread),
-          _push_reaper_running(push_reaper_running),
-          _es_reaper_running(es_reaper_running) {}
+          _es_reaper_election(std::move(es_reaper_election)) {}
 
     ~MessageServer() {
-        // 先停 reaper 线程，再停选举，最后停 RPC
-        if (_push_reaper_running) *_push_reaper_running = false;
-        if (_es_reaper_running) *_es_reaper_running = false;
-        if (_push_reaper_thread && _push_reaper_thread->joinable()) _push_reaper_thread->join();
-        if (_es_reaper_thread && _es_reaper_thread->joinable()) _es_reaper_thread->join();
+        _push_reaper_running = false;
+        _es_reaper_running = false;
+        if (_push_reaper_thread.joinable()) _push_reaper_thread.join();
+        if (_es_reaper_thread.joinable()) _es_reaper_thread.join();
         if (_push_reaper_election) _push_reaper_election->stop();
         if (_es_reaper_election) _es_reaper_election->stop();
         if (_rpc_server) { _rpc_server->Stop(0); _rpc_server->Join(); }
@@ -895,15 +918,14 @@ public:
 
 private:
     std::shared_ptr<brpc::Server> _rpc_server;
-    MessageServiceImpl *_service_impl {nullptr};
     Registry::ptr _registry;
     MQClient::ptr _mq_client;
     LeaderElection::ptr _push_reaper_election;
     LeaderElection::ptr _es_reaper_election;
-    std::thread *_push_reaper_thread{nullptr};
-    std::thread *_es_reaper_thread{nullptr};
-    std::atomic<bool> *_push_reaper_running{nullptr};
-    std::atomic<bool> *_es_reaper_running{nullptr};
+    std::thread _push_reaper_thread;
+    std::thread _es_reaper_thread;
+    std::atomic<bool> _push_reaper_running{false};
+    std::atomic<bool> _es_reaper_running{false};
 };
 
 class MessageServerBuilder {
@@ -1022,25 +1044,6 @@ public:
         };
         _es_publisher = std::make_shared<Publisher>(_mq_client, _es_pub_settings);
     }
-    void make_es_index_subscriber(const std::string &exchange,
-                                   const std::string &queue,
-                                   const std::string &binding_key) {
-        if (!_mq_client) {
-            LOG_WARN("MQ 未初始化，跳过 ES index subscriber");
-            return;
-        }
-        _es_index_settings = {
-            .exchange = exchange,
-            .exchange_type = chatnow::DIRECT,
-            .queue = queue,
-            .binding_key = binding_key
-        };
-        auto dummy_cb = [](const char*, size_t, bool) -> chatnow::ConsumeAction {
-            return chatnow::ConsumeAction::Ack;
-        };
-        _subscriber_es_index = chatnow::MQFactory::create<chatnow::Subscriber>(
-            _mq_client, _es_index_settings, dummy_cb);
-    }
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
     void set_etcd_client(std::shared_ptr<etcd::Client> etcd) { _etcd_client = etcd; }
 
@@ -1105,14 +1108,14 @@ public:
 
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
         _rpc_server = std::make_shared<brpc::Server>();
-        MessageServiceImpl *impl = new MessageServiceImpl(
+        auto impl = std::make_unique<MessageServiceImpl>(
             _identity_service_name, _media_service_name, _mm_channels,
             _mysql_msg, _mysql_user_timeline, _mysql_member,
             _mysql_reaction, _mysql_pin, _es_msg, _seq_gen,
             _push_publisher, _push_outbox, _es_publisher, _es_outbox);
-        _service_impl = impl;
+        _service_impl = impl.get();
         int ret = _rpc_server->AddService(
-            impl, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
+            impl.release(), brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if (ret == -1) { LOG_ERROR("AddService failed"); abort(); }
         brpc::ServerOptions options;
         options.idle_timeout_sec = timeout;
@@ -1123,29 +1126,23 @@ public:
         backfill_seq_from_db_();
 
         // MQ subscribe
-        auto callback_db_inner = std::bind(&MessageServiceImpl::onDBMessage,
-            impl, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-        chatnow::MessageCallbackWithHeaders callback_db =
-            [callback_db_inner](const char* body, size_t sz, bool redeliv,
-                                const std::map<std::string, std::string>& headers)
+        auto callback_db = [impl](const char* body, size_t sz, bool redeliv,
+                                   const std::map<std::string, std::string>& headers)
             -> chatnow::ConsumeAction {
             std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
             ::chatnow::log::LogContext::set(_trace_id, "", "");
             struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
-            return callback_db_inner(body, sz, redeliv);
+            return impl->onDBMessage(body, sz, redeliv);
         };
         _subscriber_db->consume(std::move(callback_db));
 
-        auto callback_es_inner = std::bind(&MessageServiceImpl::onESIndexMessage,
-            impl, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
-        chatnow::MessageCallbackWithHeaders callback_es =
-            [callback_es_inner](const char* body, size_t sz, bool redeliv,
-                                const std::map<std::string, std::string>& headers)
+        auto callback_es = [impl](const char* body, size_t sz, bool redeliv,
+                                   const std::map<std::string, std::string>& headers)
             -> chatnow::ConsumeAction {
             std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
             ::chatnow::log::LogContext::set(_trace_id, "", "");
             struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
-            return callback_es_inner(body, sz, redeliv);
+            return impl->onESIndexMessage(body, sz, redeliv);
         };
         _subscriber_es->consume(std::move(callback_es));
 
@@ -1158,17 +1155,20 @@ public:
     }
 
     MessageServer::ptr build() {
-        return std::make_shared<MessageServer>(
+        auto server = std::make_shared<MessageServer>(
             _rpc_server, _service_impl, _registry, _mq_client,
-            _push_reaper_election, _es_reaper_election,
-            &_push_reaper_thread, &_es_reaper_thread,
-            &_push_reaper_running, &_es_reaper_running);
+            _push_reaper_election, _es_reaper_election);
+        server->_push_reaper_thread = std::move(_push_reaper_thread);
+        server->_es_reaper_thread = std::move(_es_reaper_thread);
+        server->_push_reaper_running = _push_reaper_running.load();
+        server->_es_reaper_running = _es_reaper_running.load();
+        return server;
     }
 
 private:
     void backfill_seq_from_db_() {
-        if (!_seq_gen || !_odb_db) {
-            LOG_WARN("SeqGen / MySQL 未初始化，跳过 seq 回填");
+        if (!_seq_gen || !_odb_db || !_redis_client) {
+            LOG_WARN("SeqGen / MySQL / Redis 未初始化，跳过 seq 回填");
             return;
         }
 
@@ -1221,10 +1221,8 @@ private:
     declare_settings _es_queue_settings;
     declare_settings _push_settings;
     declare_settings _es_pub_settings;
-    declare_settings _es_index_settings;
     Subscriber::ptr _subscriber_db;
     Subscriber::ptr _subscriber_es;
-    Subscriber::ptr _subscriber_es_index;
 
     ServiceManager::ptr _mm_channels;
     std::string _identity_service_name;

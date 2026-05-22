@@ -208,6 +208,61 @@ public:
         return res;
     }
 
+    struct SearchResult {
+        std::vector<Message> messages;
+        bool has_more = false;
+        std::string next_cursor;  // "{created_at_ms},{message_id}"
+    };
+
+    SearchResult search_with_cursor(const std::string &key, const std::string &ssid,
+                                    int size, const std::string &cursor) {
+        SearchResult res;
+        auto builder = ESSearch(_client, "message")
+            .append_must_term("chat_session_id.keyword", ssid)
+            .append_must_match("content", key)
+            .append_must_term("status", std::to_string(0))
+            .sort_by("create_time", "desc")
+            .sort_by("message_id", "desc");
+
+        if (!cursor.empty()) {
+            auto comma = cursor.find(',');
+            if (comma != std::string::npos) {
+                long ts = std::stol(cursor.substr(0, comma));
+                long mid = std::stol(cursor.substr(comma + 1));
+                builder.search_after({ts, mid});
+            }
+        }
+
+        builder.page(0, size + 1);
+        Json::Value json_msg = builder.search();
+        if (!json_msg.isArray()) return res;
+
+        int count = static_cast<int>(json_msg.size());
+        if (count > size) {
+            res.has_more = true;
+            --count;
+        }
+
+        for (int i = 0; i < count; ++i) {
+            const auto &src = json_msg[i]["_source"];
+            Message m;
+            m.user_id(src["user_id"].asString());
+            m.message_id(src["message_id"].asUInt64());
+            m.seq_id(src["seq_id"].asUInt64());
+            m.create_time(boost::posix_time::from_time_t(src["create_time"].asInt64()));
+            m.session_id(src["chat_session_id"].asString());
+            m.content(src["content"].asString());
+            res.messages.push_back(m);
+        }
+
+        if (res.has_more && !res.messages.empty()) {
+            const auto &last = json_msg[count - 1]["_source"];
+            res.next_cursor = std::to_string(last["create_time"].asInt64())
+                            + "," + std::to_string(last["message_id"].asUInt64());
+        }
+        return res;
+    }
+
 private:
     std::shared_ptr<elasticlient::Client> _client;
 };

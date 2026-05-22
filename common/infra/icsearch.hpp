@@ -283,6 +283,16 @@ public:
         return *this;
     }
 
+    /* brief: 游标分页 search_after；传入上一页最后一条的排序字段值 */
+    ESSearch &search_after(const std::vector<long> &after) {
+        if (!after.empty()) {
+            Json::Value sa(Json::arrayValue);
+            for (auto v : after) sa.append(static_cast<Json::Int64>(v));
+            _search_after = sa;
+        }
+        return *this;
+    }
+
     Json::Value search() {
         Json::Value cond;
         if(!_must_not.empty()) cond["must_not"] = _must_not;
@@ -295,6 +305,8 @@ public:
         Json::Value root;  root["query"] = query;
         if(_size > 0) root["size"] = _size;
         if(_from >= 0) root["from"] = _from;
+        if(!_search_after.isNull() && _search_after.size() > 0)
+            root["search_after"] = _search_after;
         if(!_sort.empty()) root["sort"] = _sort;
 
         std::string body;
@@ -331,6 +343,7 @@ private:
     Json::Value _sort;
     int _size = 0;     // 0 表示用 ES 默认（一般是 10）
     int _from = -1;    // <0 表示不显式传
+    Json::Value _search_after;
     std::shared_ptr<elasticlient::Client> _client;
 };
 

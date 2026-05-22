@@ -209,6 +209,27 @@ public:
         return res;
     }
 
+    /* brief: 按会话+message_id批量查询；走 uk_session_seq 索引，只查本会话内消息 */
+    std::vector<Message> select_by_ids(const std::string &cid,
+                                       const std::vector<unsigned long> &ids) {
+        std::vector<Message> res;
+        if (ids.empty() || cid.empty()) return res;
+        try {
+            odb::transaction trans(_db->begin());
+            using query  = odb::query<Message>;
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(
+                query::session_id == cid &&
+                query::message_id.in_range(ids.begin(), ids.end()) +
+                " ORDER BY seq_id ASC"));
+            for (auto &m : r) res.push_back(m);
+            trans.commit();
+        } catch (std::exception &e) {
+            LOG_ERROR("按会话+message_id批量查询失败 cid={}: {}", cid, e.what());
+        }
+        return res;
+    }
+
     /* brief: 取会话最近 N 条；按 seq_id 倒序后反转保证从旧到新展示
      *  - 走 uk_session_seq 索引；无 ORDER BY create_time，避免索引外排序
      */

@@ -50,6 +50,10 @@ public:
         _locked = false;
     }
 
+    ~RedisMutex() {
+        if (_locked) unlock();
+    }
+
 private:
     static std::string generate_token_() {
         static thread_local std::mt19937_64 rng(std::random_device{}());
