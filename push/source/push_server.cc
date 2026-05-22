@@ -26,7 +26,7 @@ DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
 DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
 DEFINE_string(mq_user, "root", "MQ 用户");
-DEFINE_string(mq_pswd, "", "MQ 密码");
+DEFINE_string(mq_pswd, "", "MQ password");
 DEFINE_string(mq_host, "127.0.0.1:5672", "MQ 地址");
 DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送交换机");
 DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列");

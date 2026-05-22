@@ -78,6 +78,7 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
+    static constexpr int kPresenceTtlSec = 120;
     ~PushServiceImpl() {
         stop_cross_outbox_reaper();  // joins _cross_reaper_thread before 'this' destroyed
     }
@@ -376,7 +377,7 @@ public:
     }
 
     void shutdown_cleanup() {
-        LOG_INFO("Push 关停: 开始清理 OnlineRoute...");
+        LOG_INFO("Push shutdown: cleaning OnlineRoute...");
         // SCAN all online keys and unbind those belonging to this instance.
         // Cluster mode: for_each traverses all nodes via RedisClient::scan().
         // OPTIMIZE: batch hgetall per SCAN page via pipeline to reduce shutdown latency
@@ -396,7 +397,7 @@ public:
                 if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
             }
         } while (cursor != 0);
-        LOG_INFO("Push 关停: OnlineRoute + L1 缓存已清理");
+        LOG_INFO("Push shutdown: OnlineRoute + L1 cache cleaned");
     }
 
     /* brief: 给特定设备推送 KICKED 通知 */
@@ -414,7 +415,7 @@ private:
     void _handle_client_auth_(const NotifyClientAuth &auth,
                               server_t::connection_ptr conn) {
         if (auth.access_token().empty() || auth.device_id().empty()) {
-            LOG_WARN("WS CLIENT_AUTH 缺字段");
+            LOG_WARN("WS CLIENT_AUTH missing fields");
             try { conn->close(websocketpp::close::status::unsupported_data,
                               "access_token/device_id required"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
             return;
@@ -425,7 +426,7 @@ private:
         try {
             claims = _jwt_codec->verify(auth.access_token());
         } catch (const chatnow::ServiceError &e) {
-            LOG_WARN("WS JWT 验签失败: {}", e.what());
+            LOG_WARN("WS JWT verify failed: {}", e.what());
             try { conn->close(websocketpp::close::status::unsupported_data,
                               "auth failed"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
             return;
@@ -441,7 +442,7 @@ private:
         // 写 Presence（Push 为写入端）
         _write_presence_online_(uid, did);
 
-        LOG_INFO("WS 鉴权成功 uid={} device={}", uid, did);
+        LOG_INFO("WS auth success uid={} device={}", uid, did);
 
         // 携带 last_user_seq 时立即触发补送
         if (auth.has_last_user_seq() && auth.last_user_seq() > 0) {
@@ -490,7 +491,7 @@ private:
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            pipe.expire(k, std::chrono::seconds(120));
+            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
             pipe.exec();
         } catch (std::exception &e) {
             LOG_WARN("Presence write failed uid={} did={}: {}", uid, did, e.what());
@@ -801,7 +802,7 @@ public:
         : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(std::move(ws_server)),
           _mq_client(mq_client), _push_subscriber(push_subscriber), _push_service(push_service),
           _stale_reaper_thread(stale_reaper_thread), _stale_reaper_running(stale_reaper_running) {}
-    ~PushServer() = default;
+    virtual ~PushServer() = default;
 
     void start() {
         _ws_thread = std::thread([this]() {
@@ -834,7 +835,7 @@ public:
 
         if (_ws_thread.joinable()) _ws_thread.join();
         _rpc_server->Join();
-        LOG_INFO("Push 关停完成");
+        LOG_INFO("Push shutdown complete");
     }
 
 private:

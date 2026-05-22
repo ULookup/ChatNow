@@ -40,6 +40,7 @@ public:
                 const std::string &device_id,
                 const std::string &jwt_jti)
     {
+        long ts = now_sec();
         std::unique_lock<std::mutex> lock(_mutex);
         // 关闭同一设备的旧连接
         auto dit = _uid_device_connections.find(uid);
@@ -55,7 +56,7 @@ public:
             }
         }
         _uid_device_connections[uid][device_id].insert(conn);
-        Client c{uid, device_id, jwt_jti, now_sec()};
+        Client c{uid, device_id, jwt_jti, ts};
         _conn_clients[conn] = std::move(c);
         LOG_DEBUG("Connection.insert {} uid={} device={}",
                   (size_t)conn.get(), uid, device_id);
