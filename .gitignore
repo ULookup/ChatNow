@@ -13,3 +13,12 @@ conf/*.conf
 # OS
 .DS_Store
 Thumbs.db
+
+# Environment secrets
+.env
+
+# Runtime data
+logs/
+middle/
+third_party/
+*.bak
