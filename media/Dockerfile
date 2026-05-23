@@ -6,10 +6,10 @@ RUN mkdir -p /im/logs &&\
     mkdir -p /im/data &&\
     mkdir -p /im/conf &&\
     mkdir -p /im/bin
-RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
 # 将可执行程序文件，拷贝进入镜像
 COPY ./build/media_server /im/bin
 # 将可执行程序依赖，拷贝进入镜像
 COPY ./depends/* /lib/x86_64-linux-gnu/
+RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
 # 设置容器的启动默认操作 --- 运行程序
 CMD /im/bin/media_server -flagfile=/im/conf/media_server.conf

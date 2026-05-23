@@ -149,7 +149,7 @@ services:
       - mysql
       - redis-cluster-init
     entrypoint:
-      /im/bin/entrypoint.sh -d etcd:2379,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384 -c "/im/bin/media_server -flagfile=/im/conf/media_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384 -c "/im/bin/media_server -flagfile=/im/conf/media_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   relationship_server:
     build: ./relationship
     container_name: relationship_server-service
