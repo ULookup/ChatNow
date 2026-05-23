@@ -21,7 +21,7 @@ DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
 DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
 DEFINE_string(mysql_pswd, "YHY060403", "MySQL服务器访问密码");
 DEFINE_string(mysql_db, "chatnow", "MySQL默认库名称");
-DEFINE_string(mysql_cset, "utf8", "MySQL客户端字符集");
+DEFINE_string(mysql_cset, "utf8mb4", "MySQL客户端字符集");
 DEFINE_int32(mysql_port, 0, "MySQL服务器访问端口");
 DEFINE_int32(mysql_pool_count, 4, "MySQL连接池最大连接数量");
 

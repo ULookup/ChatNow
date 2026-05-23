@@ -41,8 +41,12 @@ public:
 
     explicit ServiceChannel(const std::string &name) : _service_name(name), _index(0) {}
 
-    /* brief: 节点上线，新增 brpc::Channel */
+    /* brief: 节点上线，新增 brpc::Channel（幂等：已存在的 host 跳过） */
     void append(const std::string &host) {
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+            if (_hosts.find(host) != _hosts.end()) return;  // 已存在，跳过
+        }
         auto channel = std::make_shared<brpc::Channel>();
         brpc::ChannelOptions options;
         options.connect_timeout_ms = kConnectTimeoutMs;
@@ -54,6 +58,7 @@ public:
             return;
         }
         std::unique_lock<std::mutex> lock(_mutex);
+        if (_hosts.find(host) != _hosts.end()) return;  // double-check
         _hosts[host] = channel;
         _channels.push_back(channel);
     }
