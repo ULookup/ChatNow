@@ -7,7 +7,7 @@
 -access_host=127.0.0.1:10004
 -listen_port=10004
 -rpc_timeout=-1
--rpc_threads=1
+-rpc_threads=4
 -identity_service=/service/identity_service
 -conversation_service=/service/conversation_service
 -message_service=/service/message_service
