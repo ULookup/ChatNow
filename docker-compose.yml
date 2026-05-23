@@ -18,7 +18,7 @@ services:
     image: mysql:8.0.44
     container_name: mysql-service
     environment:
-      MYSQL_ROOT_PASSWORD: YHY060403
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     volumes:
       - ./sql:/docker-entrypoint-initdb.d/:rw
       - ./middle/data/mysql:/var/lib/mysql:rw
@@ -126,7 +126,7 @@ services:
     container_name: rabbitmq-service
     environment:
       RABBITMQ_DEFAULT_USER: root
-      RABBITMQ_DEFAULT_PASS: YHY060403
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
       - ./middle/data/rabbitmq:/var/lib/rabbitmq:rw
     ports:
