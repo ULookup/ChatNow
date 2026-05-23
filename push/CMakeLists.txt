@@ -34,7 +34,7 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lfmt -lbrpc -lssl -lcrypto
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lamqpcpp -lev
-    -lhiredis -lredis++
+    -lhiredis -lredis++ -ljsoncpp
     -lpthread -lboost_system)
 
 target_include_directories(${target} PRIVATE

@@ -13,7 +13,7 @@
 #include "auth/auth_context.hpp"
 #include "auth/forward_auth.hpp"
 #include "common/auth/metadata.pb.h"
-#include "auth/jwt_codec.hpp"
+#include "auth/auth_config_loader.hpp"
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
 #include "utils/brpc_closure.hpp"
@@ -854,9 +854,9 @@ private:
 class PushServerBuilder
 {
 public:
-    void make_jwt_object(const chatnow::auth::JwtConfig &config) {
-        config.validate_or_throw();
-        _jwt_codec = std::make_shared<chatnow::auth::JwtCodec>(config);
+    void make_jwt_object(const std::string &auth_config_path) {
+        auto cfg = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
+        _jwt_codec = std::make_shared<chatnow::auth::JwtCodec>(cfg);
     }
 
     void set_redis_seeds(const std::string &seeds) { _redis_seeds = seeds; }

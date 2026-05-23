@@ -207,6 +207,7 @@ services:
     container_name: push_server-service
     volumes:
       - ./conf/docker/push_server.conf:/im/conf/push_server.conf
+      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh

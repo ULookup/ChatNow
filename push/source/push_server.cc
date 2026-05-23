@@ -36,9 +36,8 @@ DEFINE_string(mq_push_binding_key, "push", "推送绑定键");
 DEFINE_int32(resend_batch, 50, "心跳触发未 ack 重传的批量上限");
 DEFINE_int32(resend_max_age_sec, 5, "未 ack 项入队后等待多少秒视为可重传");
 
-// JWT（开发阶段临时键，后续配置化）
-DEFINE_string(jwt_current_kid, "v1", "JWT 当前 key ID");
-DEFINE_string(jwt_key_v1, "", "JWT v1 签名密钥 (>=32 字节)");
+// JWT — 统一从 auth.json 加载（与 identity/gateway 共享密钥源）
+DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
 
 int main(int argc, char *argv[])
 {
@@ -46,12 +45,7 @@ int main(int argc, char *argv[])
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::push::PushServerBuilder psb;
-    // JWT config（开发阶段临时键）
-    chatnow::auth::JwtConfig jwt_cfg;
-    jwt_cfg.current_kid = FLAGS_jwt_current_kid;
-    jwt_cfg.keys[jwt_cfg.current_kid] = FLAGS_jwt_key_v1;
-    jwt_cfg.access_ttl_sec = 7200;
-    psb.make_jwt_object(jwt_cfg);
+    psb.make_jwt_object(FLAGS_auth_config);
 
     psb.set_redis_seeds(FLAGS_redis_seeds);
     psb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
