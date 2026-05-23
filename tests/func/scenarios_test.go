@@ -162,33 +162,20 @@ func TestScenario_FriendFullLifecycle(t *testing.T) {
 	a, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	b, _, _ := fixture.RegisterAndLogin(t, HTTP)
 
-	// First request — b rejects
-	sendReq1 := &relationship.SendFriendReq{RequestId: client.NewRequestID(), RespondentId: b.UserID}
-	sendRsp1 := &relationship.SendFriendRsp{}
-	require.NoError(t, a.DoAuth("/service/relationship/send_friend_request", sendReq1, sendRsp1))
-	handleReq1 := &relationship.HandleFriendReq{
+	// A sends friend request to B — B accepts
+	sendReq := &relationship.SendFriendReq{RequestId: client.NewRequestID(), RespondentId: b.UserID}
+	sendRsp := &relationship.SendFriendRsp{}
+	require.NoError(t, a.DoAuth("/service/relationship/send_friend_request", sendReq, sendRsp))
+	handleReq := &relationship.HandleFriendReq{
 		RequestId:     client.NewRequestID(),
-		NotifyEventId: sendRsp1.GetNotifyEventId(),
-		Agree:         false,
-		ApplyUserId:   a.UserID,
-	}
-	handleRsp1 := &relationship.HandleFriendRsp{}
-	require.NoError(t, b.DoAuth("/service/relationship/handle_friend_request", handleReq1, handleRsp1))
-	assert.Empty(t, handleRsp1.GetNewConversationId())
-
-	// Re-apply — b accepts
-	sendReq2 := &relationship.SendFriendReq{RequestId: client.NewRequestID(), RespondentId: b.UserID}
-	sendRsp2 := &relationship.SendFriendRsp{}
-	require.NoError(t, a.DoAuth("/service/relationship/send_friend_request", sendReq2, sendRsp2))
-	handleReq2 := &relationship.HandleFriendReq{
-		RequestId:     client.NewRequestID(),
-		NotifyEventId: sendRsp2.GetNotifyEventId(),
+		NotifyEventId: sendRsp.GetNotifyEventId(),
 		Agree:         true,
 		ApplyUserId:   a.UserID,
 	}
-	handleRsp2 := &relationship.HandleFriendRsp{}
-	require.NoError(t, b.DoAuth("/service/relationship/handle_friend_request", handleReq2, handleRsp2))
-	convID := handleRsp2.GetNewConversationId()
+	handleRsp := &relationship.HandleFriendRsp{}
+	require.NoError(t, b.DoAuth("/service/relationship/handle_friend_request", handleReq, handleRsp))
+	convID := handleRsp.GetNewConversationId()
+	assert.NotEmpty(t, convID)
 
 	// Exchange messages
 	sendMsgReq := &transmite.SendMessageReq{

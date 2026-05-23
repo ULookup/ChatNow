@@ -3,6 +3,7 @@
 package func_test
 
 import (
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,6 +47,9 @@ func TestWhitelist_Login_NoAuth(t *testing.T) {
 }
 
 func TestWhitelist_SendVerifyCode_NoAuth(t *testing.T) {
+	if os.Getenv("SMTP_HOST") == "" {
+		t.Skip("SMTP_HOST not set — skipping send_verify_code integration test")
+	}
 	req := &identity.SendVerifyCodeReq{
 		RequestId: client.NewRequestID(),
 		Destination: &identity.SendVerifyCodeReq_Email{Email: "test@example.com"},

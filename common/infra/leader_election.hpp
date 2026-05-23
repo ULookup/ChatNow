@@ -94,13 +94,31 @@ private:
         }
     }
 
+    static constexpr int kMaxTtlFailures = 5;  // 连续 5 次 TTL 检查失败才放弃
+
     void _hold_leadership_(int64_t lease_id) {
+        int consecutive_failures = 0;
         while (_running && _is_leader) {
             if (!_sleep_interruptible_(std::chrono::seconds(1))) return;
-            auto ttl_resp = _etcd->leasetimetolive(lease_id).get();
-            if (!ttl_resp.is_ok() || ttl_resp.value().ttl() <= 0) {
-                LOG_WARN("LeaderElection lease {} 过期，失去 leader", lease_id);
-                break;
+            try {
+                auto ttl_resp = _etcd->leasetimetolive(lease_id).get();
+                if (!ttl_resp.is_ok() || ttl_resp.value().ttl() <= 0) {
+                    consecutive_failures++;
+                    LOG_WARN("LeaderElection lease {} TTL 检查失败 ({}/{})",
+                             lease_id, consecutive_failures, kMaxTtlFailures);
+                    if (consecutive_failures >= kMaxTtlFailures) {
+                        LOG_ERROR("LeaderElection lease {} 连续 {} 次检查失败，放弃 leader",
+                                  lease_id, kMaxTtlFailures);
+                        break;
+                    }
+                } else {
+                    consecutive_failures = 0;  // 成功则重置计数器
+                }
+            } catch (std::exception &e) {
+                consecutive_failures++;
+                LOG_WARN("LeaderElection lease {} TTL 查询异常 ({}/{}): {}",
+                         lease_id, consecutive_failures, kMaxTtlFailures, e.what());
+                if (consecutive_failures >= kMaxTtlFailures) break;
             }
         }
     }

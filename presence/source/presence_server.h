@@ -351,14 +351,18 @@ public:
                 std::this_thread::sleep_for(std::chrono::seconds(interval_sec));
                 if (!_scan_running) break;
 
-                auto subscribed = _aggregator->subscribed_uids();
-                for (const auto& uid : subscribed) {
-                    auto p = _aggregator->aggregate(uid);
-                    auto it = last_state.find(uid);
-                    if (it == last_state.end() || it->second != p.aggregated_state()) {
-                        last_state[uid] = p.aggregated_state();
-                        notify_subscribers(uid, p);
+                try {
+                    auto subscribed = _aggregator->subscribed_uids();
+                    for (const auto& uid : subscribed) {
+                        auto p = _aggregator->aggregate(uid);
+                        auto it = last_state.find(uid);
+                        if (it == last_state.end() || it->second != p.aggregated_state()) {
+                            last_state[uid] = p.aggregated_state();
+                            notify_subscribers(uid, p);
+                        }
                     }
+                } catch (std::exception &e) {
+                    LOG_ERROR("Presence change scanner 异常: {}", e.what());
                 }
             }
         });

@@ -327,9 +327,12 @@ public:
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
             auto role = conv_role_(req->conversation_id(), auth.user_id);
-            if (role != MemberRole::OWNER && role != MemberRole::ADMIN)
-                throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
-                                              "only OWNER/ADMIN can pin");
+            if (role != MemberRole::OWNER && role != MemberRole::ADMIN) {
+                // 私聊（p_）场景下任何成员都有 pin 权限
+                if (req->conversation_id().rfind("p_", 0) != 0)
+                    throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
+                                                  "only OWNER/ADMIN can pin");
+            }
             auto msg = _mysql_msg->select_by_id(static_cast<unsigned long>(req->message_id()));
             if (!msg || msg->session_id() != req->conversation_id())
                 throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound, "mid");
@@ -354,9 +357,11 @@ public:
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
             auto role = conv_role_(req->conversation_id(), auth.user_id);
-            if (role != MemberRole::OWNER && role != MemberRole::ADMIN)
-                throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
-                                              "only OWNER/ADMIN can unpin");
+            if (role != MemberRole::OWNER && role != MemberRole::ADMIN) {
+                if (req->conversation_id().rfind("p_", 0) != 0)
+                    throw ::chatnow::ServiceError(::chatnow::error::kConversationNoPermission,
+                                                  "only OWNER/ADMIN can unpin");
+            }
             if (!_mysql_pin->remove(req->conversation_id(),
                                     static_cast<unsigned long>(req->message_id())))
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError, "unpin failed");
@@ -1148,6 +1153,19 @@ public:
             return callback_es_inner(body, sz, redeliv);
         };
         _subscriber_es->consume(std::move(callback_es));
+
+        auto callback_es_index_inner = std::bind(&MessageServiceImpl::onESIndexMessage,
+            impl, std::placeholders::_1, std::placeholders::_2, std::placeholders::_3);
+        chatnow::MessageCallbackWithHeaders callback_es_index =
+            [callback_es_index_inner](const char* body, size_t sz, bool redeliv,
+                                      const std::map<std::string, std::string>& headers)
+            -> chatnow::ConsumeAction {
+            std::string _trace_id = ::chatnow::mq::mq_extract_trace_id(headers);
+            ::chatnow::log::LogContext::set(_trace_id, "", "");
+            struct _Scope { ~_Scope() { ::chatnow::log::LogContext::clear(); } } _scope;
+            return callback_es_index_inner(body, sz, redeliv);
+        };
+        _subscriber_es_index->consume(std::move(callback_es_index));
 
         LOG_INFO("MQ 订阅完成，消息服务启动！");
 
