@@ -28,6 +28,10 @@
 #include "transmite/transmite_service.pb.h"
 #include <butil/logging.h>
 #include <atomic>
+
+DECLARE_int32(rate_limit_user_max);
+DECLARE_int32(rate_limit_session_max);
+DECLARE_int32(rate_limit_window_sec);
 #include <chrono>
 #include <optional>
 #include <memory>

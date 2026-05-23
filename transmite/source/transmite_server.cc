@@ -15,7 +15,7 @@ DEFINE_bool(wait_on_clock_backwards, true, "时钟回拨开关");
 
 DEFINE_int32(listen_port, 10004, "RPC服务器监听端口");
 DEFINE_int32(rpc_timeout, -1, "RPC调用超时时间");
-DEFINE_int32(rpc_threads, 1, "RPC的IO线程数量");
+DEFINE_int32(rpc_threads, 4, "RPC的IO线程数量");
 
 DEFINE_string(identity_service, "/service/identity_service", "用户管理子服务名称");
 DEFINE_string(conversation_service, "/service/conversation_service", "会话管理子服务名称");
