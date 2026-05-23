@@ -1,38 +1,38 @@
 #!/bin/bash
-#1. 编写端口探测函数，端口连接不上则循环等待
-# wait_for 127.0.0.1 3306
+# 端口检测函数：等待指定 host:port 可达
 wait_for() {
-    while ! nc -z $1 $2
+    local host=$1
+    local port=$2
+    while ! nc -z $host $port
     do
-        echo "$2 端口连接失败，休眠等待";
+        echo "$host:$port 端口连接失败，休眠等待";
         sleep 1;
     done
-    echo "$1:$2 检测成功";
+    echo "$host:$port 检测成功";
 }
-#2. 对脚本运行参数进行解析，获取到ip ports command
-declare ip
-declare ports
+
+# 解析参数
+declare deps
 declare command
-while getopts "h:p:c:" arg
+while getopts "d:c:" arg
 do
     case $arg in
-        h)
-            ip=$OPTARG;;
-        p)
-            ports=$OPTARG;;
+        d)
+            deps=$OPTARG;;
         c)
             command=$OPTARG;;
     esac
 done
-#3. 通过执行脚本进行端口检测
-#${ports //,/ } 针对ports中的内容，以空格替换字符串中的, shell中数组=一种以空格间隔的字符串
-for port in ${ports//,/ }
+
+# 对每个 host:port 对进行端口检测
+for dep in ${deps//,/ }
 do
-    wait_for $ip $port
+    host=${dep%:*}
+    port=${dep#*:}
+    wait_for $host $port
 done
 
 echo "端口检测完毕"
 
-#4. 执行command
-
+# 执行命令
 eval $command
