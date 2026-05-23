@@ -286,7 +286,8 @@ public:
     {
         std::vector<std::string> res;
         ESSearch builder(_client, "chat_session");
-        builder.append_must_match("chat_session_name", key)
+        builder.append_should_match("chat_session_name", key)
+               .append_should_match("chat_session_id.keyword", key)
                .append_must_term("status", std::to_string(0))
                .sort_by("update_time", "desc")
                .page(0, size);
@@ -308,7 +309,8 @@ public:
     {
         std::vector<std::string> res;
         ESSearch builder(_client, "chat_session");
-        builder.append_must_match("chat_session_name", key)
+        builder.append_should_match("chat_session_name", key)
+               .append_should_match("chat_session_id.keyword", key)
                .append_must_term("status", std::to_string(0))
                .append_must_term("member_ids", caller_uid)
                .sort_by("update_time", "desc")
