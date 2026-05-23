@@ -5,6 +5,7 @@ package func_test
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -274,6 +275,9 @@ func TestLogout_NoToken_Error(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSendVerifyCode_Email_Success(t *testing.T) {
+	if os.Getenv("SMTP_HOST") == "" {
+		t.Skip("SMTP_HOST not set — skipping email integration test")
+	}
 	req := &identity.SendVerifyCodeReq{
 		RequestId: client.NewRequestID(),
 		Destination: &identity.SendVerifyCodeReq_Email{
