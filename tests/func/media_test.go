@@ -38,8 +38,8 @@ func TestApplyUpload_FileTooLarge(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	hash := sha256.Sum256([]byte("test"))
 	req := &media.ApplyUploadReq{
-		RequestId: client.NewRequestID(), FileName: "big.zip",
-		FileSize: 200 * 1024 * 1024, MimeType: "application/zip",
+		RequestId: client.NewRequestID(), FileName: "big.jpg",
+		FileSize: 30 * 1024 * 1024, MimeType: "image/jpeg",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	rsp := &media.ApplyUploadRsp{}
