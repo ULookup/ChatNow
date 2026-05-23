@@ -441,6 +441,7 @@ public:
         std::vector<unsigned long> res;
         if(uids.empty()) return res;
         try {
+            auto pipe = _c->pipeline(key::kSeqUser);
             for(const auto &uid : uids) {
                 pipe.incr(key::kSeqUser + uid);
             }
