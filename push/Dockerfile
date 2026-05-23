@@ -10,6 +10,6 @@ RUN mkdir -p /im/logs &&\
 COPY ./build/push_server /im/bin
 # 将可执行程序依赖，拷贝进入镜像
 COPY ./depends/* /lib/x86_64-linux-gnu/
-COPY ./nc /bin
+RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
 # 设置容器的启动默认操作 --- 运行程序
 CMD /im/bin/push_server -flagfile=/im/conf/push_server.conf

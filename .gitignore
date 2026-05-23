@@ -21,4 +21,6 @@ Thumbs.db
 logs/
 middle/
 third_party/
+*/depends/
+*/build/
 *.bak
