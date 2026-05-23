@@ -605,7 +605,9 @@ public:
 
             int limit = req->page().limit() > 0 ? req->page().limit() : 50;
             if (limit > 200) limit = 200;
-            int start = std::max(0, req->page().cursor());
+            int start = 0;
+            if (!req->page().cursor().empty())
+                start = std::max(0, std::stoi(req->page().cursor()));
             int end = std::min(start + limit, total);
             std::vector<std::string> page_uids;
             if (start < total)
@@ -930,7 +932,8 @@ private:
         out.set_message_type(static_cast<::chatnow::message::MessageType>(
             root.get("type", 0).asInt()));
         out.set_sent_at_ms(root.get("ts", 0).asInt64());
-        out.set_status(root.get("status", 0).asInt());
+        out.set_status(static_cast<::chatnow::message::MessageStatus>(
+            root.get("status", 0).asInt()));
         return true;
     }
 

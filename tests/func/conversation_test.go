@@ -439,8 +439,8 @@ func TestSearchConversations_Success(t *testing.T) {
 	member, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	convID := fixture.CreateGroupWithMembers(t, owner, []*client.HTTPClient{member}, "test_group")
 
-	// Search by a partial substring of the conversation ID.
-	searchKey := convID[2:8]
+	// Search by conversation name (partial match via ik_max_word analyzer).
+	searchKey := "test_group"
 	req := &conversation.SearchConversationsReq{
 		RequestId: client.NewRequestID(),
 		SearchKey: searchKey,

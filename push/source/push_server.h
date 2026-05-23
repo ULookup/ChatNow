@@ -797,11 +797,11 @@ public:
                const MQClient::ptr &mq_client,
                const Subscriber::ptr &push_subscriber,
                PushServiceImpl *push_service = nullptr,
-               std::thread *stale_reaper_thread = nullptr,
+               std::thread stale_reaper_thread = {},
                std::shared_ptr<std::atomic<bool>> stale_reaper_running = nullptr)
         : _service_discover(disc), _reg_client(reg), _rpc_server(rpc), _ws_server(std::move(ws_server)),
           _mq_client(mq_client), _push_subscriber(push_subscriber), _push_service(push_service),
-          _stale_reaper_thread(stale_reaper_thread), _stale_reaper_running(stale_reaper_running) {}
+          _stale_reaper_thread(std::move(stale_reaper_thread)), _stale_reaper_running(stale_reaper_running) {}
     virtual ~PushServer() = default;
 
     void start() {
@@ -829,8 +829,8 @@ public:
         // 停止 StaleRoute reaper
         if (_stale_reaper_running) {
             _stale_reaper_running->store(false);
-            if (_stale_reaper_thread && _stale_reaper_thread->joinable())
-                _stale_reaper_thread->join();
+            if (_stale_reaper_thread.joinable())
+                _stale_reaper_thread.join();
         }
 
         if (_ws_thread.joinable()) _ws_thread.join();
@@ -847,7 +847,7 @@ private:
     Subscriber::ptr _push_subscriber;
     PushServiceImpl *_push_service{nullptr};
     std::thread _ws_thread;
-    std::thread *_stale_reaper_thread{nullptr};
+    std::thread _stale_reaper_thread;
     std::shared_ptr<std::atomic<bool>> _stale_reaper_running;
 };
 

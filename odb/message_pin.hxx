@@ -34,7 +34,7 @@ private:
     #pragma db id auto
     unsigned long _id;
 
-    #pragma db type("varchar(32)")
+    #pragma db type("varchar(48)")
     std::string _session_id;
 
     #pragma db type("bigint unsigned")

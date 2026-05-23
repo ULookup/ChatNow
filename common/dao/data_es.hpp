@@ -230,6 +230,8 @@ public:
             .append("status",            "integer", "standard", false)
             .append("update_time",       "long",    "standard", false)
             .append("member_ids",        "keyword", "standard", false)
+            .append("creator_id",       "keyword", "standard", false)
+            .append("create_time",      "long",    "standard", false)
             .create();
         if(!ret) {
             LOG_ERROR("会话搜索索引创建失败");
@@ -243,13 +245,16 @@ public:
                      const std::vector<std::string> &member_ids = {}) {
         static const boost::posix_time::ptime epoch(boost::gregorian::date(1970, 1, 1));
         long ts = (c.update_time() - epoch).total_seconds();
+        long cts = (c.create_time() - epoch).total_seconds();
         ESInsert builder(_client, "chat_session");
         builder.append("chat_session_id",   c.conversation_id())
                .append("chat_session_name", c.conversation_name())
                .append("chat_session_type", static_cast<int>(c.conversation_type()))
                .append("avatar_id",         c.avatar_id())
                .append("status",            static_cast<int>(c.status()))
-               .append("update_time",       ts);
+               .append("update_time",       ts)
+               .append("creator_id",        c.owner_id())
+               .append("create_time",       cts);
         if (!member_ids.empty()) {
             Json::Value mids(Json::arrayValue);
             for (const auto &uid : member_ids) mids.append(uid);

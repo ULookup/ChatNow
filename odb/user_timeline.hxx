@@ -105,7 +105,7 @@ private:
     #pragma db type("bigint unsigned")
     unsigned long _user_seq {0};
 
-    #pragma db type("varchar(32)")
+    #pragma db type("varchar(48)")
     std::string _session_id;
 
     #pragma db type("bigint unsigned")
