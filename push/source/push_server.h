@@ -513,6 +513,15 @@ private:
         }
     }
 
+    void _refresh_presence_ttl_(const std::string &uid, const std::string &did) {
+        try {
+            std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
+            _redis->expire(k, std::chrono::seconds(kPresenceTtlSec));
+        } catch (std::exception &e) {
+            LOG_WARN("Presence TTL refresh failed uid={} did={}: {}", uid, did, e.what());
+        }
+    }
+
     RouteEntry resolve_route(const std::string &uid) {
         if (!_online_route) return RouteEntry{};
         std::string cache_key = "route:" + uid;
