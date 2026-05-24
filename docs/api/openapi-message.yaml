@@ -240,6 +240,43 @@ paths:
         '200': { $ref: '#/components/responses/Success' }
         '4xx': { $ref: '#/components/responses/BusinessError' }
 
+  /service/message/update_read_ack:
+    post:
+      summary: 更新已读确认
+      description: 标记会话中已读到的最大 seq_id，用于已读回执。
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: UpdateReadAck, request: UpdateReadAckReq, response: UpdateReadAckRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UpdateReadAckReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/select_by_client_msg_id:
+    post:
+      summary: 按客户端消息ID查询
+      description: 通过 client_msg_id 幂等查找消息，用于断网重发去重。命中返回已有消息，未命中返回空。
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: SelectByClientMsgId, request: SelectByClientMsgIdReq, response: SelectByClientMsgIdRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SelectByClientMsgIdReq' }
+      responses:
+        '200':
+          description: 成功（命中时 message 非空，未命中时 message 为空）
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SelectByClientMsgIdRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -561,3 +598,25 @@ components:
       properties:
         request_id: { type: string }
         conversation_id: { type: string }
+
+    UpdateReadAckReq:
+      x-protobuf: { message: UpdateReadAckReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, seq_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        seq_id: { type: integer, format: int64 }
+
+    SelectByClientMsgIdReq:
+      x-protobuf: { message: SelectByClientMsgIdReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, client_msg_id]
+      properties:
+        request_id: { type: string }
+        client_msg_id: { type: string }
+
+    SelectByClientMsgIdRsp:
+      type: object
+      properties:
+        message: { $ref: '#/components/schemas/Message' }
