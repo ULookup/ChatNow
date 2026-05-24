@@ -522,6 +522,65 @@ private:
         }
     }
 
+    void _notify_presence_change_(const std::string &uid, const std::string &state) {
+        if (!_redis) return;
+        try {
+            std::vector<std::string> subs;
+            _redis->smembers("im:presence:sub:" + uid, std::inserter(subs, subs.end()));
+            if (subs.empty()) return;
+
+            ::chatnow::push::NotifyMessage notify;
+            notify.set_notify_type(::chatnow::push::NotifyType::PRESENCE_CHANGE_NOTIFY);
+            auto* pc = notify.mutable_presence_change();
+            pc->set_user_id(uid);
+            pc->set_state(state);
+            std::string payload = notify.SerializeAsString();
+
+            std::unordered_map<std::string, std::vector<std::string>> peer_to_uids;
+            for (const auto& sub_uid : subs) {
+                auto route = resolve_route(sub_uid);
+                if (route.device_ids.empty()) continue;
+                for (const auto& did : route.device_ids) {
+                    auto it = route.device_to_instance.find(did);
+                    std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
+                    if (inst.empty() || inst == _instance_id) {
+                        _local_send(sub_uid, did, payload);
+                    } else {
+                        peer_to_uids[inst].push_back(sub_uid);
+                    }
+                }
+            }
+
+            if (peer_to_uids.empty()) return;
+
+            long long now_ts = static_cast<long long>(time(nullptr));
+            for (auto& kv : peer_to_uids) {
+                const std::string& peer = kv.first;
+                auto& uids = kv.second;
+                std::sort(uids.begin(), uids.end());
+                uids.erase(std::unique(uids.begin(), uids.end()), uids.end());
+
+                auto channel = _mm_channels->choose(peer);
+                if (!channel) {
+                    LOG_WARN("Presence notify: 对端 {} 不可达，跳过 {} 个订阅者", peer, uids.size());
+                    continue;
+                }
+                PushService_Stub stub(channel.get());
+                auto* closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
+                closure->req.set_request_id("presence-notify-" + uid);
+                for (const auto& u : uids) closure->req.add_user_id_list(u);
+                closure->req.mutable_notify()->CopyFrom(notify);
+                closure->on_done = [peer](brpc::Controller* c, const PushBatchRsp&) {
+                    if (c->Failed())
+                        LOG_WARN("Presence PushBatch 跨实例失败 peer={}: {}", peer, c->ErrorText());
+                };
+                stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
+            }
+        } catch (std::exception &e) {
+            LOG_WARN("Presence notify failed uid={}: {}", uid, e.what());
+        }
+    }
+
     RouteEntry resolve_route(const std::string &uid) {
         if (!_online_route) return RouteEntry{};
         std::string cache_key = "route:" + uid;
