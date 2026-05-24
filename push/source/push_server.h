@@ -553,7 +553,6 @@ private:
 
             if (peer_to_uids.empty()) return;
 
-            long long now_ts = static_cast<long long>(time(nullptr));
             for (auto& kv : peer_to_uids) {
                 const std::string& peer = kv.first;
                 auto& uids = kv.second;
