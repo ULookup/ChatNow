@@ -773,7 +773,10 @@ private:
     // ====== notify 发布辅助（fail-soft） ======
 
     void publish_recalled_notify_(const std::string &cid, int64_t mid) {
-        if (!_push_publisher) return;
+        if (!_push_publisher) {
+            LOG_ERROR("publish_recalled_notify: push publisher 未初始化 cid={} mid={}", cid, mid);
+            return;
+        }
         chatnow::push::NotifyMessage nm;
         nm.set_notify_type(chatnow::push::MESSAGE_RECALLED_NOTIFY);
         nm.mutable_message_recalled()->set_conversation_id(cid);
@@ -796,7 +799,11 @@ private:
                                    const std::string &cid, int64_t mid,
                                    const std::string &actor_uid,
                                    const std::string &emoji, bool added) {
-        if (!_push_publisher || target_uid == actor_uid) return;
+        if (target_uid == actor_uid) return;
+        if (!_push_publisher) {
+            LOG_ERROR("publish_reaction_notify: push publisher 未初始化 target={} mid={}", target_uid, mid);
+            return;
+        }
         chatnow::push::NotifyMessage nm;
         nm.set_notify_type(chatnow::push::REACTION_CHANGED_NOTIFY);
         auto *r = nm.mutable_reaction_changed();
@@ -824,7 +831,10 @@ private:
 
     void publish_pin_notify_(const std::string &cid, int64_t mid,
                               const std::string &actor_uid, bool is_pinned) {
-        if (!_push_publisher) return;
+        if (!_push_publisher) {
+            LOG_ERROR("publish_pin_notify: push publisher 未初始化 cid={} mid={}", cid, mid);
+            return;
+        }
         chatnow::push::NotifyMessage nm;
         nm.set_notify_type(chatnow::push::PIN_CHANGED_NOTIFY);
         auto *p = nm.mutable_pin_changed();
