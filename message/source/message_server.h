@@ -1080,6 +1080,11 @@ public:
                     continue;
                 try {
                     auto items = _push_outbox->peek(50);
+                    if (items.empty()) continue;
+                    if (!_push_publisher) {
+                        LOG_ERROR("PushOutbox reaper: publisher 未初始化，跳过重试 (pending {} 条)", items.size());
+                        continue;
+                    }
                     for (const auto &item : items) {
                         _push_publisher->publish_confirm(item, {},
                             [outbox = _push_outbox, item](PublishStatus st, const std::string &) {
