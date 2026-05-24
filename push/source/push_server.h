@@ -78,6 +78,15 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
+    void write_presence_offline(const std::string &uid, const std::string &did) {
+        _write_presence_offline_(uid, did);
+    }
+    void refresh_presence_ttl(const std::string &uid, const std::string &did) {
+        _refresh_presence_ttl_(uid, did);
+    }
+    void notify_presence_change(const std::string &uid, const std::string &state) {
+        _notify_presence_change_(uid, state);
+    }
     static constexpr int kPresenceTtlSec = 120;
     ~PushServiceImpl() {
         stop_cross_outbox_reaper();  // joins _cross_reaper_thread before 'this' destroyed
@@ -441,6 +450,7 @@ private:
 
         // 写 Presence（Push 为写入端）
         _write_presence_online_(uid, did);
+        _notify_presence_change_(uid, "ONLINE");
 
         LOG_INFO("WS auth success uid={} device={}", uid, did);
 
@@ -1022,6 +1032,10 @@ public:
                 _connections->remove(conn);
                 if (_online_route) _online_route->unbind(uid, did, _instance_id);
                 if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
+                if (_push_service) {
+                    _push_service->write_presence_offline(uid, did);
+                    _push_service->notify_presence_change(uid, "OFFLINE");
+                }
                 LOG_DEBUG("WS 关闭 uid={} did={}", uid, did);
             }
         });
@@ -1055,6 +1069,7 @@ public:
             if (_push_service) _push_service->onClientNotify(notify, conn);
             if (notify.notify_type() == NotifyType::CLIENT_HEARTBEAT) {
                 _online_route->touch(uid_known);
+                if (_push_service) _push_service->refresh_presence_ttl(uid_known, did_known);
             }
         });
     }
