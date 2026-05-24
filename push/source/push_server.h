@@ -498,6 +498,21 @@ private:
         }
     }
 
+    void _write_presence_offline_(const std::string &uid, const std::string &did) {
+        try {
+            std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
+            auto pipe = _redis->pipeline();
+            pipe.hset(k, "state", "OFFLINE");
+            pipe.hset(k, "last_active_at_ms", std::to_string(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()));
+            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
+            pipe.exec();
+        } catch (std::exception &e) {
+            LOG_WARN("Presence offline write failed uid={} did={}: {}", uid, did, e.what());
+        }
+    }
+
     RouteEntry resolve_route(const std::string &uid) {
         if (!_online_route) return RouteEntry{};
         std::string cache_key = "route:" + uid;
