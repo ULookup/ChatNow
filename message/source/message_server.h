@@ -582,6 +582,13 @@ public:
                 LOG_ERROR("DB-Consumer: 发布 Push 事件异常 mid={}: {}", mid, e.what());
                 if (outbox) outbox->enqueue(push_payload, static_cast<long long>(time(nullptr)));
             }
+        } else {
+            LOG_ERROR("DB-Consumer: Push publisher 未初始化，消息无法实时推送 mid={}", mid);
+            auto outbox = _push_outbox;
+            if (outbox) {
+                std::string push_payload = internal_msg.SerializeAsString();
+                outbox->enqueue(push_payload, static_cast<long long>(time(nullptr)));
+            }
         }
 
         // 发布 ESIndexEvent（仅文本消息入 ES；fail-soft）
