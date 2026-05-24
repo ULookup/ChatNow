@@ -114,6 +114,7 @@ private:
 
         auto ch = _channels->choose(svc_name);
         if (!ch) {
+            LOG_WARN("Gateway forward 无可用节点 path={} svc={}", httpreq.path, svc_name);
             return write_err(::chatnow::error::kSystemUnavailable, "no backend available");
         }
 
@@ -129,6 +130,7 @@ private:
         (stub.*method)(&cntl, &pb_req, &pb_rsp, nullptr);
 
         if (cntl.Failed()) {
+            LOG_WARN("Gateway RPC 失败 path={} svc={} err=[{}] {}", httpreq.path, svc_name, cntl.ErrorCode(), cntl.ErrorText());
             int32_t code = (cntl.ErrorCode() == brpc::ERPCTIMEDOUT)
                                ? ::chatnow::error::kSystemTimeout
                                : ::chatnow::error::kSystemUnavailable;
@@ -387,6 +389,12 @@ inline void GatewayServer::register_routes() {
     route<msg::MessageService_Stub, msg::ClearConversationReq, msg::ClearConversationRsp>(
         "/service/message/clear", _message_svc, GatewayAuth::JWT_REQUIRED,
         &msg::MessageService_Stub::ClearConversation);
+    route<msg::MessageService_Stub, msg::UpdateReadAckReq, msg::UpdateReadAckRsp>(
+        "/service/message/update_read_ack", _message_svc, GatewayAuth::JWT_REQUIRED,
+        &msg::MessageService_Stub::UpdateReadAck);
+    route<msg::MessageService_Stub, msg::SelectByClientMsgIdReq, msg::SelectByClientMsgIdRsp>(
+        "/service/message/select_by_client_msg_id", _message_svc, GatewayAuth::JWT_REQUIRED,
+        &msg::MessageService_Stub::SelectByClientMsgId);
 
     // ====== Transmite ======
     route<tx::MsgTransmitService_Stub, tx::SendMessageReq, tx::SendMessageRsp>(
