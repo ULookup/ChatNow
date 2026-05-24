@@ -83,8 +83,11 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            res.reset(_db->query_one<Message>(
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(
                 query::user_id == user_id && query::client_msg_id == client_msg_id));
+            auto it = r.begin();
+            if (it != r.end()) res.reset(new Message(*it));
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("通过 client_msg_id 查询失败 {}-{}: {}", user_id, client_msg_id, e.what());
@@ -123,10 +126,13 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            std::shared_ptr<Message> m(_db->query_one<Message>(
-                (query::session_id == cid) + " ORDER BY " + query::seq_id + " DESC"));
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(
+                (query::session_id == cid) + " ORDER BY " + query::seq_id + " DESC LIMIT 1"));
+            auto it = r.begin();
+            unsigned long seq = (it != r.end()) ? it->seq_id() : 0UL;
             trans.commit();
-            return m ? m->seq_id() : 0UL;
+            return seq;
         } catch(std::exception &e) {
             LOG_ERROR("select_max_seq_by_conversation cid={} failed: {}", cid, e.what());
             return 0UL;
@@ -181,7 +187,10 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            res.reset(_db->query_one<Message>(query::message_id == message_id));
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == message_id));
+            auto it = r.begin();
+            if (it != r.end()) res.reset(new Message(*it));
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("按 message_id 查询失败 {}: {}", message_id, e.what());
@@ -303,15 +312,18 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            std::shared_ptr<Message> m(_db->query_one<Message>(query::message_id == message_id));
-            if(!m) {
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == message_id));
+            auto it = r.begin();
+            if(it == r.end()) {
                 trans.commit();
                 return false;
             }
-            m->status(MessageStatus::REVOKED);
-            m->revoke_time(boost::posix_time::microsec_clock::universal_time());
-            m->revoke_by(operator_id);
-            _db->update(*m);
+            Message m(*it);
+            m.status(MessageStatus::REVOKED);
+            m.revoke_time(boost::posix_time::microsec_clock::universal_time());
+            m.revoke_by(operator_id);
+            _db->update(m);
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("撤回消息失败 {}: {}", message_id, e.what());
@@ -325,13 +337,16 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            std::shared_ptr<Message> m(_db->query_one<Message>(query::message_id == message_id));
-            if(!m) {
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == message_id));
+            auto it = r.begin();
+            if(it == r.end()) {
                 trans.commit();
                 return false;
             }
-            m->status(MessageStatus::DELETED);
-            _db->update(*m);
+            Message m(*it);
+            m.status(MessageStatus::DELETED);
+            _db->update(m);
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("软删除消息失败 {}: {}", message_id, e.what());
