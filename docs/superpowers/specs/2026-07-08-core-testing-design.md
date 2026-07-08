@@ -46,6 +46,8 @@
 
 ### 1.2 目录结构（最终形态）
 
+> 注：本结构展示完整目标形态。Phase 1 只填充 `transmite/test/unit/`、`message/test/unit/`、`message/test/integration/`、`file/test/integration/`（补齐）、`tests/e2e/`、`tests/mocks/`、`tests/fixtures/`。`gateway/test/`、`friend/test/`、`chatsession/test/`、`push/test/`、`transmite/test/integration/` 等目录在后续 Phase 创建。
+
 ```
 ChatNow/
 ├── common/test/                          # 已有，保持（工具类单元测试）
@@ -73,7 +75,8 @@ ChatNow/
 │   │   └── CMakeLists.txt
 │   ├── mocks/                            # 共享 gmock 类（跨服务复用）
 │   │   ├── mock_publisher.hpp
-│   │   ├── mock_channel_manager.hpp
+│   │   ├── mock_user_client.hpp
+│   │   ├── mock_chatsession_client.hpp
 │   │   ├── mock_snowflake.hpp
 │   │   └── ...
 │   └── fixtures/                         # 共享 fixture
@@ -747,7 +750,13 @@ jobs:
         with:
           path: build
           key: build-unit-${{ runner.os }}-${{ hashFiles('**/CMakeLists.txt', '**/*.hpp') }}
-      - run: sudo apt-get update && sudo apt-get install -y libgtest-dev libgmock-dev libbrpc-dev libprotobuf-dev protobuf-compiler libodb-dev libodb-mysql-dev libssl-dev libcurl4-openssl-dev libjsoncpp-dev libboost-all-dev
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtest-dev libgmock-dev libbrpc-dev libprotobuf-dev protobuf-compiler \
+            libodb-dev libodb-mysql-dev libssl-dev libcurl4-openssl-dev \
+            libjsoncpp-dev libboost-all-dev
       - run: mkdir -p build && cd build && cmake .. && make -j$(nproc) transmite_unit_tests message_unit_tests common_tests
       - run: cd build && ctest -L unit --output-on-failure
 
@@ -756,7 +765,13 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y <同上依赖>
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtest-dev libgmock-dev libbrpc-dev libprotobuf-dev protobuf-compiler \
+            libodb-dev libodb-mysql-dev libssl-dev libcurl4-openssl-dev \
+            libjsoncpp-dev libboost-all-dev
       - run: docker compose -f docker/docker-compose.test.yml up -d
       - run: ./scripts/wait_for_infra.sh
       - run: mkdir -p build && cd build && cmake .. && make -j$(nproc)
@@ -771,7 +786,13 @@ jobs:
     if: github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.base_ref == 'main')
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get install -y <同上依赖>
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtest-dev libgmock-dev libbrpc-dev libprotobuf-dev protobuf-compiler \
+            libodb-dev libodb-mysql-dev libssl-dev libcurl4-openssl-dev \
+            libjsoncpp-dev libboost-all-dev
       - run: docker compose up -d --build
       - run: ./scripts/wait_for_services.sh
       - run: mkdir -p build && cd build && cmake .. && make -j$(nproc) e2e_tests
@@ -864,18 +885,17 @@ CI 和本地命令完全一致，仅环境变量由 workflow 注入。
 |---|---|---|---|
 | 1.1 | transmite 单元测试 | unit | 4 |
 | 1.2 | message 单元测试 | unit | 6 |
-| 1.3 | message DAO 集成测试 | integration | 5 |
-| 1.4 | message MQ consumer 集成测试 | integration | 1（含在 1.3 文件清单） |
-| 1.5 | file/media DAO 集成测试补齐 | integration | 3 |
-| 1.6 | E2E：群消息全链路 | e2e | 1 |
-| 1.7 | E2E：离线消息同步 | e2e | 1 |
-| 1.8 | E2E：媒体三步上传 | e2e | 1 |
+| 1.3 | message DAO 集成测试（含 MQ consumer） | integration | 5 |
+| 1.4 | file/media DAO 集成测试补齐 | integration | 3 |
+| 1.5 | E2E：群消息全链路 | e2e | 1 |
+| 1.6 | E2E：离线消息同步 | e2e | 1 |
+| 1.7 | E2E：媒体三步上传 | e2e | 1 |
 
 **验收**：
 - unit 套件覆盖 transmite/message 所有 RPC handler 的正常路径 + 输入校验 + 依赖失败
 - integration 套件覆盖 message 4 个表 + ES + MQ consumer
 - E2E 套件 3 个场景在 nightly CI 绿
-- 估计测试文件 22 个
+- 估计测试文件 21 个（transmite unit 4 + message unit 6 + message integration 5 + media integration 3 + E2E 3）
 
 ### 7.3 Phase 2+：其他服务（后续 spec，本次不细化）
 
