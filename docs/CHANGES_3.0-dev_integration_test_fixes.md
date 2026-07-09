@@ -24,8 +24,8 @@
 
 | 修改 | 说明 |
 |------|------|
-| `kSeqSession` / `kSeqUser` 加 `{seq}` hash tag | 确保 pipeline 中所有 seq key 路由到同一 slot |
-| `pipeline(hash_tag)` | 新增 hash_tag 参数，传递给底层 RedisCluster::pipeline |
+| `kSeqSession` / `kSeqUser` 改为实体 hash tag | 避免所有 seq key 压到 `{seq}` 单 slot，按会话/用户分散到 Redis Cluster |
+| `pipeline(hash_tag)` | 保留底层能力；seq 批量申请已改为逐 key INCR，避免跨 slot pipeline 假设 |
 | `scan()` 改为 for_each | 集群模式下遍历所有节点而非单节点 |
 | `eval()` 模板签名调整 | 匹配集群 API，Ret 改为 void |
 | `RedisClusterFactory` 连接检查 | `cluster->ping()` → `cluster->for_each([](Redis &r) { r.ping(); })` |
@@ -79,7 +79,19 @@
 
 ## 关键设计决策
 
-1. **Redis Cluster hash tag `{seq}`**: 选择短标签减少内存开销，所有 seq 操作路由到同一 slot 支持 pipeline 批量操作
+1. **Redis Cluster seq hash tag**: seq key 使用 `{conversation_id}` / `{user_id}` 实体标签分散到不同 slot；批量 user seq 逐 key `INCR` 保证跨 slot 正确性，避免 `{seq}` 单 slot 热点
 2. **Conversation 服务 caller 自动加入**: 参考主流 IM (微信/Signal) 设计，创建会话时 auth user 由服务端自动添加，调用方只需传其他参与者
 3. **防御式去重**: 即使调用方误传 caller uid 作为 member_id，conversation 服务也自动跳过，避免数据库唯一约束冲突
 4. **不简化服务端代码**: 遵循用户指示，测试适配服务端行为而非反向
+
+## 3.0-dev 缓存增强补充
+
+- 成员缓存 Redis key 统一使用实体 hash tag：`members` / `sentinel` / `members_ver` / `warm lock` 均落到 `{conversation_id}`，避免 Redis Cluster 下跨 slot Lua/CAS 与锁语义漂移。
+- 新项目未上线，不保留旧 key 兼容；在线路由、presence device/sub、ES outbox、Transmite L1 和 Push route L1 key 均集中到 `redis_keys.hpp` helper，并统一使用实体 hash tag 格式。
+- 成员缓存读路径使用 versioned snapshot + sentinel 负缓存：读 Redis SET 前后版本一致才可信；空集合只有在 sentinel 存在时才表示“确认空”，否则回源并通过 CAS warm。
+- 成员缓存 version 只接受严格无符号十进制字符串；解析失败时进入 unknown 状态，不再退化为 `0`。unknown version 会让 snapshot 不稳定，并拒绝 CAS warm / sentinel 写入，避免损坏版本 key 时旧快照覆盖缓存。
+- 成员缓存 warm / sentinel / touch TTL 写入统一拒绝非正 TTL，避免 `randomized_ttl()` 把禁用/异常 TTL 偷偷抬成 1 秒并写入 Redis。
+- Conversation 与 Transmite 共用 `cache_sentinel_confirms_empty()` 规则，避免一个服务命中负缓存、另一个服务绕过负缓存打 DB。
+- Transmite 的本地成员 L1 缓存携带 Redis version，命中时会重新校验当前 version；只有两个 version 都已知且相等才允许命中，unknown / 不一致时主动失效并计入 stale L1 指标。
+- `LocalCache(0)` 明确定义为禁用缓存，便于灰度、压测和故障绕过；正 TTL 的 `set` / `set_if_absent` 均不会写入。
+- `LocalCache::set()` 覆盖同 key 时会先识别旧 entry 是否已过期，过期则按新 entry 重建并计入 expired 统计和指标回调。

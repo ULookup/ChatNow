@@ -21,6 +21,13 @@ public:
         _token = generate_token_();
     }
 
+    ~RedisMutex() { unlock(); }
+
+    RedisMutex(const RedisMutex &) = delete;
+    RedisMutex &operator=(const RedisMutex &) = delete;
+    RedisMutex(RedisMutex &&) = delete;
+    RedisMutex &operator=(RedisMutex &&) = delete;
+
     bool try_lock(std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline) {

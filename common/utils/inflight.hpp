@@ -50,9 +50,10 @@ public:
             auto it = _inflight.find(key);
             if (it == _inflight.end()) {
                 mu = std::make_shared<std::mutex>();
-                _inflight[key] = mu;
+                _inflight.emplace(key, Entry{mu, 1});
             } else {
-                mu = it->second;
+                mu = it->second.mu;
+                ++it->second.refs;
             }
         }
         return {mu, key, this};
@@ -60,12 +61,28 @@ public:
 
     void release(const std::string &key) {
         std::lock_guard lk(_mu);
-        _inflight.erase(key);
+        auto it = _inflight.find(key);
+        if (it == _inflight.end()) return;
+        if (it->second.refs > 1) {
+            --it->second.refs;
+            return;
+        }
+        _inflight.erase(it);
+    }
+
+    size_t size() const {
+        std::lock_guard lk(_mu);
+        return _inflight.size();
     }
 
 private:
-    std::mutex _mu;
-    std::unordered_map<std::string, std::shared_ptr<std::mutex>> _inflight;
+    struct Entry {
+        std::shared_ptr<std::mutex> mu;
+        size_t refs = 0;
+    };
+
+    mutable std::mutex _mu;
+    std::unordered_map<std::string, Entry> _inflight;
 };
 
 } // namespace chatnow
