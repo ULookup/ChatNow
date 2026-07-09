@@ -700,7 +700,7 @@ public:
             auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
             _redis_client = std::make_shared<RedisClient>(redis);
         }
-        _es_outbox = std::make_shared<ESOutbox>(_redis_client, "im:es:outbox:identity");
+        _es_outbox = std::make_shared<ESOutbox>(_redis_client, key::es_outbox_key("identity"));
     }
     /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
     void make_jwt_object(const std::string &auth_config_path) {

@@ -30,3 +30,19 @@ groups:
         labels: { severity: warning }
         annotations:
           summary: "Local cache miss rate spiked 3x vs 30min ago"
+
+      - alert: LocalCacheEvictionSpike
+        expr: rate(local_cache_eviction_total[5m]) > 100
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Local cache evictions are high"
+          description: "local_cache_eviction_total is growing faster than expected; cache capacity may be too small or key cardinality too high"
+
+      - alert: MembersCacheVersionConflictSpike
+        expr: rate(members_cache_version_conflict_total[5m]) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Members cache version conflicts are high"
+          description: "CAS warm conflicts indicate concurrent membership churn or stale rebuild pressure"

@@ -3,6 +3,7 @@
 #include "connection.hpp"
 #include "infra/etcd.hpp"
 #include "infra/leader_election.hpp"
+#include "infra/metrics.hpp"
 #include "infra/logger.hpp"
 #include "mq/channel.hpp"
 #include "mq/rabbitmq.hpp"
@@ -20,6 +21,7 @@
 #include "utils/local_cache.hpp"
 #include "utils/inflight.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/redis_keys.hpp"
 #include "utils/trace_id.hpp"
 #include "utils/reliability_state.hpp"
 #include "common/types.pb.h"
@@ -396,9 +398,11 @@ public:
         long long cursor = 0;
         do {
             std::vector<std::string> keys;
-            cursor = _redis->scan(cursor, "im:online:*", 100, std::back_inserter(keys));
+            cursor = _redis->scan(cursor, key::online_scan_pattern(), 100, std::back_inserter(keys));
             for (const auto &key : keys) {
-                std::string uid = key.substr(std::string("im:online:").size());
+                auto uid_opt = key::uid_from_online_key(key);
+                if (!uid_opt.has_value()) continue;
+                std::string uid = *uid_opt;
                 std::unordered_map<std::string, std::string> device_map;
                 _redis->hgetall(key, std::inserter(device_map, device_map.end()));
                 for (const auto &[did, instance] : device_map) {
@@ -406,7 +410,7 @@ public:
                         _online_route->unbind(uid, did, _instance_id);
                     }
                 }
-                if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
+                if (_local_route_cache) _local_route_cache->invalidate(key::local_route_cache_key(uid));
             }
         } while (cursor != 0);
         LOG_INFO("Push shutdown: OnlineRoute + L1 cache cleaned");
@@ -498,7 +502,7 @@ private:
 
     void _write_presence_online_(const std::string &uid, const std::string &did) {
         try {
-            std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
+            std::string k = key::presence_device_key(uid, did);
             auto pipe = _redis->pipeline();
             pipe.hset(k, "state", "ONLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
@@ -513,7 +517,7 @@ private:
 
     void _write_presence_offline_(const std::string &uid, const std::string &did) {
         try {
-            std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
+            std::string k = key::presence_device_key(uid, did);
             auto pipe = _redis->pipeline();
             pipe.hset(k, "state", "OFFLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
@@ -528,7 +532,7 @@ private:
 
     void _refresh_presence_ttl_(const std::string &uid, const std::string &did) {
         try {
-            std::string k = std::string("im:presence:device:{") + uid + "}:" + did;
+            std::string k = key::presence_device_key(uid, did);
             _redis->expire(k, std::chrono::seconds(kPresenceTtlSec));
         } catch (std::exception &e) {
             LOG_WARN("Presence TTL refresh failed uid={} did={}: {}", uid, did, e.what());
@@ -539,7 +543,7 @@ private:
         if (!_redis) return;
         try {
             std::vector<std::string> subs;
-            _redis->smembers("im:presence:sub:" + uid, std::inserter(subs, subs.end()));
+            _redis->smembers(key::presence_sub_key(uid), std::inserter(subs, subs.end()));
             if (subs.empty()) return;
 
             ::chatnow::push::NotifyMessage notify;
@@ -595,7 +599,7 @@ private:
 
     RouteEntry resolve_route(const std::string &uid) {
         if (!_online_route) return RouteEntry{};
-        std::string cache_key = "route:" + uid;
+        std::string cache_key = key::local_route_cache_key(uid);
 
         //  L1 hit → fast path (~ns)
         if (_local_route_cache) {
@@ -810,9 +814,11 @@ public:
             long long cursor = 0;
             do {
                 std::vector<std::string> keys;
-                cursor = _redis->scan(cursor, "im:online:*", 100, std::back_inserter(keys));
+                cursor = _redis->scan(cursor, key::online_scan_pattern(), 100, std::back_inserter(keys));
                 for (const auto &key : keys) {
-                    std::string uid = key.substr(std::string("im:online:").size());
+                    auto uid_opt = key::uid_from_online_key(key);
+                    if (!uid_opt.has_value()) continue;
+                    std::string uid = *uid_opt;
                     std::unordered_map<std::string, std::string> device_map;
                     _redis->hgetall(key, std::inserter(device_map, device_map.end()));
                     for (const auto &[did, instance] : device_map) {
@@ -826,7 +832,7 @@ public:
 
             for (const auto &[uid, did] : stale_entries) {
                 _online_route->unbind(uid, did, "");
-                if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
+                if (_local_route_cache) _local_route_cache->invalidate(key::local_route_cache_key(uid));
             }
             if (!stale_entries.empty())
                 LOG_INFO("StaleRoute reaper: 移除 {} 条僵死路由", stale_entries.size());
@@ -1063,7 +1069,7 @@ public:
             if (_connections && _connections->client(conn, uid, did, jti)) {
                 _connections->remove(conn);
                 if (_online_route) _online_route->unbind(uid, did, _instance_id);
-                if (_local_route_cache) _local_route_cache->invalidate("route:" + uid);
+                if (_local_route_cache) _local_route_cache->invalidate(key::local_route_cache_key(uid));
                 if (_push_service) {
                     _push_service->write_presence_offline(uid, did);
                     _push_service->notify_presence_change(uid, "OFFLINE");
@@ -1122,7 +1128,8 @@ public:
     }
 
     void make_local_cache() {
-        _local_route_cache = std::make_shared<LocalCache<RouteEntry>>(16384);
+        _local_route_cache = std::make_shared<LocalCache<RouteEntry>>(
+            16384, metrics::local_cache_metrics_sink<RouteEntry>());
         _inflight_registry = std::make_shared<InflightRegistry>();
     }
 
