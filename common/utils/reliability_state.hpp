@@ -2,6 +2,7 @@
 
 #include <string>
 #include <algorithm>
+#include <cstdint>
 
 namespace chatnow {
 
@@ -72,6 +73,36 @@ inline std::string idempotency_key_for(const std::string &uid,
 
 inline bool should_remove_cross_outbox(bool rpc_started, bool rpc_succeeded) {
     return rpc_started && rpc_succeeded;
+}
+
+struct TokenBucketDecision {
+    bool allowed{false};
+    int tokens{0};
+    int64_t reset_at_ms{0};
+};
+
+inline TokenBucketDecision compute_token_bucket(int current_tokens,
+                                                int64_t last_refill_ms,
+                                                int64_t now_ms,
+                                                int window_sec,
+                                                int capacity) {
+    if (capacity <= 0 || window_sec <= 0) return {true, capacity, now_ms};
+    if (last_refill_ms <= 0 || now_ms < last_refill_ms) {
+        current_tokens = capacity;
+        last_refill_ms = now_ms;
+    }
+
+    int64_t interval_ms = static_cast<int64_t>(window_sec) * 1000 / capacity;
+    if (interval_ms <= 0) interval_ms = 1;
+    int64_t elapsed_ms = now_ms - last_refill_ms;
+    int refill = static_cast<int>(elapsed_ms / interval_ms);
+    if (refill > 0) {
+        current_tokens = std::min(capacity, current_tokens + refill);
+        last_refill_ms += static_cast<int64_t>(refill) * interval_ms;
+    }
+
+    if (current_tokens <= 0) return {false, 0, last_refill_ms};
+    return {true, current_tokens - 1, last_refill_ms};
 }
 
 } // namespace chatnow

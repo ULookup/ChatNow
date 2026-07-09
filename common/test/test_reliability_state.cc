@@ -10,6 +10,7 @@ int main() {
     using chatnow::serialize_idempotency_state;
     using chatnow::should_remove_cross_outbox;
     using chatnow::idempotency_key_for;
+    using chatnow::compute_token_bucket;
 
     auto pending = parse_idempotency_state("pending");
     assert(pending.status == IdempotencyStatus::Pending);
@@ -38,6 +39,21 @@ int main() {
     assert(!should_remove_cross_outbox(false, true));
     assert(!should_remove_cross_outbox(true, false));
     assert(should_remove_cross_outbox(true, true));
+
+    auto empty = compute_token_bucket(0, 0, 1000, 60, 10);
+    assert(empty.allowed);
+    assert(empty.tokens == 9);
+    assert(empty.reset_at_ms == 1000);
+
+    auto refilled = compute_token_bucket(5, 1000, 61 * 1000, 60, 10);
+    assert(refilled.allowed);
+    assert(refilled.tokens == 9);
+    assert(refilled.reset_at_ms == 61 * 1000);
+
+    auto denied = compute_token_bucket(0, 1000, 2 * 1000, 60, 10);
+    assert(!denied.allowed);
+    assert(denied.tokens == 0);
+    assert(denied.reset_at_ms == 1000);
 
     std::cout << "reliability state tests passed\n";
     return 0;

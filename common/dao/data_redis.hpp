@@ -743,7 +743,7 @@ private:
 };
 
 // =============================================================================
-// 令牌桶限流（基于 INCR + EXPIRE 简易实现；要求 Redis 7+ 推荐用 redis-cell）
+// 令牌桶限流（Lua 原子补 token + 扣 token，避免固定窗口边界放大）
 // =============================================================================
 
 class RateLimiter
@@ -753,17 +753,23 @@ public:
     RateLimiter(const RedisClient::ptr &c) : _c(c) {}
 
     /**
-     * brief: 滑动窗口 incr-and-check（Lua 原子 INCR+EXPIRE）
-     *   - window_sec 内最多允许 max_count 次操作
+     * brief: token bucket（Lua 原子读写）
+     *   - window_sec 内最多补充 max_count 个 token，桶容量 max_count
      *   - 命中限制返回 false（业务可返回 429 / RATE_LIMITED）
      */
     bool allow(const std::string &key_full, int max_count, int window_sec) {
         try {
             std::vector<std::string> keys = {key_full};
-            std::vector<std::string> args = {std::to_string(window_sec)};
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::vector<std::string> args = {
+                std::to_string(max_count),
+                std::to_string(window_sec),
+                std::to_string(now_ms)
+            };
             long long cur = _c->eval<long long>(kRateLimitScript, keys.begin(), keys.end(),
                                                 args.begin(), args.end());
-            return cur <= max_count;
+            return cur == 1;
         } catch(std::exception &e) {
             LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
             return true;
@@ -781,11 +787,39 @@ private:
 };
 
 inline const std::string RateLimiter::kRateLimitScript = R"(
-    local current = redis.call('INCR', KEYS[1])
-    if current == 1 then
-        redis.call('EXPIRE', KEYS[1], ARGV[1])
+    local capacity = tonumber(ARGV[1])
+    local window_ms = tonumber(ARGV[2]) * 1000
+    local now_ms = tonumber(ARGV[3])
+    if capacity <= 0 or window_ms <= 0 then
+        return 1
     end
-    return current
+
+    local interval_ms = math.floor(window_ms / capacity)
+    if interval_ms < 1 then interval_ms = 1 end
+
+    local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens'))
+    local ts = tonumber(redis.call('HGET', KEYS[1], 'ts'))
+    if tokens == nil or ts == nil or now_ms < ts then
+        tokens = capacity
+        ts = now_ms
+    else
+        local refill = math.floor((now_ms - ts) / interval_ms)
+        if refill > 0 then
+            tokens = math.min(capacity, tokens + refill)
+            ts = ts + refill * interval_ms
+        end
+    end
+
+    if tokens <= 0 then
+        redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', ts)
+        redis.call('PEXPIRE', KEYS[1], window_ms * 2)
+        return 0
+    end
+
+    tokens = tokens - 1
+    redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', ts)
+    redis.call('PEXPIRE', KEYS[1], window_ms * 2)
+    return 1
 )";
 
 // =============================================================================
