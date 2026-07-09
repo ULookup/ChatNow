@@ -62,6 +62,7 @@ public:
     MessageServiceImpl(const std::string &identity_service_name,
                        const std::string &media_service_name,
                        const ServiceManager::ptr &mm_channels,
+                       const std::shared_ptr<odb::core::database> &odb_db,
                        const MessageTable::ptr &mysql_msg,
                        const UserTimeLineTable::ptr &mysql_user_timeline,
                        const ConversationMemberTable::ptr &mysql_member,
@@ -76,6 +77,7 @@ public:
         : _identity_service_name(identity_service_name),
           _media_service_name(media_service_name),
           _mm_channels(mm_channels),
+          _odb_db(odb_db),
           _mysql_msg(mysql_msg),
           _mysql_user_timeline(mysql_user_timeline),
           _mysql_member(mysql_member),
@@ -541,26 +543,33 @@ public:
             }
         }
 
-        // 落库：先消息后 timeline（各自事务感知；时序依赖而非强原子）
+        // 落库：message + timeline 必须在同一事务内提交。
+        // 否则 message 成功而 timeline 失败后，MQ 重投会因 message 已存在直接 ACK，
+        // 造成收件箱永久缺行。
         try {
+            std::unique_ptr<odb::transaction> trans;
+            if (_odb_db && !odb::transaction::has_current()) {
+                trans.reset(new odb::transaction(_odb_db->begin()));
+            }
             _mysql_msg->insert(msg);
+            if (!timeline_list.empty()) {
+                _mysql_user_timeline->insert(timeline_list);
+            }
+            if (trans) trans->commit();
         } catch (const odb::object_already_persistent &) {
-            LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
-            return ConsumeAction::Ack;
-        } catch (std::exception &e) {
-            LOG_ERROR("DB-Consumer: 消息落库失败 mid={}: {}", mid, e.what());
+            if (_mysql_msg->select_by_id(mid)) {
+                LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
+                return ConsumeAction::Ack;
+            }
+            LOG_ERROR("DB-Consumer: 唯一键冲突但 message 不存在 mid={} timelines={}",
+                      mid, timeline_list.size());
             if (redelivered) return ConsumeAction::NackDiscard;
             return ConsumeAction::NackRequeue;
-        }
-        if (!timeline_list.empty()) {
-            try {
-                _mysql_user_timeline->insert(timeline_list);
-            } catch (std::exception &e) {
-                LOG_ERROR("DB-Consumer: timeline 落库失败 mid={} n={}: {}", mid,
-                          timeline_list.size(), e.what());
-                if (redelivered) return ConsumeAction::NackDiscard;
-                return ConsumeAction::NackRequeue;
-            }
+        } catch (std::exception &e) {
+            LOG_ERROR("DB-Consumer: 消息/timeline 落库失败 mid={} timelines={}: {}",
+                      mid, timeline_list.size(), e.what());
+            if (redelivered) return ConsumeAction::NackDiscard;
+            return ConsumeAction::NackRequeue;
         }
 
         LOG_INFO("DB-Consumer: 存储成功 mid={} cid={} seq={}", mid,
@@ -861,6 +870,7 @@ private:
     std::string _identity_service_name;
     std::string _media_service_name;
     ServiceManager::ptr _mm_channels;
+    std::shared_ptr<odb::core::database> _odb_db;
 
     MessageTable::ptr _mysql_msg;
     UserTimeLineTable::ptr _mysql_user_timeline;
@@ -1133,7 +1143,7 @@ public:
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
         _rpc_server = std::make_shared<brpc::Server>();
         MessageServiceImpl *impl = new MessageServiceImpl(
-            _identity_service_name, _media_service_name, _mm_channels,
+            _identity_service_name, _media_service_name, _mm_channels, _odb_db,
             _mysql_msg, _mysql_user_timeline, _mysql_member,
             _mysql_reaction, _mysql_pin, _es_msg, _seq_gen,
             _push_publisher, _push_outbox, _es_publisher, _es_outbox);

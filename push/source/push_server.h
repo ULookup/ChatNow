@@ -21,6 +21,7 @@
 #include "utils/inflight.hpp"
 #include "utils/random_ttl.hpp"
 #include "utils/trace_id.hpp"
+#include "utils/reliability_state.hpp"
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
@@ -34,6 +35,7 @@
 #include "picojson/picojson.h"
 #include <openssl/evp.h>
 #include <algorithm>
+#include <atomic>
 #include <thread>
 #include <chrono>
 #include <limits>
@@ -707,28 +709,57 @@ public:
                         notify_template.mutable_new_message_info()
                             ->mutable_message_info()->CopyFrom(internal_msg.message());
 
+                        if (peer_to_uids.empty()) {
+                            _cross_outbox->remove(member);
+                            continue;
+                        }
+
+                        struct CrossDispatch {
+                            std::shared_ptr<brpc::Channel> channel;
+                            std::vector<std::string> uids;
+                        };
+                        std::vector<CrossDispatch> dispatches;
+                        dispatches.reserve(peer_to_uids.size());
                         for (auto &kv : peer_to_uids) {
                             auto channel = _mm_channels->choose(kv.first);
-                            if (!channel) { continue; }
-                            PushService_Stub stub(channel.get());
+                            if (!channel) continue;
+                            dispatches.push_back({channel, kv.second});
+                        }
+
+                        if (dispatches.empty()) {
+                            continue;
+                        }
+
+                        auto pending = std::make_shared<const int>(
+                            static_cast<int>(dispatches.size()));
+                        auto succeeded = std::make_shared<std::atomic<int>>(0);
+                        for (auto &dispatch : dispatches) {
+                            PushService_Stub stub(dispatch.channel.get());
                             auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
                             closure->req.set_request_id(
                                 internal_msg.message().client_msg_id());
-                            for (const auto &u : kv.second) closure->req.add_user_id_list(u);
+                            for (const auto &u : dispatch.uids) closure->req.add_user_id_list(u);
                             closure->req.mutable_notify()->CopyFrom(notify_template);
                             for (const auto &up : internal_msg.user_seqs()) {
-                                if (std::find(kv.second.begin(), kv.second.end(),
-                                              up.user_id()) != kv.second.end()) {
+                                if (std::find(dispatch.uids.begin(), dispatch.uids.end(),
+                                              up.user_id()) != dispatch.uids.end()) {
                                     auto *seq = closure->req.add_user_seqs();
                                     seq->set_user_id(up.user_id());
                                     seq->set_user_seq(up.user_seq());
                                 }
                             }
+                            closure->on_done = [outbox = _cross_outbox, member, pending, succeeded]
+                                (brpc::Controller *c, const PushBatchRsp &) {
+                                if (!c->Failed()) succeeded->fetch_add(1);
+                                int done = succeeded->load();
+                                int total = *pending;
+                                if (should_remove_cross_outbox(total > 0, done == total) && outbox) {
+                                    outbox->remove(member);
+                                }
+                            };
                             stub.PushBatch(&closure->cntl, &closure->req,
                                            &closure->rsp, closure);
                         }
-                        // 在所有 PushBatch RPC 发起之后才移除，避免崩溃导致数据丢失
-                        _cross_outbox->remove(member);
                     }
                 } catch (std::exception &e) {
                     LOG_ERROR("CrossInstanceOutbox reaper 异常: {}", e.what());
