@@ -26,8 +26,14 @@ inline IdempotencyState parse_idempotency_state(const std::string &value) {
     auto parse_with_prefix = [&](const std::string &prefix,
                                  IdempotencyStatus status) -> IdempotencyState {
         if (value.rfind(prefix, 0) != 0) return {IdempotencyStatus::Empty, 0};
+        auto raw_id = value.substr(prefix.size());
+        if (raw_id.empty() ||
+            !std::all_of(raw_id.begin(), raw_id.end(),
+                         [](char c) { return c >= '0' && c <= '9'; })) {
+            return {IdempotencyStatus::Corrupt, 0};
+        }
         try {
-            auto id = std::stoull(value.substr(prefix.size()));
+            auto id = std::stoull(raw_id);
             if (id == 0) return {IdempotencyStatus::Corrupt, 0};
             return {status, id};
         } catch (...) {

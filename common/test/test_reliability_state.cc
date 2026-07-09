@@ -31,6 +31,9 @@ int main() {
 
     auto corrupt = parse_idempotency_state("not-a-state");
     assert(corrupt.status == IdempotencyStatus::Corrupt);
+    assert(parse_idempotency_state("accepted:42x").status == IdempotencyStatus::Corrupt);
+    assert(parse_idempotency_state("persisted:-1").status == IdempotencyStatus::Corrupt);
+    assert(parse_idempotency_state("accepted:0").status == IdempotencyStatus::Corrupt);
 
     assert(serialize_idempotency_state({IdempotencyStatus::Pending, 0}) == "pending");
     assert(serialize_idempotency_state({IdempotencyStatus::Accepted, 42}) == "accepted:42");
