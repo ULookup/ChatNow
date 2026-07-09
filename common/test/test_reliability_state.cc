@@ -9,6 +9,7 @@ int main() {
     using chatnow::parse_idempotency_state;
     using chatnow::serialize_idempotency_state;
     using chatnow::should_remove_cross_outbox;
+    using chatnow::idempotency_key_for;
 
     auto pending = parse_idempotency_state("pending");
     assert(pending.status == IdempotencyStatus::Pending);
@@ -32,6 +33,7 @@ int main() {
     assert(serialize_idempotency_state({IdempotencyStatus::Pending, 0}) == "pending");
     assert(serialize_idempotency_state({IdempotencyStatus::Accepted, 42}) == "accepted:42");
     assert(serialize_idempotency_state({IdempotencyStatus::Persisted, 99}) == "persisted:99");
+    assert(idempotency_key_for("u1", "c1") == "im:msg:idem:u1:c1");
 
     assert(!should_remove_cross_outbox(false, true));
     assert(!should_remove_cross_outbox(true, false));

@@ -65,6 +65,11 @@ inline std::string serialize_idempotency_state(const IdempotencyState &state) {
     }
 }
 
+inline std::string idempotency_key_for(const std::string &uid,
+                                       const std::string &client_msg_id) {
+    return "im:msg:idem:" + uid + ":" + client_msg_id;
+}
+
 inline bool should_remove_cross_outbox(bool rpc_started, bool rpc_succeeded) {
     return rpc_started && rpc_succeeded;
 }

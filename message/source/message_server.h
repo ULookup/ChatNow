@@ -40,6 +40,7 @@
 #include "mq/rabbitmq.hpp"
 #include "mq/trace_headers.hpp"
 #include "utils/brpc_closure.hpp"
+#include "utils/reliability_state.hpp"
 
 #include <chrono>
 #include <map>
@@ -63,6 +64,7 @@ public:
                        const std::string &media_service_name,
                        const ServiceManager::ptr &mm_channels,
                        const std::shared_ptr<odb::core::database> &odb_db,
+                       const RedisClient::ptr &redis,
                        const MessageTable::ptr &mysql_msg,
                        const UserTimeLineTable::ptr &mysql_user_timeline,
                        const ConversationMemberTable::ptr &mysql_member,
@@ -78,6 +80,7 @@ public:
           _media_service_name(media_service_name),
           _mm_channels(mm_channels),
           _odb_db(odb_db),
+          _redis(redis),
           _mysql_msg(mysql_msg),
           _mysql_user_timeline(mysql_user_timeline),
           _mysql_member(mysql_member),
@@ -556,6 +559,7 @@ public:
                 _mysql_user_timeline->insert(timeline_list);
             }
             if (trans) trans->commit();
+            mark_idempotency_persisted_(msg_pb.sender_id(), client_msg_id, msg_pb.message_id());
         } catch (const odb::object_already_persistent &) {
             if (_mysql_msg->select_by_id(mid)) {
                 LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
@@ -662,6 +666,20 @@ public:
     }
 
 private:
+    void mark_idempotency_persisted_(const std::string &sender_id,
+                                     const std::string &client_msg_id,
+                                     uint64_t message_id) {
+        if (!_redis || client_msg_id.empty() || sender_id.empty() || message_id == 0) return;
+        try {
+            _redis->set(idempotency_key_for(sender_id, client_msg_id),
+                        serialize_idempotency_state({IdempotencyStatus::Persisted, message_id}),
+                        std::chrono::seconds(86400));
+        } catch (std::exception &e) {
+            LOG_WARN("DB-Consumer: 幂等 persisted 状态写入失败 uid={} client_msg_id={}: {}",
+                     sender_id, client_msg_id, e.what());
+        }
+    }
+
     // ====== 权限校验 ======
 
     /* 要求 auth.user_id 是 cid 的成员，否则抛 kConversationNotMember */
@@ -871,6 +889,7 @@ private:
     std::string _media_service_name;
     ServiceManager::ptr _mm_channels;
     std::shared_ptr<odb::core::database> _odb_db;
+    RedisClient::ptr _redis;
 
     MessageTable::ptr _mysql_msg;
     UserTimeLineTable::ptr _mysql_user_timeline;
@@ -1143,7 +1162,7 @@ public:
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
         _rpc_server = std::make_shared<brpc::Server>();
         MessageServiceImpl *impl = new MessageServiceImpl(
-            _identity_service_name, _media_service_name, _mm_channels, _odb_db,
+            _identity_service_name, _media_service_name, _mm_channels, _odb_db, _redis_client,
             _mysql_msg, _mysql_user_timeline, _mysql_member,
             _mysql_reaction, _mysql_pin, _es_msg, _seq_gen,
             _push_publisher, _push_outbox, _es_publisher, _es_outbox);

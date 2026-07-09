@@ -150,7 +150,7 @@ public:
 
         // ③ 客户端幂等去重：Redis SET NX，命中直接返回（零 RPC）
         if (!client_msg_id.empty() && _redis) {
-            idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+            idem_key = idempotency_key_for(uid, client_msg_id);
             try {
                 auto result = _redis->set(
                     idem_key,
@@ -163,11 +163,17 @@ public:
                                         : IdempotencyState{IdempotencyStatus::Empty, 0};
                     if (state.status == IdempotencyStatus::Accepted ||
                         state.status == IdempotencyStatus::Persisted) {
+                        auto persisted_msg = select_existing_message_by_client_msg_(
+                            uid, client_msg_id, rid, static_cast<brpc::Controller*>(controller));
                         LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息",
                                  rid, client_msg_id);
                         response->mutable_header()->set_request_id(rid);
                         response->mutable_header()->set_success(true);
-                        response->mutable_message()->set_message_id(state.message_id);
+                        if (persisted_msg.has_value()) {
+                            response->mutable_message()->CopyFrom(*persisted_msg);
+                        } else {
+                            response->mutable_message()->set_message_id(state.message_id);
+                        }
                         return;
                     }
                     if (state.status == IdempotencyStatus::Corrupt) {
