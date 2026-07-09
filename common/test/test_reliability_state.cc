@@ -11,6 +11,7 @@ int main() {
     using chatnow::should_remove_cross_outbox;
     using chatnow::idempotency_key_for;
     using chatnow::compute_token_bucket;
+    using chatnow::resolve_ack_session_seq;
 
     auto pending = parse_idempotency_state("pending");
     assert(pending.status == IdempotencyStatus::Pending);
@@ -25,8 +26,7 @@ int main() {
     assert(persisted.message_id == 99);
 
     auto legacy = parse_idempotency_state("42");
-    assert(legacy.status == IdempotencyStatus::Accepted);
-    assert(legacy.message_id == 42);
+    assert(legacy.status == IdempotencyStatus::Corrupt);
 
     auto corrupt = parse_idempotency_state("not-a-state");
     assert(corrupt.status == IdempotencyStatus::Corrupt);
@@ -54,6 +54,9 @@ int main() {
     assert(!denied.allowed);
     assert(denied.tokens == 0);
     assert(denied.reset_at_ms == 1000);
+
+    assert(resolve_ack_session_seq(77) == 77);
+    assert(resolve_ack_session_seq(0) == 0);
 
     std::cout << "reliability state tests passed\n";
     return 0;

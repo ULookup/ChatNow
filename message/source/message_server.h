@@ -450,12 +450,23 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            if (req->seq_id() == 0)
+            if (req->message_id() == 0) {
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
-                                              "seq_id required");
+                                              "message_id required");
+            }
+            auto msg = _mysql_msg->select_by_id(
+                static_cast<unsigned long>(req->message_id()));
+            if (!msg || msg->session_id() != req->conversation_id()) {
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound,
+                                              "ack message not found");
+            }
+            uint64_t session_seq = resolve_ack_session_seq(msg->seq_id());
+            if (session_seq == 0)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "message seq_id required");
             require_member_(req->conversation_id(), auth.user_id);
             bool ok = _mysql_member->update_last_ack_seq(
-                req->conversation_id(), auth.user_id, req->seq_id());
+                req->conversation_id(), auth.user_id, session_seq);
             if (!ok)
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
                                               "update last_ack_seq failed");

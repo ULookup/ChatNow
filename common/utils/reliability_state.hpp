@@ -40,14 +40,6 @@ inline IdempotencyState parse_idempotency_state(const std::string &value) {
     auto persisted = parse_with_prefix("persisted:", IdempotencyStatus::Persisted);
     if (persisted.status != IdempotencyStatus::Empty) return persisted;
 
-    if (std::all_of(value.begin(), value.end(),
-                    [](char c) { return c >= '0' && c <= '9'; })) {
-        try {
-            auto id = std::stoull(value);
-            if (id > 0) return {IdempotencyStatus::Accepted, id};
-        } catch (...) {
-        }
-    }
     return {IdempotencyStatus::Corrupt, 0};
 }
 
@@ -103,6 +95,10 @@ inline TokenBucketDecision compute_token_bucket(int current_tokens,
 
     if (current_tokens <= 0) return {false, 0, last_refill_ms};
     return {true, current_tokens - 1, last_refill_ms};
+}
+
+inline uint64_t resolve_ack_session_seq(uint64_t message_session_seq) {
+    return message_session_seq;
 }
 
 } // namespace chatnow

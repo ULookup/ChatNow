@@ -365,7 +365,7 @@ public:
                 chatnow::message::UpdateReadAckRsp>();
             closure->req.set_request_id(ack.user_id());
             closure->req.set_conversation_id(ack.conversation_id());
-            closure->req.set_seq_id(ack.user_seq());
+            closure->req.set_message_id(static_cast<uint64_t>(ack.message_id()));
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
             meta.set_user_id(conn_uid);
@@ -374,10 +374,10 @@ public:
             std::string data;
             meta.SerializeToString(&data);
             closure->cntl.request_attachment().append(data);
-            closure->on_done = [uid = ack.user_id(), seq = ack.user_seq()]
+            closure->on_done = [uid = ack.user_id(), mid = ack.message_id()]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
                 if (c->Failed()) {
-                    LOG_WARN("UpdateReadAck RPC 失败 uid={} seq={}: {}", uid, seq, c->ErrorText());
+                    LOG_WARN("UpdateReadAck RPC 失败 uid={} message_id={}: {}", uid, mid, c->ErrorText());
                 }
             };
             stub.UpdateReadAck(&closure->cntl, &closure->req, &closure->rsp, closure);
