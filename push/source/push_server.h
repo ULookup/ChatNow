@@ -334,10 +334,11 @@ public:
             _handle_client_auth_(notify.client_auth(), conn);
         } else if (notify.notify_type() == NotifyType::MSG_PUSH_ACK) {
             const auto &ack = notify.msg_push_ack();
-            if (ack.user_seq() == 0 || ack.user_id().empty() ||
+            if (!is_valid_push_ack_ids(ack.user_seq(), ack.message_id()) ||
+                ack.user_id().empty() ||
                 ack.conversation_id().empty() || ack.device_id().empty()) {
-                LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={}",
-                         ack.user_id(), ack.device_id(), ack.user_seq());
+                LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={} message_id={}",
+                         ack.user_id(), ack.device_id(), ack.user_seq(), ack.message_id());
                 return;
             }
 

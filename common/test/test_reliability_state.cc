@@ -12,6 +12,7 @@ int main() {
     using chatnow::idempotency_key_for;
     using chatnow::compute_token_bucket;
     using chatnow::resolve_ack_session_seq;
+    using chatnow::is_valid_push_ack_ids;
 
     auto pending = parse_idempotency_state("pending");
     assert(pending.status == IdempotencyStatus::Pending);
@@ -57,6 +58,10 @@ int main() {
 
     assert(resolve_ack_session_seq(77) == 77);
     assert(resolve_ack_session_seq(0) == 0);
+    assert(is_valid_push_ack_ids(88, 99));
+    assert(!is_valid_push_ack_ids(0, 99));
+    assert(!is_valid_push_ack_ids(88, 0));
+    assert(!is_valid_push_ack_ids(88, -1));
 
     std::cout << "reliability state tests passed\n";
     return 0;

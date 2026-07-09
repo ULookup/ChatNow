@@ -101,4 +101,8 @@ inline uint64_t resolve_ack_session_seq(uint64_t message_session_seq) {
     return message_session_seq;
 }
 
+inline bool is_valid_push_ack_ids(uint64_t user_seq, int64_t message_id) {
+    return user_seq > 0 && message_id > 0;
+}
+
 } // namespace chatnow
