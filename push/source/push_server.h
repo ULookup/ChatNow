@@ -21,6 +21,7 @@
 #include "utils/inflight.hpp"
 #include "utils/random_ttl.hpp"
 #include "utils/trace_id.hpp"
+#include "utils/reliability_state.hpp"
 #include "common/types.pb.h"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
@@ -34,6 +35,7 @@
 #include "picojson/picojson.h"
 #include <openssl/evp.h>
 #include <algorithm>
+#include <atomic>
 #include <thread>
 #include <chrono>
 #include <limits>
@@ -332,10 +334,11 @@ public:
             _handle_client_auth_(notify.client_auth(), conn);
         } else if (notify.notify_type() == NotifyType::MSG_PUSH_ACK) {
             const auto &ack = notify.msg_push_ack();
-            if (ack.user_seq() == 0 || ack.user_id().empty() ||
+            if (!is_valid_push_ack_ids(ack.user_seq(), ack.message_id()) ||
+                ack.user_id().empty() ||
                 ack.conversation_id().empty() || ack.device_id().empty()) {
-                LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={}",
-                         ack.user_id(), ack.device_id(), ack.user_seq());
+                LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={} message_id={}",
+                         ack.user_id(), ack.device_id(), ack.user_seq(), ack.message_id());
                 return;
             }
 
@@ -363,7 +366,7 @@ public:
                 chatnow::message::UpdateReadAckRsp>();
             closure->req.set_request_id(ack.user_id());
             closure->req.set_conversation_id(ack.conversation_id());
-            closure->req.set_seq_id(ack.user_seq());
+            closure->req.set_message_id(static_cast<uint64_t>(ack.message_id()));
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
             meta.set_user_id(conn_uid);
@@ -372,10 +375,10 @@ public:
             std::string data;
             meta.SerializeToString(&data);
             closure->cntl.request_attachment().append(data);
-            closure->on_done = [uid = ack.user_id(), seq = ack.user_seq()]
+            closure->on_done = [uid = ack.user_id(), mid = ack.message_id()]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
                 if (c->Failed()) {
-                    LOG_WARN("UpdateReadAck RPC 失败 uid={} seq={}: {}", uid, seq, c->ErrorText());
+                    LOG_WARN("UpdateReadAck RPC 失败 uid={} message_id={}: {}", uid, mid, c->ErrorText());
                 }
             };
             stub.UpdateReadAck(&closure->cntl, &closure->req, &closure->rsp, closure);
@@ -707,28 +710,57 @@ public:
                         notify_template.mutable_new_message_info()
                             ->mutable_message_info()->CopyFrom(internal_msg.message());
 
+                        if (peer_to_uids.empty()) {
+                            _cross_outbox->remove(member);
+                            continue;
+                        }
+
+                        struct CrossDispatch {
+                            std::shared_ptr<brpc::Channel> channel;
+                            std::vector<std::string> uids;
+                        };
+                        std::vector<CrossDispatch> dispatches;
+                        dispatches.reserve(peer_to_uids.size());
                         for (auto &kv : peer_to_uids) {
                             auto channel = _mm_channels->choose(kv.first);
-                            if (!channel) { continue; }
-                            PushService_Stub stub(channel.get());
+                            if (!channel) continue;
+                            dispatches.push_back({channel, kv.second});
+                        }
+
+                        if (dispatches.empty()) {
+                            continue;
+                        }
+
+                        auto pending = std::make_shared<const int>(
+                            static_cast<int>(dispatches.size()));
+                        auto succeeded = std::make_shared<std::atomic<int>>(0);
+                        for (auto &dispatch : dispatches) {
+                            PushService_Stub stub(dispatch.channel.get());
                             auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
                             closure->req.set_request_id(
                                 internal_msg.message().client_msg_id());
-                            for (const auto &u : kv.second) closure->req.add_user_id_list(u);
+                            for (const auto &u : dispatch.uids) closure->req.add_user_id_list(u);
                             closure->req.mutable_notify()->CopyFrom(notify_template);
                             for (const auto &up : internal_msg.user_seqs()) {
-                                if (std::find(kv.second.begin(), kv.second.end(),
-                                              up.user_id()) != kv.second.end()) {
+                                if (std::find(dispatch.uids.begin(), dispatch.uids.end(),
+                                              up.user_id()) != dispatch.uids.end()) {
                                     auto *seq = closure->req.add_user_seqs();
                                     seq->set_user_id(up.user_id());
                                     seq->set_user_seq(up.user_seq());
                                 }
                             }
+                            closure->on_done = [outbox = _cross_outbox, member, pending, succeeded]
+                                (brpc::Controller *c, const PushBatchRsp &) {
+                                if (!c->Failed()) succeeded->fetch_add(1);
+                                int done = succeeded->load();
+                                int total = *pending;
+                                if (should_remove_cross_outbox(total > 0, done == total) && outbox) {
+                                    outbox->remove(member);
+                                }
+                            };
                             stub.PushBatch(&closure->cntl, &closure->req,
                                            &closure->rsp, closure);
                         }
-                        // 在所有 PushBatch RPC 发起之后才移除，避免崩溃导致数据丢失
-                        _cross_outbox->remove(member);
                     }
                 } catch (std::exception &e) {
                     LOG_ERROR("CrossInstanceOutbox reaper 异常: {}", e.what());

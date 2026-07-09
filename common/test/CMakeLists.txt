@@ -25,6 +25,11 @@ include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/..)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../third/include)
 
+add_executable(test_reliability_state test_reliability_state.cc)
+set_property(TARGET test_reliability_state PROPERTY CXX_STANDARD 17)
+set_property(TARGET test_reliability_state PROPERTY CXX_STANDARD_REQUIRED ON)
+INSTALL(TARGETS test_reliability_state RUNTIME DESTINATION bin)
+
 # FIXME(3.0): common_tests has gflags link order issue with brpc static lib
 # set(common_test_target common_tests)
 # file(GLOB test_srcs ${CMAKE_CURRENT_SOURCE_DIR}/test_*.cc)

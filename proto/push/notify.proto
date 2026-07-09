@@ -33,6 +33,8 @@ message NotifyClientAuth {
     optional uint64 last_user_seq = 3;
 }
 
+// Client ACKs a delivered push item. user_seq identifies the per-device
+// unacked entry; message_id is the only source used to advance conversation ACK.
 message NotifyMsgPushAck {
     string user_id = 1;
     string device_id = 2;

@@ -40,6 +40,7 @@
 #include "mq/rabbitmq.hpp"
 #include "mq/trace_headers.hpp"
 #include "utils/brpc_closure.hpp"
+#include "utils/reliability_state.hpp"
 
 #include <chrono>
 #include <map>
@@ -62,6 +63,8 @@ public:
     MessageServiceImpl(const std::string &identity_service_name,
                        const std::string &media_service_name,
                        const ServiceManager::ptr &mm_channels,
+                       const std::shared_ptr<odb::core::database> &odb_db,
+                       const RedisClient::ptr &redis,
                        const MessageTable::ptr &mysql_msg,
                        const UserTimeLineTable::ptr &mysql_user_timeline,
                        const ConversationMemberTable::ptr &mysql_member,
@@ -76,6 +79,8 @@ public:
         : _identity_service_name(identity_service_name),
           _media_service_name(media_service_name),
           _mm_channels(mm_channels),
+          _odb_db(odb_db),
+          _redis(redis),
           _mysql_msg(mysql_msg),
           _mysql_user_timeline(mysql_user_timeline),
           _mysql_member(mysql_member),
@@ -445,12 +450,23 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            if (req->seq_id() == 0)
+            if (req->message_id() == 0) {
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
-                                              "seq_id required");
+                                              "message_id required");
+            }
+            auto msg = _mysql_msg->select_by_id(
+                static_cast<unsigned long>(req->message_id()));
+            if (!msg || msg->session_id() != req->conversation_id()) {
+                throw ::chatnow::ServiceError(::chatnow::error::kMessageNotFound,
+                                              "ack message not found");
+            }
+            uint64_t session_seq = resolve_ack_session_seq(msg->seq_id());
+            if (session_seq == 0)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
+                                              "message seq_id required");
             require_member_(req->conversation_id(), auth.user_id);
             bool ok = _mysql_member->update_last_ack_seq(
-                req->conversation_id(), auth.user_id, req->seq_id());
+                req->conversation_id(), auth.user_id, session_seq);
             if (!ok)
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
                                               "update last_ack_seq failed");
@@ -541,26 +557,34 @@ public:
             }
         }
 
-        // 落库：先消息后 timeline（各自事务感知；时序依赖而非强原子）
+        // 落库：message + timeline 必须在同一事务内提交。
+        // 否则 message 成功而 timeline 失败后，MQ 重投会因 message 已存在直接 ACK，
+        // 造成收件箱永久缺行。
         try {
+            std::unique_ptr<odb::transaction> trans;
+            if (_odb_db && !odb::transaction::has_current()) {
+                trans.reset(new odb::transaction(_odb_db->begin()));
+            }
             _mysql_msg->insert(msg);
+            if (!timeline_list.empty()) {
+                _mysql_user_timeline->insert(timeline_list);
+            }
+            if (trans) trans->commit();
+            mark_idempotency_persisted_(msg_pb.sender_id(), client_msg_id, msg_pb.message_id());
         } catch (const odb::object_already_persistent &) {
-            LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
-            return ConsumeAction::Ack;
-        } catch (std::exception &e) {
-            LOG_ERROR("DB-Consumer: 消息落库失败 mid={}: {}", mid, e.what());
+            if (_mysql_msg->select_by_id(mid)) {
+                LOG_WARN("DB-Consumer: 消息已存在（幂等）mid={}", mid);
+                return ConsumeAction::Ack;
+            }
+            LOG_ERROR("DB-Consumer: 唯一键冲突但 message 不存在 mid={} timelines={}",
+                      mid, timeline_list.size());
             if (redelivered) return ConsumeAction::NackDiscard;
             return ConsumeAction::NackRequeue;
-        }
-        if (!timeline_list.empty()) {
-            try {
-                _mysql_user_timeline->insert(timeline_list);
-            } catch (std::exception &e) {
-                LOG_ERROR("DB-Consumer: timeline 落库失败 mid={} n={}: {}", mid,
-                          timeline_list.size(), e.what());
-                if (redelivered) return ConsumeAction::NackDiscard;
-                return ConsumeAction::NackRequeue;
-            }
+        } catch (std::exception &e) {
+            LOG_ERROR("DB-Consumer: 消息/timeline 落库失败 mid={} timelines={}: {}",
+                      mid, timeline_list.size(), e.what());
+            if (redelivered) return ConsumeAction::NackDiscard;
+            return ConsumeAction::NackRequeue;
         }
 
         LOG_INFO("DB-Consumer: 存储成功 mid={} cid={} seq={}", mid,
@@ -653,6 +677,20 @@ public:
     }
 
 private:
+    void mark_idempotency_persisted_(const std::string &sender_id,
+                                     const std::string &client_msg_id,
+                                     uint64_t message_id) {
+        if (!_redis || client_msg_id.empty() || sender_id.empty() || message_id == 0) return;
+        try {
+            _redis->set(idempotency_key_for(sender_id, client_msg_id),
+                        serialize_idempotency_state({IdempotencyStatus::Persisted, message_id}),
+                        std::chrono::seconds(86400));
+        } catch (std::exception &e) {
+            LOG_WARN("DB-Consumer: 幂等 persisted 状态写入失败 uid={} client_msg_id={}: {}",
+                     sender_id, client_msg_id, e.what());
+        }
+    }
+
     // ====== 权限校验 ======
 
     /* 要求 auth.user_id 是 cid 的成员，否则抛 kConversationNotMember */
@@ -861,6 +899,8 @@ private:
     std::string _identity_service_name;
     std::string _media_service_name;
     ServiceManager::ptr _mm_channels;
+    std::shared_ptr<odb::core::database> _odb_db;
+    RedisClient::ptr _redis;
 
     MessageTable::ptr _mysql_msg;
     UserTimeLineTable::ptr _mysql_user_timeline;
@@ -1133,7 +1173,7 @@ public:
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads) {
         _rpc_server = std::make_shared<brpc::Server>();
         MessageServiceImpl *impl = new MessageServiceImpl(
-            _identity_service_name, _media_service_name, _mm_channels,
+            _identity_service_name, _media_service_name, _mm_channels, _odb_db, _redis_client,
             _mysql_msg, _mysql_user_timeline, _mysql_member,
             _mysql_reaction, _mysql_pin, _es_msg, _seq_gen,
             _push_publisher, _push_outbox, _es_publisher, _es_outbox);

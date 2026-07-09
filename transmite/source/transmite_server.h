@@ -18,6 +18,7 @@
 #include "utils/inflight.hpp"
 #include "utils/redis_mutex.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/reliability_state.hpp"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
 #include "identity/identity_service.pb.h"
@@ -149,49 +150,69 @@ public:
 
         // ③ 客户端幂等去重：Redis SET NX，命中直接返回（零 RPC）
         if (!client_msg_id.empty() && _redis) {
-            idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+            idem_key = idempotency_key_for(uid, client_msg_id);
             try {
-                auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
+                auto result = _redis->set(
+                    idem_key,
+                    serialize_idempotency_state({IdempotencyStatus::Pending, 0}),
+                    std::chrono::seconds(86400),
+                    sw::redis::UpdateType::NOT_EXIST);
                 if (!result) {
                     auto cached = _redis->get(idem_key);
-                    if (cached && cached.value() != "pending") {
-                        uint64_t old_msg_id = 0;
-                        bool parse_ok = false;
-                        try {
-                            old_msg_id = std::stoull(cached.value());
-                            parse_ok = true;
-                        } catch (const std::exception&) {
-                            LOG_WARN("请求ID: {} - 幂等缓存值异常，删除后降级: {}", rid, cached.value());
-                            try { _redis->del(idem_key); } catch (...) {}
-                            idem_key_set = false;
+                    auto state = cached ? parse_idempotency_state(cached.value())
+                                        : IdempotencyState{IdempotencyStatus::Empty, 0};
+                    if (state.status == IdempotencyStatus::Accepted ||
+                        state.status == IdempotencyStatus::Persisted) {
+                        auto persisted_msg = select_existing_message_by_client_msg_(
+                            uid, client_msg_id, rid, static_cast<brpc::Controller*>(controller));
+                        LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息",
+                                 rid, client_msg_id);
+                        response->mutable_header()->set_request_id(rid);
+                        response->mutable_header()->set_success(true);
+                        if (persisted_msg.has_value()) {
+                            response->mutable_message()->CopyFrom(*persisted_msg);
+                        } else {
+                            response->mutable_message()->set_message_id(state.message_id);
                         }
-                        if (parse_ok) {
-                            LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
-                            response->mutable_header()->set_request_id(rid);
-                            response->mutable_header()->set_success(true);
-                            response->mutable_message()->set_message_id(old_msg_id);
-                            return;
-                        }
-                        // parse failed: deleted corrupt key, fall through — need to re-acquire idem lock
+                        return;
+                    }
+                    if (state.status == IdempotencyStatus::Corrupt) {
+                        LOG_WARN("请求ID: {} - 幂等缓存值异常，删除后降级: {}", rid, cached.value());
+                        try { _redis->del(idem_key); } catch (...) {}
                         try {
-                            auto retry_result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
+                            auto retry_result = _redis->set(
+                                idem_key,
+                                serialize_idempotency_state({IdempotencyStatus::Pending, 0}),
+                                std::chrono::seconds(86400),
+                                sw::redis::UpdateType::NOT_EXIST);
                             if (!retry_result) {
                                 LOG_WARN("请求ID: {} - client_msg_id={} 幂等降级失败", rid, client_msg_id);
                                 return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                             }
+                            idem_key_set = true;
                         } catch (std::exception &e2) {
                             LOG_WARN("请求ID: {} - Redis 幂等降级异常: {}（fail-open）", rid, e2.what());
                         }
-                        idem_key_set = true;
                     } else {
+                        auto persisted_msg = select_existing_message_by_client_msg_(
+                            uid, client_msg_id, rid, static_cast<brpc::Controller*>(controller));
+                        if (persisted_msg.has_value()) {
+                            LOG_INFO("请求ID: {} - pending 幂等命中 DB client_msg_id={}",
+                                     rid, client_msg_id);
+                            response->mutable_header()->set_request_id(rid);
+                            response->mutable_header()->set_success(true);
+                            response->mutable_message()->CopyFrom(*persisted_msg);
+                            return;
+                        }
                         LOG_WARN("请求ID: {} - client_msg_id={} 幂等冲突（前一条未完成）", rid, client_msg_id);
                         return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                     }
+                } else {
+                    idem_key_set = true;
                 }
             } catch (std::exception &e) {
                 LOG_WARN("请求ID: {} - Redis 幂等检查异常: {}（fail-open）", rid, e.what());
             }
-            idem_key_set = true;  // SET NX 成功，后续任何错误路径需清理
         }
 
         // ④ 限流检查（用户级 + 会话级）
@@ -304,15 +325,9 @@ public:
         response->mutable_header()->set_success(true);
         response->mutable_message()->CopyFrom(*msg);
 
-        // ⑩ 将幂等 key 从 "pending" 更新为真实 msg_id（在 MQ publish 之前）。
-        //    如果此后进程崩溃，客户端重试时会命中缓存直接返回 msg_id，
-        //    而非被 "pending" 卡死 24 小时。
+        // ⑩ 幂等 key 在 MQ broker ACK 后再从 "pending" 更新为 accepted:<msg_id>。
+        //    在 publish 前提前写 msg_id 会造成进程崩溃后的"幽灵成功"。
         auto msg_id = msg->message_id();
-        if (idem_key_set && !idem_key.empty() && _redis) {
-            try { _redis->set(idem_key, std::to_string(msg_id), std::chrono::seconds(86400)); }
-            catch (...) {}
-            idem_key_set = false;  // 已更新为真实 msg_id，不再需要清理
-        }
 
         // ⑪ MQ publish_confirm（异步回调完成后 Run done）
         google::protobuf::Closure *async_done = rpc_guard.release();
@@ -325,9 +340,16 @@ public:
             ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
-                [async_done, response, rid, done_called, redis, idem_key](PublishStatus status, const std::string &mq_msg) {
+                [async_done, response, rid, done_called, redis, idem_key, msg_id](PublishStatus status, const std::string &mq_msg) {
                     if (done_called->exchange(true)) return;
                     if (status == PublishStatus::Acked) {
+                        if (!idem_key.empty() && redis) {
+                            try {
+                                redis->set(idem_key,
+                                           serialize_idempotency_state({IdempotencyStatus::Accepted, msg_id}),
+                                           std::chrono::seconds(86400));
+                            } catch (...) {}
+                        }
                         LOG_DEBUG("请求ID: {} - 消息成功投递到 Broker", rid);
                     } else {
                         LOG_ERROR("请求ID: {} - 消息投递到 Broker 失败: {}", rid, mq_msg);
@@ -535,6 +557,33 @@ public:
         std::vector<std::string> members;
         for (const auto &m : member_rsp.member_ids()) members.push_back(m);
         return members;
+    }
+
+    std::optional<chatnow::message::Message> select_existing_message_by_client_msg_(
+        const std::string &uid,
+        const std::string &client_msg_id,
+        const std::string &rid,
+        brpc::Controller *caller_cntl) {
+        if (client_msg_id.empty()) return std::nullopt;
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            LOG_WARN("请求ID: {} - message_service 不可达，无法回查幂等消息 uid={}", rid, uid);
+            return std::nullopt;
+        }
+
+        chatnow::message::MessageService_Stub stub(channel.get());
+        chatnow::message::SelectByClientMsgIdReq req;
+        chatnow::message::SelectByClientMsgIdRsp rsp;
+        brpc::Controller cntl;
+        if (caller_cntl) chatnow::auth::forward_auth_metadata(caller_cntl, &cntl);
+        req.set_request_id(rid);
+        req.set_client_msg_id(client_msg_id);
+        stub.SelectByClientMsgId(&cntl, &req, &rsp, brpc::DoNothing());
+        brpc::Join(cntl.call_id());
+        if (cntl.Failed() || !rsp.header().success() || !rsp.has_message()) {
+            return std::nullopt;
+        }
+        return rsp.message();
     }
 
 private:
