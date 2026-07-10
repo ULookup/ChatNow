@@ -24,3 +24,7 @@ third_party/
 */depends/
 */build/
 *.bak
+
+# Agent worktrees
+.worktrees/
+.superpowers/
