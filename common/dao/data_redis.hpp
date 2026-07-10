@@ -162,13 +162,13 @@ public:
     }
 
     // --- SCAN ---
-    // 集群模式：for_each 一次遍历所有节点。不支持迭代续扫——cursor 非零时 abort。
+    // 集群模式：for_each 一次遍历所有节点。集群不支持跨节点 cursor
+    // 续扫，因此任意 cursor 都重启一次完整扫描并返回 0。
     template <typename Out>
     long long scan(long long cursor, const std::string &pattern, long long count, Out out) {
         if (_rc) {
             if (cursor != 0) {
-                LOG_ERROR("RedisCluster scan does not support iterative scan, cursor must be 0, got {}", cursor);
-                abort();
+                LOG_WARN("RedisCluster scan cannot resume cursor {}; restarting full cluster scan", cursor);
             }
             _rc->for_each([&](sw::redis::Redis &r) {
                 long long cur = 0;
@@ -1169,63 +1169,85 @@ public:
 
     /* 设置状态 */
     void set_state(const std::string &uid, const std::string &state) {
-        _r->hset(key::kPresence + uid, "state", state);
+        try { _r->hset(key::kPresence + uid, "state", state); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.set_state 失败 {}: {}", uid, e.what()); }
     }
 
     /* 获取状态 */
     std::string get_state(const std::string &uid) {
-        auto v = _r->hget(key::kPresence + uid, "state");
-        return v ? *v : "offline";
+        try {
+            auto v = _r->hget(key::kPresence + uid, "state");
+            return v ? *v : "offline";
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.get_state 失败 {}: {}", uid, e.what());
+            return "offline";
+        }
     }
 
     /* 更新最后活跃时间 */
     void touch_active(const std::string &uid, int64_t ts_ms) {
-        _r->hset(key::kPresence + uid, "last_active", std::to_string(ts_ms));
+        try { _r->hset(key::kPresence + uid, "last_active", std::to_string(ts_ms)); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.touch_active 失败 {}: {}", uid, e.what()); }
     }
 
     /* 设置自定义状态 */
     void set_custom_status(const std::string &uid, const std::string &text) {
-        _r->hset(key::kPresence + uid, "custom_status", text);
+        try { _r->hset(key::kPresence + uid, "custom_status", text); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.set_custom_status 失败 {}: {}", uid, e.what()); }
     }
 
     /* 添加在线设备：与 Push._write_presence_online_ 使用相同的 per-device HASH 模式 */
     void add_device(const std::string &uid, const std::string &device_id) {
-        auto k = key::presence_device_key(uid, device_id);
-        _r->hset(k, "state", "ONLINE");
-        _r->expire(k, std::chrono::seconds(120));
+        try {
+            auto k = key::presence_device_key(uid, device_id);
+            _r->hset(k, "state", "ONLINE");
+            _r->expire(k, std::chrono::seconds(120));
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.add_device 失败 {}-{}: {}", uid, device_id, e.what());
+        }
     }
 
     /* 获取在线设备列表：SCAN 匹配 im:presence:device:{uid}:* */
     std::vector<std::string> get_devices(const std::string &uid) {
         std::vector<std::string> out;
-        auto cursor = 0ULL;
-        while (true) {
-            std::vector<std::string> batch;
-            cursor = _r->scan(cursor, key::presence_device_scan_pattern(uid), 100,
-                             std::back_inserter(batch));
-            for (auto& k : batch) {
-                auto pos = k.rfind(':');
-                if (pos != std::string::npos) out.push_back(k.substr(pos + 1));
+        try {
+            auto cursor = 0ULL;
+            while (true) {
+                std::vector<std::string> batch;
+                cursor = _r->scan(cursor, key::presence_device_scan_pattern(uid), 100,
+                                 std::back_inserter(batch));
+                for (auto& k : batch) {
+                    auto pos = k.rfind(':');
+                    if (pos != std::string::npos) out.push_back(k.substr(pos + 1));
+                }
+                if (cursor == 0) break;
             }
-            if (cursor == 0) break;
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.get_devices 失败 {}: {}", uid, e.what());
         }
         return out;
     }
 
     /* 输入中指示 */
     void set_typing(const std::string &uid, const std::string &conv_id) {
-        auto k = key::kPresenceTyping + uid;
-        _r->sadd(k, conv_id);
-        _r->expire(k, std::chrono::seconds(10));
+        try {
+            auto k = key::kPresenceTyping + uid;
+            _r->sadd(k, conv_id);
+            _r->expire(k, std::chrono::seconds(10));
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.set_typing 失败 {}-{}: {}", uid, conv_id, e.what());
+        }
     }
 
     /* 订阅状态 */
     void subscribe(const std::string &uid, const std::string &target_uid) {
-        _r->sadd(key::kPresenceSub + uid, target_uid);
+        try { _r->sadd(key::kPresenceSub + uid, target_uid); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.subscribe 失败 {}-{}: {}", uid, target_uid, e.what()); }
     }
 
     void unsubscribe(const std::string &uid, const std::string &target_uid) {
-        _r->srem(key::kPresenceSub + uid, target_uid);
+        try { _r->srem(key::kPresenceSub + uid, target_uid); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.unsubscribe 失败 {}-{}: {}", uid, target_uid, e.what()); }
     }
 
 private:
