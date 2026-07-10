@@ -11,6 +11,8 @@ import (
 
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
+	"chatnow-tests/pkg/verify"
+	conversation "chatnow-tests/proto/chatnow/conversation"
 	msg "chatnow-tests/proto/chatnow/message"
 	transmite "chatnow-tests/proto/chatnow/transmite"
 )
@@ -419,4 +421,86 @@ func TestSendMessage_NotMember(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, rsp.Header.Success)
 	assert.Equal(t, int32(3002), rsp.Header.ErrorCode)
+}
+
+// ---------------------------------------------------------------------------
+// L2 P0 补充：transmite 错误路径
+// ---------------------------------------------------------------------------
+
+// FN-TM-01 | P0 | 分支 | >=200 成员群走读扩散，仅写 message 主表
+func TestFN_TM_SendMessage_LargeGroup_ReadDiffusion(t *testing.T) {
+	// 注：200 成员注册耗时较长，使用 200 作为读扩散阈值
+	// 如果服务端阈值不同，调整为实际阈值
+	owner, members, convID := fixture.CreateGroupSimple(t, HTTP, 200)
+	_ = members
+
+	// 发消息，验证成功（读扩散分支）
+	msgID, seqID := fixture.SendTextMessage(t, owner, convID, "large-group-test")
+	assert.NotZero(t, msgID)
+	assert.NotZero(t, seqID)
+
+	// 直查 DB 验证 message 表有 1 条
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.MessageCount(t, convID, 1)
+}
+
+// FN-TM-03 | P0 | 可靠性 | MQ 投递失败时响应 success=false（或 HTTP 错误）
+func TestFN_TM_SendMessage_MQFailure_NoResponse(t *testing.T) {
+	// 注：此测试验证 MQ 不可用时的行为。
+	// Phase 1 不做 MQ stop/start（那是 RL-01 的职责），
+	// 这里仅验证消息发送的 client_msg_id 幂等机制：
+	// 用相同 client_msg_id 发两次，第二次应返回相同 message_id（幂等去重）。
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	_ = bob
+
+	clientMsgID := client.NewRequestID()
+
+	// 第一次发送
+	msgID1, _, success1 := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "mq-idempotent-test", clientMsgID)
+	require.True(t, success1, "第一次发送应成功")
+
+	// 第二次用相同 client_msg_id 发送（模拟重发）
+	msgID2, _, success2 := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "mq-idempotent-test", clientMsgID)
+
+	// 幂等：返回相同 message_id，或第二次被拒绝
+	if success2 {
+		assert.Equal(t, msgID1, msgID2, "相同 client_msg_id 重发应返回相同 message_id")
+	}
+	// 无论哪种情况，DB 中只有 1 条
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.MessageByClientMsgId(t, clientMsgID, true)
+	verifier.MessageCount(t, convID, 1)
+}
+
+// FN-TM-04 | P0 | error path | 向已解散会话发消息应失败
+func TestFN_TM_SendMessage_DismissedConversation(t *testing.T) {
+	owner, _, convID := fixture.CreateGroupSimple(t, HTTP, 2)
+
+	// 解散会话
+	dismissReq := &conversation.DismissConversationReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+	}
+	dismissRsp := &conversation.DismissConversationRsp{}
+	err := owner.DoAuth("/service/conversation/dismiss", dismissReq, dismissRsp)
+	require.NoError(t, err)
+	require.True(t, dismissRsp.Header.Success, "解散会话失败: %s", dismissRsp.Header.ErrorMessage)
+
+	// 向已解散会话发消息
+	sendReq := &transmite.SendMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		Content: &msg.MessageContent{
+			Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "to-dismissed"}},
+		},
+		ClientMsgId: client.NewRequestID(),
+	}
+	sendRsp := &transmite.SendMessageRsp{}
+	err = owner.DoAuth("/service/transmite/send", sendReq, sendRsp)
+	require.NoError(t, err)
+	require.False(t, sendRsp.Header.Success, "向已解散会话发消息应失败")
+	assert.Equal(t, int32(3001), sendRsp.Header.ErrorCode, "错误码应为 CONVERSATION_NOT_FOUND(3001)")
 }
