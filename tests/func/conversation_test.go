@@ -458,3 +458,63 @@ func TestSearchConversations_Success(t *testing.T) {
 	}
 	assert.True(t, found, "search by partial convID should find the conversation")
 }
+
+// ---------------------------------------------------------------------------
+// L2 P0 补充：conversation 未测 API
+// ---------------------------------------------------------------------------
+
+// FN-CV (untested) | P0 | GetMemberIds 返回会话成员 ID 列表
+func TestFN_CV_GetMemberIds_Success(t *testing.T) {
+	owner, members, convID := fixture.CreateGroupSimple(t, HTTP, 3)
+
+	req := &conversation.GetMemberIdsReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+	}
+	rsp := &conversation.GetMemberIdsRsp{}
+	err := owner.DoAuth("/service/conversation/get_member_ids", req, rsp)
+	require.NoError(t, err)
+	require.True(t, rsp.Header.Success, "get_member_ids 失败: %s", rsp.Header.ErrorMessage)
+
+	// 验证返回 4 个成员（owner + 3 members）
+	assert.Len(t, rsp.MemberIds, 4)
+
+	// 验证 owner 在列表中
+	containsOwner := false
+	for _, id := range rsp.MemberIds {
+		if id == owner.UserID {
+			containsOwner = true
+		}
+	}
+	assert.True(t, containsOwner, "owner 应在成员列表中")
+
+	// 验证所有 members 在列表中
+	for _, m := range members {
+		found := false
+		for _, id := range rsp.MemberIds {
+			if id == m.UserID {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "成员 %s 应在列表中", m.UserID)
+	}
+}
+
+// FN-CV (untested) | P0 | GetMemberIds 非成员调用应失败
+func TestFN_CV_GetMemberIds_NotMember(t *testing.T) {
+	owner, _, convID := fixture.CreateGroupSimple(t, HTTP, 2)
+	_ = owner
+
+	// 非成员尝试查询
+	attacker, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	req := &conversation.GetMemberIdsReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+	}
+	rsp := &conversation.GetMemberIdsRsp{}
+	err := attacker.DoAuth("/service/conversation/get_member_ids", req, rsp)
+	require.NoError(t, err)
+	require.False(t, rsp.Header.Success, "非成员调用应失败")
+	assert.Equal(t, int32(3002), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NOT_MEMBER(3002)")
+}
