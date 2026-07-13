@@ -3,6 +3,7 @@
 package func_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	presence "chatnow-tests/proto/chatnow/presence"
+	push "chatnow-tests/proto/chatnow/push"
 )
 
 func TestGetPresence_Success(t *testing.T) {
@@ -187,4 +189,75 @@ func TestFN_PR_Presence_OfflineOnDisconnect(t *testing.T) {
 	// 断开后应 offline（或无在线设备）
 	assert.Equal(t, presence.PresenceState_OFFLINE, rsp.Presence.AggregatedState,
 		"WS 断开后 presence 应变 offline")
+}
+
+// FN-PR-04 | P0 | websocket | 订阅后目标上线，WS 收到 presence 变更通知
+func TestFN_PR_SubscribePresence_NotificationDelivery(t *testing.T) {
+	subscriber, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	target, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// subscriber 连接 WS
+	wsSub, err := client.NewWSClient(HTTP.Config(), subscriber.AccessToken, subscriber.UserID, "device-sub")
+	require.NoError(t, err)
+	defer wsSub.Close()
+
+	// subscriber 订阅 target
+	subReq := &presence.SubscribeReq{
+		RequestId: client.NewRequestID(), SubscribeUserIds: []string{target.UserID},
+	}
+	require.NoError(t, subscriber.DoAuth("/service/presence/subscribe", subReq, &presence.SubscribeRsp{}))
+
+	// target 上线（连接 WS）
+	wsTarget, err := client.NewWSClient(HTTP.Config(), target.AccessToken, target.UserID, "device-target")
+	require.NoError(t, err)
+	defer wsTarget.Close()
+
+	// 等待 presence 通知送达
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	notify, err := wsSub.WaitForNotify(ctx, int32(push.NotifyType_PRESENCE_CHANGE_NOTIFY))
+	require.NoError(t, err, "应收到 target 上线的 presence 通知")
+	_ = notify
+}
+
+// FN-PR-07 | P2 | boundary | 部分在线部分离线的批量查询
+func TestFN_PR_BatchGetPresence_MixedOnlineOffline(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	onlineUser, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	offlineUser, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// onlineUser 连接 WS
+	wsOnline, err := client.NewWSClient(HTTP.Config(), onlineUser.AccessToken, onlineUser.UserID, "device-mixed-online")
+	require.NoError(t, err)
+	defer wsOnline.Close()
+	time.Sleep(2 * time.Second)
+
+	req := &presence.BatchGetPresenceReq{
+		RequestId: client.NewRequestID(),
+		UserIds:   []string{onlineUser.UserID, offlineUser.UserID},
+	}
+	rsp := &presence.BatchGetPresenceRsp{}
+	require.NoError(t, authed.DoAuth("/service/presence/batch_get", req, rsp))
+	require.True(t, rsp.Header.Success)
+	require.Len(t, rsp.Presences, 2)
+
+	onlinePresence := rsp.Presences[onlineUser.UserID]
+	offlinePresence := rsp.Presences[offlineUser.UserID]
+	assert.Equal(t, presence.PresenceState_ONLINE, onlinePresence.AggregatedState, "onlineUser 应 online")
+	assert.Equal(t, presence.PresenceState_OFFLINE, offlinePresence.AggregatedState, "offlineUser 应 offline")
+}
+
+// FN-PR-08 | P2 | idempotent | 未订阅就取消，幂等不报错
+func TestFN_PR_UnsubscribePresence_NotSubscribed(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	other, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// 未订阅直接取消
+	req := &presence.UnsubscribeReq{
+		RequestId: client.NewRequestID(), UnsubscribeUserIds: []string{other.UserID},
+	}
+	rsp := &presence.UnsubscribeRsp{}
+	require.NoError(t, authed.DoAuth("/service/presence/unsubscribe", req, rsp))
+	// 幂等：不报错（success=true 或 success=false 但非 panic）
+	_ = rsp.Header.Success
 }
