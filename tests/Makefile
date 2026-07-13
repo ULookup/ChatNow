@@ -1,4 +1,4 @@
-.PHONY: proto test-func test-scenario test-perf clean deps
+.PHONY: proto test-bvt test-func test-scenario test-perf clean deps
 
 # Generate Go protobuf from proto/ definitions
 # NOTE: protoc-gen-go >= v1.35 requires go_package option or M flags to derive
@@ -26,6 +26,10 @@ proto:
 			protoc --proto_path="$$PROTO_BASE" --go_out="$$OUT_BASE" --go_opt=$$GO_OPTS "$$f"; \
 		done; \
 	done
+
+# Run BVT smoke tests (L1) - fastest, runs first as gate
+test-bvt:
+	go test -tags=bvt ./bvt/... -v -count=1 -timeout=300s
 
 # Run all functional tests (L2)
 test-func:
