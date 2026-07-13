@@ -319,3 +319,61 @@ func TestScenario_OfflineMessageSync(t *testing.T) {
 	defer dbV.Close()
 	dbV.MessageCount(t, convID, 4) // 3 离线 + 1 实时 = 4
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 6: Message Reliability（MQ 可用版本）
+// SC-06 | P0 | client_msg_id 幂等 + 消息不丢不重
+// 注：Phase 1 不做 MQ stop/start（那是 RL-01 的职责），
+// 此版本验证 MQ 正常可用时的 client_msg_id 幂等机制。
+// ---------------------------------------------------------------------------
+
+func TestScenario_MessageReliability(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	_ = bob
+
+	// Step 1: alice 发消息，获得 message_id
+	clientMsgID := client.NewRequestID()
+	msgID1, seq1, success1 := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "reliability-test", clientMsgID)
+	require.True(t, success1, "第一次发送应成功")
+	require.NotZero(t, msgID1)
+
+	// Step 2: 用相同 client_msg_id 重发（模拟网络重传）
+	msgID2, seq2, success2 := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "reliability-test", clientMsgID)
+
+	// 幂等验证
+	if success2 {
+		assert.Equal(t, msgID1, msgID2, "相同 client_msg_id 应返回相同 message_id")
+		assert.Equal(t, seq1, seq2, "相同 client_msg_id 应返回相同 seq_id")
+	}
+
+	// Step 3: bob sync 验证收到该消息（仅 1 条）
+	syncReq := &msg.SyncMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		AfterSeq:       0,
+		Limit:          10,
+	}
+	syncRsp := &msg.SyncMessagesRsp{}
+	require.NoError(t, bob.DoAuth("/service/message/sync", syncReq, syncRsp))
+	require.True(t, syncRsp.Header.Success)
+	require.Len(t, syncRsp.Messages, 1, "应仅收到 1 条消息（幂等去重）")
+	assert.Equal(t, msgID1, syncRsp.Messages[0].MessageId)
+	assert.Equal(t, "reliability-test", syncRsp.Messages[0].GetContent().GetText().Text)
+
+	// Step 4: SelectByClientMsgId 验证可查到
+	selectReq := &msg.SelectByClientMsgIdReq{
+		RequestId:   client.NewRequestID(),
+		ClientMsgId: clientMsgID,
+	}
+	selectRsp := &msg.SelectByClientMsgIdRsp{}
+	require.NoError(t, alice.DoAuth("/service/message/select_by_client_msg_id", selectReq, selectRsp))
+	require.True(t, selectRsp.Header.Success)
+	require.NotNil(t, selectRsp.Message)
+	assert.Equal(t, msgID1, selectRsp.Message.MessageId)
+
+	// Step 5: 数据一致性 - DB 仅 1 条（不重复）
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	dbV.MessageCount(t, convID, 1)
+	dbV.MessageByClientMsgId(t, clientMsgID, true)
+}
