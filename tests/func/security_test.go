@@ -24,7 +24,11 @@ func TestFN_SEC_AuthBypass_NoToken(t *testing.T) {
 	err := HTTP.DoNoAuth("/service/identity/get_profile", req, rsp)
 
 	// 预期：HTTP 错误（401/403）或 protobuf 响应 success=false
-	require.Error(t, err, "无 token 访问受保护接口应返回 HTTP 错误")
+	if err != nil {
+		// HTTP-level rejection (401/403) - expected
+		return
+	}
+	require.False(t, rsp.Header.Success, "无 token 请求应被拒绝")
 }
 
 // FN-SEC-02 | P0 | 安全 | 用 A 的 token 访问 B 的数据应被拒绝
@@ -67,7 +71,7 @@ func TestFN_SEC_PrivilegeEscalation_MemberToOwner(t *testing.T) {
 		Role:           conversation.MemberRole_OWNER,
 	}
 	rsp := &conversation.ChangeMemberRoleRsp{}
-	err := member.DoAuth("/service/conversation/change_member_role", req, rsp)
+	err := member.DoAuth("/service/conversation/change_role", req, rsp)
 	require.NoError(t, err)
 	require.False(t, rsp.Header.Success, "普通成员不能改自己为群主")
 	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")

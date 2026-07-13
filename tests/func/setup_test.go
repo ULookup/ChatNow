@@ -7,8 +7,8 @@ import (
 	"os"
 	"testing"
 
-	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/cleanup"
+	"chatnow-tests/pkg/client"
 )
 
 var HTTP *client.HTTPClient

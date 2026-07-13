@@ -63,6 +63,7 @@ func WaitForStackReady(cfg *client.Config, timeout time.Duration) error {
 		{"Relationship", "127.0.0.1:10006"},
 		{"Conversation", "127.0.0.1:10007"},
 		{"Presence", "127.0.0.1:9050"},
+		{"Push", "127.0.0.1:10008"},
 	}
 
 	for time.Now().Before(deadline) {
@@ -133,9 +134,16 @@ func flushRedisNode(addr string) error {
 	if err != nil {
 		return err
 	}
-	buf := make([]byte, 64)
-	_, err = conn.Read(buf)
-	return err
+	resp := make([]byte, 64)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return fmt.Errorf("read FLUSHALL response: %w", err)
+	}
+	s := string(resp[:n])
+	if !strings.HasPrefix(s, "+OK") {
+		return fmt.Errorf("FLUSHALL failed: %s", strings.TrimSpace(s))
+	}
+	return nil
 }
 
 func clearESIndices(t testing.TB, esURL string) {
