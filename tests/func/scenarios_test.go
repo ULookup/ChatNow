@@ -3,7 +3,12 @@
 package func_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
+	"io"
+	"net/http"
 	"testing"
 	"time"
 
@@ -16,6 +21,7 @@ import (
 	common "chatnow-tests/proto/chatnow/common"
 	conversation "chatnow-tests/proto/chatnow/conversation"
 	identity "chatnow-tests/proto/chatnow/identity"
+	media "chatnow-tests/proto/chatnow/media"
 	msg "chatnow-tests/proto/chatnow/message"
 	push "chatnow-tests/proto/chatnow/push"
 	relationship "chatnow-tests/proto/chatnow/relationship"
@@ -318,6 +324,104 @@ func TestScenario_OfflineMessageSync(t *testing.T) {
 	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
 	defer dbV.Close()
 	dbV.MessageCount(t, convID, 4) // 3 离线 + 1 实时 = 4
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 5: Media Upload Full Flow（媒体三步上传全链路）
+// SC-05 | P0 | scenario | 媒体三步上传全链路：apply->PUT->complete->download->dedup->multipart
+// ---------------------------------------------------------------------------
+
+func TestScenario_MediaUploadFullFlow(t *testing.T) {
+	user, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := []byte("sc05-media-full-flow-content")
+	hash := sha256.Sum256(content)
+	hashStr := fmt.Sprintf("sha256:%x", hash)
+
+	// Step 1: ApplyUpload
+	applyReq := &media.ApplyUploadReq{
+		RequestId: client.NewRequestID(), FileName: "sc05.txt",
+		FileSize: int64(len(content)), MimeType: "text/plain",
+		ContentHash: hashStr, Purpose: media.MediaPurpose_CHAT,
+	}
+	applyRsp := &media.ApplyUploadRsp{}
+	require.NoError(t, user.DoAuth("/service/media/apply_upload", applyReq, applyRsp))
+	require.True(t, applyRsp.Header.Success)
+	fileID := applyRsp.FileId
+	require.NotEmpty(t, fileID)
+
+	// Step 2: PUT 到 MinIO presigned URL
+	httpReq, _ := http.NewRequest("PUT", applyRsp.UploadUrl, bytes.NewReader(content))
+	if applyRsp.Headers != nil {
+		for k, v := range applyRsp.Headers {
+			httpReq.Header.Set(k, v)
+		}
+	}
+	putResp, err := http.DefaultClient.Do(httpReq)
+	require.NoError(t, err)
+	require.Equal(t, 200, putResp.StatusCode)
+	putResp.Body.Close()
+
+	// Step 3: CompleteUpload
+	completeReq := &media.CompleteUploadReq{RequestId: client.NewRequestID(), FileId: fileID}
+	completeRsp := &media.CompleteUploadRsp{}
+	require.NoError(t, user.DoAuth("/service/media/complete_upload", completeReq, completeRsp))
+	require.True(t, completeRsp.Header.Success)
+
+	// Step 4: ApplyDownload + 下载验证内容
+	dlReq := &media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: fileID}
+	dlRsp := &media.ApplyDownloadRsp{}
+	require.NoError(t, user.DoAuth("/service/media/apply_download", dlReq, dlRsp))
+	require.True(t, dlRsp.Header.Success)
+	dlResp, err := http.Get(dlRsp.DownloadUrl)
+	require.NoError(t, err)
+	body, _ := io.ReadAll(dlResp.Body)
+	dlResp.Body.Close()
+	assert.Equal(t, content, body, "下载内容与上传不一致")
+
+	// Step 5: 重复 ApplyUpload（相同 hash）-> dedup 返回相同 file_id
+	applyReq2 := &media.ApplyUploadReq{
+		RequestId: client.NewRequestID(), FileName: "sc05-dup.txt",
+		FileSize: int64(len(content)), MimeType: "text/plain",
+		ContentHash: hashStr, Purpose: media.MediaPurpose_CHAT,
+	}
+	applyRsp2 := &media.ApplyUploadRsp{}
+	require.NoError(t, user.DoAuth("/service/media/apply_upload", applyReq2, applyRsp2))
+	require.True(t, applyRsp2.Header.Success)
+	assert.True(t, applyRsp2.AlreadyExists, "相同 hash 应返回 already_exists=true")
+	assert.Equal(t, fileID, applyRsp2.FileId, "dedup 应返回相同 file_id")
+
+	// Step 6: 大文件 multipart（6MB -> 3 parts @ 2MB）
+	bigContent := make([]byte, 6*1024*1024)
+	for i := range bigContent {
+		bigContent[i] = byte(i % 256)
+	}
+	bigFileID := fixture.UploadLargeFile(t, user, bigContent, "application/octet-stream", 2*1024*1024)
+	require.NotEmpty(t, bigFileID)
+
+	// 下载大文件验证
+	bigDlReq := &media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: bigFileID}
+	bigDlRsp := &media.ApplyDownloadRsp{}
+	require.NoError(t, user.DoAuth("/service/media/apply_download", bigDlReq, bigDlRsp))
+	require.True(t, bigDlRsp.Header.Success)
+	bigResp, err := http.Get(bigDlRsp.DownloadUrl)
+	require.NoError(t, err)
+	bigBody, _ := io.ReadAll(bigResp.Body)
+	bigResp.Body.Close()
+	assert.Equal(t, bigContent, bigBody, "大文件下载内容不一致")
+
+	// Step 7: 数据一致性 - GetFileInfo 验证
+	infoReq := &media.GetFileInfoReq{RequestId: client.NewRequestID(), FileId: fileID}
+	infoRsp := &media.GetFileInfoRsp{}
+	require.NoError(t, user.DoAuth("/service/media/get_file_info", infoReq, infoRsp))
+	require.True(t, infoRsp.Header.Success)
+	assert.Equal(t, int64(len(content)), infoRsp.FileInfo.FileSize)
+
+	// Step 8: 数据一致性 - 直查 DB quota
+	// 注：dedup 命中不增加 quota，故 used_bytes = len(content) + len(bigContent)
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	time.Sleep(1 * time.Second) // 等待 DB 异步写入
+	dbV.MediaQuota(t, user.UserID, int64(len(content)+len(bigContent)))
 }
 
 // ---------------------------------------------------------------------------
