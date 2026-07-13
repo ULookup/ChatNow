@@ -13,6 +13,7 @@ import (
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	msg "chatnow-tests/proto/chatnow/message"
+	presence "chatnow-tests/proto/chatnow/presence"
 	push "chatnow-tests/proto/chatnow/push"
 	relationship "chatnow-tests/proto/chatnow/relationship"
 )
@@ -78,4 +79,162 @@ func TestFN_WS_FriendRequestNotify(t *testing.T) {
 	if applyInfo != nil {
 		assert.Equal(t, alice.UserID, applyInfo.UserId)
 	}
+}
+
+// FN-WS-03 | P1 | websocket | 好友申请通过后，申请方 WS 收到通知
+func TestFN_WS_FriendAcceptNotify(t *testing.T) {
+	a, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	b, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// a 连接 WS
+	wsA, err := client.NewWSClient(HTTP.Config(), a.AccessToken, a.UserID, "device-ws03")
+	require.NoError(t, err)
+	defer wsA.Close()
+
+	// 等待 WS 鉴权完成
+	time.Sleep(500 * time.Millisecond)
+
+	// a 发好友申请
+	sendReq := &relationship.SendFriendReq{
+		RequestId:    client.NewRequestID(),
+		RespondentId: b.UserID,
+	}
+	sendRsp := &relationship.SendFriendRsp{}
+	require.NoError(t, a.DoAuth("/service/relationship/send_friend_request", sendReq, sendRsp))
+	require.True(t, sendRsp.Header.Success)
+
+	// b 通过申请
+	handleReq := &relationship.HandleFriendReq{
+		RequestId:     client.NewRequestID(),
+		NotifyEventId: sendRsp.GetNotifyEventId(),
+		Agree:         true,
+		ApplyUserId:   a.UserID,
+	}
+	require.NoError(t, b.DoAuth("/service/relationship/handle_friend_request", handleReq, &relationship.HandleFriendRsp{}))
+
+	// a 应收到 FRIEND_ADD_PROCESS_NOTIFY（好友申请被处理）
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = wsA.WaitForNotify(ctx, int32(push.NotifyType_FRIEND_ADD_PROCESS_NOTIFY))
+	require.NoError(t, err, "a 应收到好友通过通知")
+}
+
+// FN-WS-04 | P1 | websocket | 会话创建后，成员 WS 收到通知
+func TestFN_WS_ConversationCreateNotify(t *testing.T) {
+	owner, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	member, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// member 连接 WS
+	wsMember, err := client.NewWSClient(HTTP.Config(), member.AccessToken, member.UserID, "device-ws04")
+	require.NoError(t, err)
+	defer wsMember.Close()
+
+	// 等待 WS 鉴权完成
+	time.Sleep(500 * time.Millisecond)
+
+	// owner 建群（含 member）
+	convID := fixture.CreateGroupWithMembers(t, owner, []*client.HTTPClient{member}, "ws-conv-create-test")
+
+	// member 应收到 CONVERSATION_CREATE_NOTIFY
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = wsMember.WaitForNotify(ctx, int32(push.NotifyType_CONVERSATION_CREATE_NOTIFY))
+	require.NoError(t, err, "member 应收到会话创建通知")
+	_ = convID
+}
+
+// FN-WS-05 | P1 | websocket | 订阅的用户上线/离线，WS 收到通知
+func TestFN_WS_PresenceChangeNotify(t *testing.T) {
+	subscriber, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	target, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// subscriber 连接 WS
+	wsSub, err := client.NewWSClient(HTTP.Config(), subscriber.AccessToken, subscriber.UserID, "device-ws05-sub")
+	require.NoError(t, err)
+	defer wsSub.Close()
+
+	// 等待 WS 鉴权完成
+	time.Sleep(500 * time.Millisecond)
+
+	// subscriber 订阅 target
+	subReq := &presence.SubscribeReq{
+		RequestId:        client.NewRequestID(),
+		SubscribeUserIds: []string{target.UserID},
+	}
+	require.NoError(t, subscriber.DoAuth("/service/presence/subscribe", subReq, &presence.SubscribeRsp{}))
+
+	// target 上线
+	wsTarget, err := client.NewWSClient(HTTP.Config(), target.AccessToken, target.UserID, "device-ws05-target")
+	require.NoError(t, err)
+	defer wsTarget.Close()
+
+	// subscriber 应收到 PRESENCE_CHANGE_NOTIFY
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = wsSub.WaitForNotify(ctx, int32(push.NotifyType_PRESENCE_CHANGE_NOTIFY))
+	require.NoError(t, err, "subscriber 应收到 target 上线通知")
+}
+
+// FN-WS-06 | P1 | websocket | WS 断开后重连，遗漏消息通过 sync 补齐
+func TestFN_WS_Reconnect(t *testing.T) {
+	a, b, convID := setupConv(t)
+
+	// b 连接 WS
+	wsB1, err := client.NewWSClient(HTTP.Config(), b.AccessToken, b.UserID, "device-ws06-1")
+	require.NoError(t, err)
+
+	// 等待 WS 鉴权完成
+	time.Sleep(500 * time.Millisecond)
+
+	// b 断开 WS
+	require.NoError(t, wsB1.Close())
+
+	// a 发消息（b 离线）
+	sendMsg(t, a, convID, "msg-while-b-disconnected")
+
+	// b 重连 WS
+	wsB2, err := client.NewWSClient(HTTP.Config(), b.AccessToken, b.UserID, "device-ws06-2")
+	require.NoError(t, err)
+	defer wsB2.Close()
+
+	// 等待 WS 鉴权完成
+	time.Sleep(500 * time.Millisecond)
+
+	// b 通过 sync 补齐遗漏消息
+	syncReq := &msg.SyncMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		AfterSeq:       0,
+		Limit:          10,
+	}
+	syncRsp := &msg.SyncMessagesRsp{}
+	require.NoError(t, b.DoAuth("/service/message/sync", syncReq, syncRsp))
+	require.NotEmpty(t, syncRsp.Messages, "重连后 sync 应补齐遗漏消息")
+}
+
+// FN-WS-07 | P2 | websocket | typing 通知送达订阅者
+func TestFN_WS_TypingNotify(t *testing.T) {
+	a, b, convID := setupConv(t)
+
+	// b 连接 WS
+	wsB, err := client.NewWSClient(HTTP.Config(), b.AccessToken, b.UserID, "device-ws07")
+	require.NoError(t, err)
+	defer wsB.Close()
+
+	// 等待 WS 鉴权完成
+	time.Sleep(500 * time.Millisecond)
+
+	// a 发 typing
+	typingReq := &presence.TypingReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		IsTyping:       true,
+	}
+	require.NoError(t, a.DoAuth("/service/presence/send_typing", typingReq, &presence.TypingRsp{}))
+
+	// b 应收到 TYPING_NOTIFY
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = wsB.WaitForNotify(ctx, int32(push.NotifyType_TYPING_NOTIFY))
+	require.NoError(t, err, "b 应收到 typing 通知")
 }
