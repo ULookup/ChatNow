@@ -428,3 +428,27 @@ func TestFN_MD_GetFileInfo_Success(t *testing.T) {
 	assert.Equal(t, int64(len(content)), rsp.FileInfo.FileSize)
 	assert.Equal(t, "text/plain", rsp.FileInfo.MimeType)
 }
+
+// FN-MD-17 | P1 | error path | 非 PCM/无效音频数据
+func TestFN_MD_SpeechRecognition_InvalidAudio(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	req := &media.SpeechRecognitionReq{
+		RequestId: client.NewRequestID(), SpeechContent: []byte("not-audio-data"),
+	}
+	rsp := &media.SpeechRecognitionRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/speech_recognition", req, rsp))
+	require.False(t, rsp.Header.Success, "非 PCM/无效音频应被拒绝")
+	assert.NotEmpty(t, rsp.Header.ErrorCode, "应返回错误码")
+}
+
+// FN-MD-18 | P1 | error path | 空音频数据
+func TestFN_MD_SpeechRecognition_EmptyContent(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	req := &media.SpeechRecognitionReq{
+		RequestId: client.NewRequestID(), SpeechContent: []byte{},
+	}
+	rsp := &media.SpeechRecognitionRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/speech_recognition", req, rsp))
+	// 空音频应返回失败
+	assert.False(t, rsp.Header.Success)
+}
