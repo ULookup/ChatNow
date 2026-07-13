@@ -3,8 +3,10 @@
 package func_test
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -145,4 +147,166 @@ func TestFN_MD_CompleteUpload_AlreadyCompleted(t *testing.T) {
 	completeRsp := &media.CompleteUploadRsp{}
 	require.NoError(t, authed.DoAuth("/service/media/complete_upload", completeReq, completeRsp))
 	assert.True(t, completeRsp.Header.Success)
+}
+
+// FN-MD-04 | P0 | happy path | 大文件 InitMultipart，返回 upload_id + 推荐 part_size
+func TestFN_MD_InitMultipart_Success(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := make([]byte, 3*1024*1024) // 3MB
+	hash := sha256.Sum256(content)
+	req := &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "big.bin",
+		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}
+	rsp := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", req, rsp))
+	assert.True(t, rsp.Header.Success)
+	assert.NotEmpty(t, rsp.FileId)
+	assert.NotEmpty(t, rsp.UploadId)
+	assert.Greater(t, rsp.RecommendedPartSizeBytes, int32(0))
+}
+
+// FN-MD-05 | P1 | error path | 超配额文件拒绝 InitMultipart
+func TestFN_MD_InitMultipart_FileTooLarge(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := []byte("too-large")
+	hash := sha256.Sum256(content)
+	req := &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "huge.bin",
+		FileSize: 30 * 1024 * 1024, MimeType: "application/octet-stream",
+		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}
+	rsp := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", req, rsp))
+	assert.False(t, rsp.Header.Success)
+}
+
+// FN-MD-06 | P0 | happy path | ApplyPartUpload 获取分片 presigned URL
+func TestFN_MD_ApplyPartUpload_Success(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := make([]byte, 3*1024*1024)
+	hash := sha256.Sum256(content)
+	initReq := &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "parts.bin",
+		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}
+	initRsp := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", initReq, initRsp))
+	require.True(t, initRsp.Header.Success)
+
+	req := &media.ApplyPartReq{
+		RequestId: client.NewRequestID(), UploadId: initRsp.UploadId, PartNumber: 1,
+	}
+	rsp := &media.ApplyPartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_part_upload", req, rsp))
+	assert.True(t, rsp.Header.Success)
+	assert.NotEmpty(t, rsp.UploadUrl)
+}
+
+// FN-MD-07 | P0 | happy path | init -> upload 3 parts -> complete，验证合并后 file_id 可查
+func TestFN_MD_CompleteMultipart_FullFlow(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := make([]byte, 6*1024*1024) // 6MB -> 3 parts @ 2MB
+	for i := range content {
+		content[i] = byte(i % 256)
+	}
+	fileID := fixture.UploadLargeFile(t, authed, content, "application/octet-stream", 2*1024*1024)
+	require.NotEmpty(t, fileID)
+
+	// 验证 file_info
+	infoReq := &media.GetFileInfoReq{RequestId: client.NewRequestID(), FileId: fileID}
+	infoRsp := &media.GetFileInfoRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/get_file_info", infoReq, infoRsp))
+	require.True(t, infoRsp.Header.Success)
+	require.Equal(t, int64(len(content)), infoRsp.FileInfo.FileSize)
+}
+
+// FN-MD-08 | P1 | error path | 缺少某个 part number，CompleteMultipart 拒绝
+func TestFN_MD_CompleteMultipart_MissingPart(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := make([]byte, 6*1024*1024)
+	hash := sha256.Sum256(content)
+	initReq := &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "missing.bin",
+		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}
+	initRsp := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", initReq, initRsp))
+	require.True(t, initRsp.Header.Success)
+
+	// 只上传 part 1，跳过 part 2/3，尝试 complete
+	partReq := &media.ApplyPartReq{
+		RequestId: client.NewRequestID(), UploadId: initRsp.UploadId, PartNumber: 1,
+	}
+	partRsp := &media.ApplyPartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_part_upload", partReq, partRsp))
+
+	partContent := content[:2*1024*1024]
+	httpReq, _ := http.NewRequest("PUT", partRsp.UploadUrl, bytes.NewReader(partContent))
+	putResp, err := http.DefaultClient.Do(httpReq)
+	require.NoError(t, err)
+	putResp.Body.Close()
+
+	// CompleteMultipart 只带 part 1（缺少 2/3）
+	completeReq := &media.CompleteMultipartReq{
+		RequestId: client.NewRequestID(), UploadId: initRsp.UploadId,
+		Parts: []*media.PartETag{{PartNumber: 1, Etag: putResp.Header.Get("ETag")}},
+	}
+	completeRsp := &media.CompleteMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/complete_multipart", completeReq, completeRsp))
+	assert.False(t, completeRsp.Header.Success)
+}
+
+// FN-MD-09 | P1 | happy path | init -> abort，验证 upload_id 失效
+func TestFN_MD_AbortMultipart_Success(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := make([]byte, 3*1024*1024)
+	hash := sha256.Sum256(content)
+	initReq := &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "abort.bin",
+		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}
+	initRsp := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", initReq, initRsp))
+	require.True(t, initRsp.Header.Success)
+
+	abortReq := &media.AbortMultipartReq{RequestId: client.NewRequestID(), UploadId: initRsp.UploadId}
+	abortRsp := &media.AbortMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/abort_multipart", abortReq, abortRsp))
+	assert.True(t, abortRsp.Header.Success)
+
+	// 验证 upload_id 已失效：再 ApplyPartUpload 应失败
+	partReq := &media.ApplyPartReq{RequestId: client.NewRequestID(), UploadId: initRsp.UploadId, PartNumber: 1}
+	partRsp := &media.ApplyPartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_part_upload", partReq, partRsp))
+	assert.False(t, partRsp.Header.Success)
+}
+
+// FN-MD-10 | P2 | idempotent | 重复 abort 幂等
+func TestFN_MD_AbortMultipart_AlreadyAborted(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := make([]byte, 3*1024*1024)
+	hash := sha256.Sum256(content)
+	initReq := &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "abort2.bin",
+		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}
+	initRsp := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", initReq, initRsp))
+	require.True(t, initRsp.Header.Success)
+
+	abortReq := &media.AbortMultipartReq{RequestId: client.NewRequestID(), UploadId: initRsp.UploadId}
+	require.NoError(t, authed.DoAuth("/service/media/abort_multipart", abortReq, &media.AbortMultipartRsp{}))
+
+	// 再次 abort，应幂等（不报错或返回 success=false 但不 panic）
+	abortReq2 := &media.AbortMultipartReq{RequestId: client.NewRequestID(), UploadId: initRsp.UploadId}
+	abortRsp2 := &media.AbortMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/abort_multipart", abortReq2, abortRsp2))
+	// 幂等：要么 success=true（已 abort），要么 success=false（upload_id 不存在）
+	_ = abortRsp2.Header.Success
 }
