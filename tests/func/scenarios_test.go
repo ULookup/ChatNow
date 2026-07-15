@@ -630,3 +630,66 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 	// Step 6: 数据一致性 - DB unread_count=0
 	dbV.UnreadCount(t, b.UserID, convID, 0)
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 10: Message Recall Visibility（撤回消息可见性）
+// SC-10 | P1 | scenario | 撤回可见性跨设备一致：发消息 -> sync 看到 -> 撤回 -> 另一设备 sync 看到 recalled
+// ---------------------------------------------------------------------------
+
+func TestScenario_MessageRecallVisibility(t *testing.T) {
+	a, b, convID := setupConv(t)
+
+	// a 发消息
+	sendReq := &transmite.SendMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		Content: &msg.MessageContent{
+			Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "sc10-will-recall"}},
+		},
+		ClientMsgId: client.NewRequestID(),
+	}
+	sendRsp := &transmite.SendMessageRsp{}
+	require.NoError(t, a.DoAuth("/service/transmite/send", sendReq, sendRsp))
+	msgID := sendRsp.Message.MessageId
+
+	// b sync，看到消息内容，status=NORMAL
+	syncReq := &msg.SyncMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		AfterSeq:       0,
+		Limit:          10,
+	}
+	syncRsp := &msg.SyncMessagesRsp{}
+	require.NoError(t, b.DoAuth("/service/message/sync", syncReq, syncRsp))
+	require.NotEmpty(t, syncRsp.Messages)
+	assert.Equal(t, "sc10-will-recall", syncRsp.Messages[0].GetContent().GetText().Text)
+	assert.Equal(t, msg.MessageStatus_MESSAGE_STATUS_NORMAL, syncRsp.Messages[0].Status)
+
+	// a 撤回
+	recallReq := &msg.RecallMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		MessageId:      msgID,
+	}
+	require.NoError(t, a.DoAuth("/service/message/recall", recallReq, &msg.RecallMessageRsp{}))
+
+	// b 再次 sync，看到 status=RECALLED
+	syncReq2 := &msg.SyncMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		AfterSeq:       0,
+		Limit:          10,
+	}
+	syncRsp2 := &msg.SyncMessagesRsp{}
+	require.NoError(t, b.DoAuth("/service/message/sync", syncReq2, syncRsp2))
+	require.NotEmpty(t, syncRsp2.Messages)
+	assert.Equal(t, msg.MessageStatus_MESSAGE_STATUS_RECALLED, syncRsp2.Messages[0].Status,
+		"撤回后 status 应为 RECALLED")
+
+	// 数据一致性 - DB message.status=RECALLED(1)
+	time.Sleep(1 * time.Second) // 等待 DB 异步写入
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	dbV.MessageStatus(t, msgID, 1)
+}
