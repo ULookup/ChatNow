@@ -725,3 +725,46 @@ func TestScenario_TokenRefreshFlow(t *testing.T) {
 	require.NoError(t, user.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}),
 		"新 token 应能调 API")
 }
+
+// SC-12 | P1 | scenario | ES 检索与 DB 落库一致：发含关键词消息 -> SearchMessages 命中 -> 直查 ES
+func TestScenario_MessageSearchES(t *testing.T) {
+	a, b, convID := setupConv(t)
+
+	// 发含特殊关键词的消息
+	keyword := "sc12-es-keyword-unique-" + client.NewRequestID()[:8]
+	sendReq := &transmite.SendMessageReq{
+		RequestId: client.NewRequestID(), ConversationId: convID,
+		Content: &msg.MessageContent{
+			Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "hello " + keyword + " world"}},
+		},
+		ClientMsgId: client.NewRequestID(),
+	}
+	sendRsp := &transmite.SendMessageRsp{}
+	require.NoError(t, a.DoAuth("/service/transmite/send", sendReq, sendRsp))
+	require.True(t, sendRsp.Header.Success)
+	msgID := sendRsp.Message.MessageId
+
+	// 等待 ES 索引（异步，需 polling）
+	time.Sleep(3 * time.Second)
+
+	// SearchMessages 命中
+	searchReq := &msg.SearchMessagesReq{
+		RequestId: client.NewRequestID(), ConversationId: convID,
+		Keyword: keyword, Limit: 10,
+	}
+	searchRsp := &msg.SearchMessagesRsp{}
+	require.NoError(t, b.DoAuth("/service/message/search", searchReq, searchRsp))
+	require.True(t, searchRsp.Header.Success, "搜索应成功")
+	require.Len(t, searchRsp.Messages, 1, "搜索应命中 1 条")
+	assert.Equal(t, msgID, searchRsp.Messages[0].MessageId, "搜索结果 message_id 不符")
+
+	// 数据一致性 - ES 索引存在
+	ESVerifier := verify.NewESVerifier(Cfg.Database.ESURL)
+	ESVerifier.MessageIndexed(t, msgID, keyword)
+
+	// 数据一致性 - DB 也有该消息
+	DBVerifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer DBVerifier.Close()
+	DBVerifier.MessageExists(t, msgID)
+}
