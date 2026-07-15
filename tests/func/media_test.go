@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -480,4 +481,23 @@ func TestFN_MD_ObjectKeyLayout(t *testing.T) {
 	avatarRecord := dbV.MediaFile(t, avatarID)
 	assert.Equal(t, "chatnow-media-public", avatarRecord.Bucket)
 	assert.Equal(t, "avatar/"+avatarHex, avatarRecord.ObjectKey)
+}
+
+// FN-MD-20 | P1 | security | 声明 JPEG、实际 PE magic 的文件最终被隔离且不可下载
+func TestFN_MD_MagicMismatchQuarantined(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := append([]byte{'M', 'Z', 0, 0, 0, 0, 0, 0}, []byte(client.NewRequestID())...)
+	fileID := fixture.UploadFile(t, authed, content, "image/jpeg")
+
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	require.Eventually(t, func() bool {
+		return dbV.MediaFile(t, fileID).Status == 3
+	}, 90*time.Second, 2*time.Second, "magic mismatch 文件应进入 QUARANTINED")
+
+	req := &media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: fileID}
+	rsp := &media.ApplyDownloadRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_download", req, rsp))
+	assert.False(t, rsp.Header.Success)
+	assert.Equal(t, int32(5008), rsp.Header.ErrorCode)
 }
