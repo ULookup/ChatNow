@@ -143,7 +143,9 @@ shard，不存在全局热锁。
 
 ### 5.1 Key 与 TTL
 
-- L2 key：`im:user:{uid}`。
+- L2 key：`im:user:{bucket}:uid`，`bucket = fnv1a(uid) % 64`。花括号中的
+  bucket 是 Redis Cluster hash tag，使批量读取可按 64 个虚拟分片分组，同时避免
+  全部 UserInfo 聚集到一个 slot。
 - L2 value：序列化的 UserInfo protobuf。
 - L2 正值 TTL：1 小时，±20% 抖动。
 - L1 正值 TTL：45 秒，±20% 抖动。
@@ -170,7 +172,8 @@ Transmite 当前热路径只读取发送者一个 uid，不额外引入没有消
 批量读取场景：
 
 - standalone Redis 使用 MGET 和 pipeline。
-- Redis Cluster 按 hash slot 分组，每组使用同 slot pipeline，避免 CROSSSLOT。
+- Redis Cluster 按 64 个虚拟 bucket 分组；每组 key 共享 hash tag，可安全使用
+  MGET/pipeline，避免 CROSSSLOT，也不依赖 redis-plus-plus 的内部连接池。
 - 返回命中 map 和 miss uid 列表，调用方可用现有批量 RPC 一次回源。
 - 单次批量大小限制为 2000，与最大群规模一致。
 
