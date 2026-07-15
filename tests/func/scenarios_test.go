@@ -693,3 +693,35 @@ func TestScenario_MessageRecallVisibility(t *testing.T) {
 	defer dbV.Close()
 	dbV.MessageStatus(t, msgID, 1)
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 11: Token Refresh Flow（Token 刷新链路）
+// SC-11 | P1 | scenario | token 刷新链路：篡改 token 失败 -> RefreshToken -> 新 token 可用
+// ---------------------------------------------------------------------------
+
+func TestScenario_TokenRefreshFlow(t *testing.T) {
+	user, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	validToken := user.AccessToken
+	refreshToken := user.RefreshToken
+
+	// Step 1: 篡改 access_token，调 API 失败
+	user.AccessToken = "tampered.invalid.token.payload"
+	profileReq := &identity.GetProfileReq{RequestId: client.NewRequestID()}
+	err := user.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{})
+	assert.Error(t, err, "篡改 token 后应鉴权失败")
+
+	// Step 2: 用 refresh_token 刷新
+	refreshReq := &identity.RefreshTokenReq{
+		RequestId: client.NewRequestID(), RefreshToken: refreshToken,
+	}
+	refreshRsp := &identity.RefreshTokenRsp{}
+	require.NoError(t, user.DoNoAuth("/service/identity/refresh_token", refreshReq, refreshRsp))
+	require.True(t, refreshRsp.Header.Success)
+	require.NotEmpty(t, refreshRsp.Tokens.AccessToken)
+	require.NotEqual(t, validToken, refreshRsp.Tokens.AccessToken, "新 token 应不同于旧 token")
+
+	// Step 3: 新 token 调 API 成功
+	user.AccessToken = refreshRsp.Tokens.AccessToken
+	require.NoError(t, user.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}),
+		"新 token 应能调 API")
+}
