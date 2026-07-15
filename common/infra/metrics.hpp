@@ -19,6 +19,10 @@ inline bvar::Adder<long> g_local_cache_expired_total("local_cache_expired_total"
 inline bvar::Adder<long> g_members_cache_stale_l1_total("members_cache_stale_l1_total");
 inline bvar::Adder<long> g_members_cache_snapshot_race_total("members_cache_snapshot_race_total");
 inline bvar::Adder<long> g_members_cache_version_conflict_total("members_cache_version_conflict_total");
+inline bvar::Adder<long> g_redis_circuit_open_total("redis_circuit_open_total");
+inline bvar::Adder<long> g_redis_circuit_rejected_total("redis_circuit_rejected_total");
+inline bvar::Adder<long> g_redis_circuit_recovered_total("redis_circuit_recovered_total");
+inline bvar::Adder<long> g_redis_call_failure_total("redis_call_failure_total");
 
 template <typename V>
 inline typename ::chatnow::LocalCache<V>::MetricsSink local_cache_metrics_sink() {

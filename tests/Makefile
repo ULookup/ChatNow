@@ -1,4 +1,4 @@
-.PHONY: proto test-bvt test-func test-scenario test-perf clean deps
+.PHONY: proto test-bvt test-func test-reliability test-scenario test-perf clean deps
 
 # Generate Go protobuf from proto/ definitions
 # NOTE: protoc-gen-go >= v1.35 requires go_package option or M flags to derive
@@ -34,6 +34,10 @@ test-bvt:
 # Run all functional tests (L2)
 test-func:
 	go test -tags=func ./func/... -v -count=1
+
+# Run reliability/chaos tests (requires the Docker Compose stack)
+test-reliability:
+	go test -tags=reliability ./reliability/... -v -count=1 -timeout=180s
 
 # Run scenario tests only (L3)
 test-scenario:

@@ -23,16 +23,90 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <type_traits>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "infra/logger.hpp"
+#include "infra/metrics.hpp"
 #include "utils/cache_version.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/redis_circuit_breaker.hpp"
 #include "utils/redis_keys.hpp"
 
 namespace chatnow
 {
+
+class RedisPipeline {
+public:
+    RedisPipeline(sw::redis::Pipeline pipeline,
+                  RedisCircuitBreaker &breaker,
+                  RedisCircuitBreaker::Permit permit)
+        : _pipeline(std::move(pipeline)), _breaker(&breaker), _permit(permit) {}
+
+    RedisPipeline(RedisPipeline &&) = default;
+    RedisPipeline &operator=(RedisPipeline &&) = default;
+    RedisPipeline(const RedisPipeline &) = delete;
+    RedisPipeline &operator=(const RedisPipeline &) = delete;
+
+    template <typename... Args>
+    RedisPipeline &hset(Args &&...args) {
+        _pipeline.hset(std::forward<Args>(args)...);
+        return *this;
+    }
+
+    template <typename... Args>
+    RedisPipeline &set(Args &&...args) {
+        _pipeline.set(std::forward<Args>(args)...);
+        return *this;
+    }
+
+    template <typename... Args>
+    RedisPipeline &expire(Args &&...args) {
+        _pipeline.expire(std::forward<Args>(args)...);
+        return *this;
+    }
+
+    template <typename... Args>
+    RedisPipeline &get(Args &&...args) {
+        _pipeline.get(std::forward<Args>(args)...);
+        return *this;
+    }
+
+    sw::redis::QueuedReplies exec() {
+        try {
+            auto replies = _pipeline.exec();
+            _breaker->on_success(_permit);
+            if (_permit.probe) metrics::g_redis_circuit_recovered_total << 1;
+            return replies;
+        } catch (const sw::redis::TimeoutError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_();
+            throw;
+        }
+    }
+
+private:
+    void record_connection_failure_() noexcept {
+        metrics::g_redis_call_failure_total << 1;
+        const auto previous = _breaker->state();
+        _breaker->on_connection_failure(_permit);
+        if (previous != RedisCircuitBreaker::State::Open &&
+            _breaker->state() == RedisCircuitBreaker::State::Open) {
+            metrics::g_redis_circuit_open_total << 1;
+        }
+    }
+
+    sw::redis::Pipeline _pipeline;
+    RedisCircuitBreaker *_breaker;
+    RedisCircuitBreaker::Permit _permit;
+};
 
 // 类型擦除 Redis 客户端适配器：根据持有的后端类型透明转发到
 // sw::redis::Redis（单机）或 sw::redis::RedisCluster。所有 cache 类
@@ -48,117 +122,132 @@ public:
 
     // --- String commands ---
     sw::redis::OptionalString get(const std::string &key) {
-        return _rc ? _rc->get(key) : _r->get(key);
+        return guarded_([&] { return _rc ? _rc->get(key) : _r->get(key); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::seconds ttl = std::chrono::seconds(0)) {
-        return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::milliseconds ttl) {
-        return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::seconds ttl, sw::redis::UpdateType type) {
-        return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::milliseconds ttl, sw::redis::UpdateType type) {
-        return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type); });
     }
     long long del(const std::string &key) {
-        return _rc ? _rc->del(key) : _r->del(key);
+        return guarded_([&] { return _rc ? _rc->del(key) : _r->del(key); });
     }
     void expire(const std::string &key, std::chrono::seconds ttl) {
-        _rc ? _rc->expire(key, ttl) : _r->expire(key, ttl);
+        guarded_void_([&] { _rc ? _rc->expire(key, ttl) : _r->expire(key, ttl); });
     }
     long long incr(const std::string &key) {
-        return _rc ? _rc->incr(key) : _r->incr(key);
+        return guarded_([&] { return _rc ? _rc->incr(key) : _r->incr(key); });
     }
 
     // --- Set commands ---
     template <typename T>
     long long sadd(const std::string &key, const T &member) {
-        return _rc ? _rc->sadd(key, member) : _r->sadd(key, member);
+        return guarded_([&] { return _rc ? _rc->sadd(key, member) : _r->sadd(key, member); });
     }
     template <typename It>
     long long sadd(const std::string &key, It first, It last) {
-        return _rc ? _rc->sadd(key, first, last) : _r->sadd(key, first, last);
+        return guarded_([&] { return _rc ? _rc->sadd(key, first, last) : _r->sadd(key, first, last); });
     }
     template <typename Out>
     void smembers(const std::string &key, Out out) {
-        _rc ? _rc->smembers(key, out) : _r->smembers(key, out);
+        guarded_void_([&] { _rc ? _rc->smembers(key, out) : _r->smembers(key, out); });
     }
     template <typename T>
     long long srem(const std::string &key, const T &member) {
-        return _rc ? _rc->srem(key, member) : _r->srem(key, member);
+        return guarded_([&] { return _rc ? _rc->srem(key, member) : _r->srem(key, member); });
     }
     long long scard(const std::string &key) {
-        return _rc ? _rc->scard(key) : _r->scard(key);
+        return guarded_([&] { return _rc ? _rc->scard(key) : _r->scard(key); });
     }
 
     // --- Hash commands ---
     long long hset(const std::string &key, const std::string &field, const std::string &val) {
-        return _rc ? _rc->hset(key, field, val) : _r->hset(key, field, val);
+        return guarded_([&] { return _rc ? _rc->hset(key, field, val) : _r->hset(key, field, val); });
     }
     sw::redis::OptionalString hget(const std::string &key, const std::string &field) {
-        return _rc ? _rc->hget(key, field) : _r->hget(key, field);
+        return guarded_([&] { return _rc ? _rc->hget(key, field) : _r->hget(key, field); });
     }
     long long hdel(const std::string &key, const std::string &field) {
-        return _rc ? _rc->hdel(key, field) : _r->hdel(key, field);
+        return guarded_([&] { return _rc ? _rc->hdel(key, field) : _r->hdel(key, field); });
     }
     template <typename Out>
     void hkeys(const std::string &key, Out out) {
-        _rc ? _rc->hkeys(key, out) : _r->hkeys(key, out);
+        guarded_void_([&] { _rc ? _rc->hkeys(key, out) : _r->hkeys(key, out); });
     }
     template <typename Out>
     void hgetall(const std::string &key, Out out) {
-        _rc ? _rc->hgetall(key, out) : _r->hgetall(key, out);
+        guarded_void_([&] { _rc ? _rc->hgetall(key, out) : _r->hgetall(key, out); });
     }
     long long hlen(const std::string &key) {
-        return _rc ? _rc->hlen(key) : _r->hlen(key);
+        return guarded_([&] { return _rc ? _rc->hlen(key) : _r->hlen(key); });
     }
 
     // --- Sorted Set commands ---
     long long zadd(const std::string &key, const std::string &member, double score) {
-        return _rc ? _rc->zadd(key, member, score) : _r->zadd(key, member, score);
+        return guarded_([&] { return _rc ? _rc->zadd(key, member, score) : _r->zadd(key, member, score); });
     }
     long long zadd(const std::string &key, const std::string &member, double score,
                    sw::redis::UpdateType type) {
-        return _rc ? _rc->zadd(key, member, score, type) : _r->zadd(key, member, score, type);
+        return guarded_([&] { return _rc ? _rc->zadd(key, member, score, type) : _r->zadd(key, member, score, type); });
     }
     long long zrem(const std::string &key, const std::string &member) {
-        return _rc ? _rc->zrem(key, member) : _r->zrem(key, member);
+        return guarded_([&] { return _rc ? _rc->zrem(key, member) : _r->zrem(key, member); });
     }
     template <typename Out>
     void zrange(const std::string &key, long long start, long long stop, Out out) {
-        _rc ? _rc->zrange(key, start, stop, out) : _r->zrange(key, start, stop, out);
+        guarded_void_([&] { _rc ? _rc->zrange(key, start, stop, out) : _r->zrange(key, start, stop, out); });
     }
     template <typename Out>
     void zrangebyscore(const std::string &key,
                        const sw::redis::BoundedInterval<double> &interval,
                        const sw::redis::LimitOptions &opts, Out out) {
-        _rc ? _rc->zrangebyscore(key, interval, opts, out)
-            : _r->zrangebyscore(key, interval, opts, out);
+        guarded_void_([&] {
+            _rc ? _rc->zrangebyscore(key, interval, opts, out)
+                : _r->zrangebyscore(key, interval, opts, out);
+        });
     }
 
     // --- Lua scripting ---
     template <typename Ret, typename KeyIt, typename ArgIt>
     Ret eval(const std::string &script, KeyIt key_first, KeyIt key_last,
              ArgIt arg_first, ArgIt arg_last) {
-        return _rc ? _rc->eval<Ret>(script, key_first, key_last, arg_first, arg_last)
-                   : _r->eval<Ret>(script, key_first, key_last, arg_first, arg_last);
+        return guarded_([&]() -> Ret {
+            return _rc ? _rc->eval<Ret>(script, key_first, key_last, arg_first, arg_last)
+                       : _r->eval<Ret>(script, key_first, key_last, arg_first, arg_last);
+        });
     }
     template <typename KeyIt, typename ArgIt, typename Out>
     void eval(const std::string &script, KeyIt key_first, KeyIt key_last,
               ArgIt arg_first, ArgIt arg_last, Out out) {
-        _rc ? _rc->eval(script, key_first, key_last, arg_first, arg_last, out)
-            : _r->eval(script, key_first, key_last, arg_first, arg_last, out);
+        guarded_void_([&] {
+            _rc ? _rc->eval(script, key_first, key_last, arg_first, arg_last, out)
+                : _r->eval(script, key_first, key_last, arg_first, arg_last, out);
+        });
     }
 
     // --- Pipeline ---
-    auto pipeline(const sw::redis::StringView &hash_tag = {}) {
-        return _rc ? _rc->pipeline(hash_tag) : _r->pipeline();
+    RedisPipeline pipeline(const sw::redis::StringView &hash_tag = {}) {
+        auto permit = before_call_();
+        return RedisPipeline(_rc ? _rc->pipeline(hash_tag) : _r->pipeline(),
+                             _breaker, permit);
+    }
+
+    template <typename Input, typename Output>
+    void mget(Input first, Input last, Output out) {
+        guarded_void_([&] {
+            _rc ? _rc->mget(first, last, out) : _r->mget(first, last, out);
+        });
     }
 
     // --- SCAN ---
@@ -166,27 +255,88 @@ public:
     // 续扫，因此任意 cursor 都重启一次完整扫描并返回 0。
     template <typename Out>
     long long scan(long long cursor, const std::string &pattern, long long count, Out out) {
-        if (_rc) {
-            if (cursor != 0) {
-                LOG_WARN("RedisCluster scan cannot resume cursor {}; restarting full cluster scan", cursor);
-            }
-            _rc->for_each([&](sw::redis::Redis &r) {
-                long long cur = 0;
-                while (true) {
-                    cur = r.scan(cur, pattern, count, out);
-                    if (cur == 0) break;
+        return guarded_([&]() -> long long {
+            if (_rc) {
+                if (cursor != 0) {
+                    LOG_WARN("RedisCluster scan cannot resume cursor {}; restarting full cluster scan", cursor);
                 }
-            });
-            return 0;
-        }
-        return _r->scan(cursor, pattern, count, out);
+                _rc->for_each([&](sw::redis::Redis &r) {
+                    long long cur = 0;
+                    while (true) {
+                        cur = r.scan(cur, pattern, count, out);
+                        if (cur == 0) break;
+                    }
+                });
+                return 0;
+            }
+            return static_cast<long long>(_r->scan(cursor, pattern, count, out));
+        });
     }
 
     bool is_cluster() const { return _rc != nullptr; }
 
 private:
+    RedisCircuitBreaker::Permit before_call_() {
+        try {
+            return _breaker.before_call();
+        } catch (const RedisCircuitOpen &) {
+            metrics::g_redis_circuit_rejected_total << 1;
+            throw;
+        }
+    }
+
+    void record_connection_failure_(RedisCircuitBreaker::Permit permit) noexcept {
+        metrics::g_redis_call_failure_total << 1;
+        const auto previous = _breaker.state();
+        _breaker.on_connection_failure(permit);
+        if (previous != RedisCircuitBreaker::State::Open &&
+            _breaker.state() == RedisCircuitBreaker::State::Open) {
+            metrics::g_redis_circuit_open_total << 1;
+        }
+    }
+
+    template <class F>
+    auto guarded_(F &&fn) -> std::invoke_result_t<F> {
+        auto permit = before_call_();
+        try {
+            auto result = std::forward<F>(fn)();
+            _breaker.on_success(permit);
+            if (permit.probe) metrics::g_redis_circuit_recovered_total << 1;
+            return result;
+        } catch (const sw::redis::TimeoutError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_(permit);
+            throw;
+        }
+    }
+
+    template <class F>
+    void guarded_void_(F &&fn) {
+        auto permit = before_call_();
+        try {
+            std::forward<F>(fn)();
+            _breaker.on_success(permit);
+            if (permit.probe) metrics::g_redis_circuit_recovered_total << 1;
+        } catch (const sw::redis::TimeoutError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_(permit);
+            throw;
+        }
+    }
+
     std::shared_ptr<sw::redis::Redis> _r;
     std::shared_ptr<sw::redis::RedisCluster> _rc;
+    RedisCircuitBreaker _breaker;
 };
 
 /* brief: 默认 TTL 常量 */
@@ -215,12 +365,12 @@ public:
         copts.port = port;
         copts.db = db;
         copts.keep_alive = keep_alive;
-        copts.connect_timeout = std::chrono::milliseconds(2000);
-        copts.socket_timeout  = std::chrono::milliseconds(2000);
+        copts.connect_timeout = std::chrono::milliseconds(50);
+        copts.socket_timeout  = std::chrono::milliseconds(50);
 
         sw::redis::ConnectionPoolOptions popts;
         popts.size              = pool_size;
-        popts.wait_timeout      = std::chrono::milliseconds(500);
+        popts.wait_timeout      = std::chrono::milliseconds(20);
         popts.connection_lifetime = std::chrono::minutes(30);
 
         return std::make_shared<sw::redis::Redis>(copts, popts);
@@ -255,7 +405,7 @@ public:
 
         sw::redis::ConnectionPoolOptions popts;
         popts.size = pool_size;
-        popts.wait_timeout = std::chrono::milliseconds(500);
+        popts.wait_timeout = std::chrono::milliseconds(20);
         popts.connection_lifetime = std::chrono::minutes(30);
 
         // 逐个尝试种子节点，直到成功连接（sw::redis++ RedisCluster 仅需一个种子
@@ -267,8 +417,8 @@ public:
                 copts.host = host;
                 copts.port = port;
                 copts.keep_alive = keep_alive;
-                copts.connect_timeout = std::chrono::milliseconds(2000);
-                copts.socket_timeout  = std::chrono::milliseconds(2000);
+                copts.connect_timeout = std::chrono::milliseconds(50);
+                copts.socket_timeout  = std::chrono::milliseconds(50);
 
                 auto cluster = std::make_shared<sw::redis::RedisCluster>(copts, popts);
                 // 验证连接可用（立即尝试一个轻量命令）
