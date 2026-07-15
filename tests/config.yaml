@@ -19,3 +19,8 @@ database:
 
 log:
   level: "debug"
+
+infra:
+  redis_container: "redis-node1"
+  compose_dir: ".."
+  transmite_vars: "http://localhost:10004"
