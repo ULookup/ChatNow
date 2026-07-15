@@ -743,21 +743,23 @@ func TestScenario_MessageSearchES(t *testing.T) {
 	sendRsp := &transmite.SendMessageRsp{}
 	require.NoError(t, a.DoAuth("/service/transmite/send", sendReq, sendRsp))
 	require.True(t, sendRsp.Header.Success)
+	require.NotNil(t, sendRsp.Message)
 	msgID := sendRsp.Message.MessageId
 
-	// 等待 ES 索引（异步，需 polling）
-	time.Sleep(3 * time.Second)
-
-	// SearchMessages 命中
+	// 轮询等待 ES 索引，并验证 SearchMessages 命中
 	searchReq := &msg.SearchMessagesReq{
 		RequestId: client.NewRequestID(), ConversationId: convID,
 		Keyword: keyword, Limit: 10,
 	}
-	searchRsp := &msg.SearchMessagesRsp{}
-	require.NoError(t, b.DoAuth("/service/message/search", searchReq, searchRsp))
-	require.True(t, searchRsp.Header.Success, "搜索应成功")
-	require.Len(t, searchRsp.Messages, 1, "搜索应命中 1 条")
-	assert.Equal(t, msgID, searchRsp.Messages[0].MessageId, "搜索结果 message_id 不符")
+	require.Eventually(t, func() bool {
+		searchRsp := &msg.SearchMessagesRsp{}
+		if err := b.DoAuth("/service/message/search", searchReq, searchRsp); err != nil {
+			return false
+		}
+		return searchRsp.GetHeader().GetSuccess() &&
+			len(searchRsp.GetMessages()) == 1 &&
+			searchRsp.GetMessages()[0].GetMessageId() == msgID
+	}, 10*time.Second, time.Second, "10s 内搜索应成功并唯一命中 message_id=%d", msgID)
 
 	// 数据一致性 - ES 索引存在
 	ESVerifier := verify.NewESVerifier(Cfg.Database.ESURL)
