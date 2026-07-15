@@ -576,3 +576,57 @@ func TestScenario_LargeGroupFanOut(t *testing.T) {
 	defer dbV.Close()
 	dbV.MessageCount(t, convID, 1)
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 9: Unread Count Consistency（未读数跨服务一致性）
+// SC-09 | P0 | scenario | 未读数跨服务跨设备一致：发消息 unread+1 -> UpdateReadAck -> unread=0
+// ---------------------------------------------------------------------------
+
+func TestScenario_UnreadCountConsistency(t *testing.T) {
+	a, b, convID := setupConv(t) // MakeFriends
+
+	// Step 1: a 发 3 条消息
+	var lastSeq uint64
+	for i := 0; i < 3; i++ {
+		_, lastSeq = sendMsg(t, a, convID, "sc09-unread-"+string(rune('0'+i)))
+	}
+
+	// Step 2: b ListConversations，验证 unread_count=3
+	listReq := &conversation.ListConversationsReq{RequestId: client.NewRequestID()}
+	listRsp := &conversation.ListConversationsRsp{}
+	require.NoError(t, b.DoAuth("/service/conversation/list", listReq, listRsp))
+	var bobConv *conversation.Conversation
+	for _, c := range listRsp.Conversations {
+		if c.ConversationId == convID {
+			bobConv = c
+			break
+		}
+	}
+	require.NotNil(t, bobConv, "b 的会话列表中应包含 convID")
+	assert.Equal(t, uint64(3), bobConv.Self.UnreadCount, "b 未读数应为 3")
+
+	// Step 3: 数据一致性 - DB unread_count=3
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	dbV.UnreadCount(t, b.UserID, convID, 3)
+
+	// Step 4: b UpdateReadAck（读到最后一条 seq）
+	ackReq := &msg.UpdateReadAckReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		SeqId:          lastSeq,
+	}
+	require.NoError(t, b.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
+
+	// Step 5: b 再次 ListConversations，unread_count=0
+	listRsp2 := &conversation.ListConversationsRsp{}
+	require.NoError(t, b.DoAuth("/service/conversation/list", listReq, listRsp2))
+	for _, c := range listRsp2.Conversations {
+		if c.ConversationId == convID {
+			assert.Equal(t, uint64(0), c.Self.UnreadCount, "read ack 后未读数应清零")
+		}
+	}
+
+	// Step 6: 数据一致性 - DB unread_count=0
+	dbV.UnreadCount(t, b.UserID, convID, 0)
+}
