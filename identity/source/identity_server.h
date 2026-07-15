@@ -39,6 +39,7 @@ public:
     IdentityServiceImpl(const std::shared_ptr<odb::core::database> &mysql_client,
                         const std::shared_ptr<elasticlient::Client> &es_client,
                         const RedisClient::ptr &redis_client,
+                        const UserInfoCache::ptr &user_info_cache,
                         const std::shared_ptr<MailClient> &mail_client,
                         const std::shared_ptr<auth::JwtCodec> &jwt_codec,
                         const std::shared_ptr<auth::JwtStore> &jwt_store,
@@ -48,6 +49,7 @@ public:
         : _mysql_user(std::make_shared<UserTable>(mysql_client)),
           _es_user(std::make_shared<ESUser>(es_client)),
           _redis_codes(std::make_shared<Codes>(redis_client)),
+          _user_info_cache(user_info_cache),
           _mail_client(mail_client),
           _jwt_codec(jwt_codec),
           _jwt_store(jwt_store),
@@ -478,6 +480,9 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "db update failed");
             }
+            if (_user_info_cache) {
+                (void)_user_info_cache->invalidate(auth.user_id);
+            }
             std::string ob_payload = outbox_payload_upsert_(
                 user->user_id(), user->mail(), user->phone(),
                 user->nickname(), user->description(),
@@ -532,6 +537,7 @@ private:
     std::shared_ptr<UserTable>          _mysql_user;
     std::shared_ptr<ESUser>             _es_user;
     std::shared_ptr<Codes>              _redis_codes;
+    UserInfoCache::ptr                  _user_info_cache;
     std::shared_ptr<MailClient>         _mail_client;
     std::shared_ptr<auth::JwtCodec>     _jwt_codec;
     std::shared_ptr<auth::JwtStore>     _jwt_store;
@@ -701,6 +707,7 @@ public:
             _redis_client = std::make_shared<RedisClient>(redis);
         }
         _es_outbox = std::make_shared<ESOutbox>(_redis_client, key::es_outbox_key("identity"));
+        _user_info_cache = std::make_shared<UserInfoCache>(_redis_client);
     }
     /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
     void make_jwt_object(const std::string &auth_config_path) {
@@ -781,7 +788,7 @@ public:
 
         auto es_reaper_client = ESClientFactory::create(_es_hosts);
         IdentityServiceImpl *identity_service = new IdentityServiceImpl(
-            _mysql_client, _es_client, _redis_client, _mail_client,
+            _mysql_client, _es_client, _redis_client, _user_info_cache, _mail_client,
             _jwt_codec, _jwt_store, _media_public_url_prefix,
             _es_outbox, es_reaper_client);
         _service_impl = identity_service;
@@ -826,6 +833,7 @@ private:
     std::shared_ptr<odb::core::database> _mysql_client;
     std::string _redis_seeds;
     RedisClient::ptr _redis_client;
+    UserInfoCache::ptr _user_info_cache;
     std::shared_ptr<MailClient> _mail_client;
 
     std::string _media_public_url_prefix;

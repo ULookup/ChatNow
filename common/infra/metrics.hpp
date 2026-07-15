@@ -19,6 +19,10 @@ inline bvar::Adder<long> g_local_cache_expired_total("local_cache_expired_total"
 inline bvar::Adder<long> g_members_cache_stale_l1_total("members_cache_stale_l1_total");
 inline bvar::Adder<long> g_members_cache_snapshot_race_total("members_cache_snapshot_race_total");
 inline bvar::Adder<long> g_members_cache_version_conflict_total("members_cache_version_conflict_total");
+inline bvar::Adder<long> g_user_info_l1_hit_total("user_info_l1_hit_total");
+inline bvar::Adder<long> g_user_info_l2_hit_total("user_info_l2_hit_total");
+inline bvar::Adder<long> g_user_info_rpc_total("user_info_rpc_total");
+inline bvar::Adder<long> g_user_info_invalidation_failure_total("user_info_invalidation_failure_total");
 inline bvar::Adder<long> g_redis_circuit_open_total("redis_circuit_open_total");
 inline bvar::Adder<long> g_redis_circuit_rejected_total("redis_circuit_rejected_total");
 inline bvar::Adder<long> g_redis_circuit_recovered_total("redis_circuit_recovered_total");

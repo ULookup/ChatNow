@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <cstdint>
 #include <string>
 
 namespace chatnow::key {
@@ -63,6 +64,24 @@ inline std::string local_members_cache_key(const std::string &cid) {
 
 inline std::string local_user_info_cache_key(const std::string &uid) {
     return std::string("local:user:") + hash_tag(uid);
+}
+
+inline uint32_t fnv1a_32(const std::string &value) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : value) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+inline uint32_t user_info_bucket(const std::string &uid) {
+    return fnv1a_32(uid) % 64u;
+}
+
+inline std::string user_info_key(const std::string &uid) {
+    auto bucket = std::to_string(user_info_bucket(uid));
+    return "im:user:{" + bucket + "}:" + uid;
 }
 
 inline std::string local_route_cache_key(const std::string &uid) {

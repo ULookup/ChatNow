@@ -20,7 +20,9 @@
 #include <sw/redis++/redis++.h>
 #include <sw/redis++/redis_cluster.h>
 #include <chrono>
+#include <algorithm>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -473,6 +475,7 @@ inline constexpr std::chrono::seconds kCodeTtl(60 * 5);             // 验证码
 inline constexpr std::chrono::seconds kLastMsgTtl(24 * 3600);       // 最近消息预览 24 小时
 inline constexpr std::chrono::seconds kReadAckTtl(24 * 3600);       // 已读暂存 24 小时
 inline constexpr std::chrono::seconds kMembersTtl(30 * 60);         // 成员缓存 30 分钟
+inline constexpr std::chrono::seconds kUserInfoTtl(3600);           // 用户资料缓存 1 小时
 inline constexpr std::chrono::seconds kOnlineTtl(30);               // 在线路由 30s（依赖心跳续期，每 heartbeat 刷新）
 inline constexpr std::chrono::seconds kUnackedTtl(7 * 24 * 3600);   // 未 ack 重传缓冲 7 天
 
@@ -1066,6 +1069,118 @@ private:
         "redis.call('DEL', KEYS[2]) "
         "return 1";
 
+    RedisClient::ptr _c;
+};
+
+// =============================================================================
+// 用户资料缓存（value 为序列化 UserInfo protobuf；DAO 不依赖 protobuf 类型）
+// =============================================================================
+
+class UserInfoCache
+{
+public:
+    using ptr = std::shared_ptr<UserInfoCache>;
+
+    struct BatchResult {
+        std::unordered_map<std::string, std::string> hits;
+        std::vector<std::string> misses;
+    };
+
+    explicit UserInfoCache(const RedisClient::ptr &c) : _c(c) {}
+
+    std::optional<std::string> get(const std::string &uid) {
+        if (!_c) return std::nullopt;
+        try {
+            auto value = _c->get(key::user_info_key(uid));
+            if (!value) return std::nullopt;
+            return *value;
+        } catch (const std::exception &e) {
+            LOG_ERROR("UserInfoCache.get 失败 {}: {}", uid, e.what());
+            return std::nullopt;
+        }
+    }
+
+    BatchResult batch_get(const std::vector<std::string> &uids) {
+        BatchResult result;
+        const size_t count = std::min<size_t>(uids.size(), 2000);
+        if (!_c) {
+            result.misses.assign(uids.begin(), uids.begin() + count);
+            return result;
+        }
+        std::unordered_map<uint32_t, std::vector<std::pair<std::string, std::string>>> groups;
+        for (size_t i = 0; i < count; ++i) {
+            groups[key::user_info_bucket(uids[i])].push_back(
+                {uids[i], key::user_info_key(uids[i])});
+        }
+        for (const auto &[bucket, entries] : groups) {
+            std::vector<std::string> keys;
+            keys.reserve(entries.size());
+            for (const auto &entry : entries) keys.push_back(entry.second);
+            try {
+                std::vector<sw::redis::OptionalString> values;
+                values.reserve(keys.size());
+                _c->mget(keys.begin(), keys.end(), std::back_inserter(values));
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (i < values.size() && values[i]) result.hits[entries[i].first] = *values[i];
+                    else result.misses.push_back(entries[i].first);
+                }
+            } catch (const std::exception &e) {
+                LOG_ERROR("UserInfoCache.batch_get bucket={} 失败: {}", bucket, e.what());
+                for (const auto &entry : entries) result.misses.push_back(entry.first);
+            }
+        }
+        return result;
+    }
+
+    void set(const std::string &uid, const std::string &serialized) {
+        if (!_c) return;
+        const auto ttl = serialized.empty()
+            ? randomized_ttl(std::chrono::seconds(5))
+            : randomized_ttl(kUserInfoTtl);
+        try {
+            _c->set(key::user_info_key(uid), serialized, ttl);
+        } catch (const std::exception &e) {
+            LOG_ERROR("UserInfoCache.set 失败 {}: {}", uid, e.what());
+        }
+    }
+
+    void batch_set(const std::unordered_map<std::string, std::string> &values) {
+        if (!_c) return;
+        std::unordered_map<uint32_t, std::vector<std::pair<std::string, std::string>>> groups;
+        size_t count = 0;
+        for (const auto &entry : values) {
+            if (count++ >= 2000) break;
+            groups[key::user_info_bucket(entry.first)].push_back(entry);
+        }
+        for (const auto &[bucket, entries] : groups) {
+            try {
+                auto pipe = _c->pipeline(std::to_string(bucket));
+                for (const auto &[uid, serialized] : entries) {
+                    const auto ttl = serialized.empty()
+                        ? randomized_ttl(std::chrono::seconds(5))
+                        : randomized_ttl(kUserInfoTtl);
+                    pipe.set(key::user_info_key(uid), serialized, ttl);
+                }
+                pipe.exec();
+            } catch (const std::exception &e) {
+                LOG_ERROR("UserInfoCache.batch_set bucket={} 失败: {}", bucket, e.what());
+            }
+        }
+    }
+
+    bool invalidate(const std::string &uid) noexcept {
+        if (!_c) return true;
+        try {
+            _c->del(key::user_info_key(uid));
+            return true;
+        } catch (const std::exception &e) {
+            LOG_ERROR("UserInfoCache.invalidate 失败 {}: {}", uid, e.what());
+            metrics::g_user_info_invalidation_failure_total << 1;
+            return false;
+        }
+    }
+
+private:
     RedisClient::ptr _c;
 };
 
