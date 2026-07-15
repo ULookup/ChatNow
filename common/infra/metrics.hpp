@@ -27,6 +27,7 @@ inline bvar::Adder<long> g_redis_circuit_open_total("redis_circuit_open_total");
 inline bvar::Adder<long> g_redis_circuit_rejected_total("redis_circuit_rejected_total");
 inline bvar::Adder<long> g_redis_circuit_recovered_total("redis_circuit_recovered_total");
 inline bvar::Adder<long> g_redis_call_failure_total("redis_call_failure_total");
+inline bvar::Adder<long> g_redis_mutex_retry_total("redis_mutex_retry_total");
 inline bvar::Adder<long> g_rate_limit_local_fallback_total("rate_limit_local_fallback_total");
 inline bvar::Adder<long> g_rate_limit_local_rejected_total("rate_limit_local_rejected_total");
 

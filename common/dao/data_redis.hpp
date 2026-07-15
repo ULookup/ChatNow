@@ -578,7 +578,7 @@ public:
     /* brief: 写入登录态，TTL 7 天 */
     void append(const std::string &ssid, const std::string &uid,
                 std::chrono::seconds ttl = kSessionTtl) {
-        try { _c->set(key::kSession + ssid, uid, ttl); }
+        try { _c->set(key::kSession + ssid, uid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Session.append 失败 {}: {}", ssid, e.what()); }
     }
     void remove(const std::string &ssid) {
@@ -591,7 +591,7 @@ public:
     }
     /* brief: 续期（每次心跳调用） */
     void touch(const std::string &ssid, std::chrono::seconds ttl = kSessionTtl) {
-        try { _c->expire(key::kSession + ssid, ttl); }
+        try { _c->expire(key::kSession + ssid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Session.touch 失败 {}: {}", ssid, e.what()); }
     }
 private:
@@ -604,7 +604,7 @@ public:
     using ptr = std::shared_ptr<Status>;
     Status(const RedisClient::ptr &c) : _c(c) {}
     void append(const std::string &uid, std::chrono::seconds ttl = kStatusTtl) {
-        try { _c->set(key::kStatus + uid, "1", ttl); }
+        try { _c->set(key::kStatus + uid, "1", randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Status.append 失败 {}: {}", uid, e.what()); }
     }
     void remove(const std::string &uid) {
@@ -617,7 +617,7 @@ public:
     }
     /* brief: 心跳续期 */
     void touch(const std::string &uid, std::chrono::seconds ttl = kStatusTtl) {
-        try { _c->expire(key::kStatus + uid, ttl); }
+        try { _c->expire(key::kStatus + uid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Status.touch 失败 {}: {}", uid, e.what()); }
     }
 private:
@@ -631,7 +631,7 @@ public:
     Codes(const RedisClient::ptr &c) : _c(c) {}
     void append(const std::string &cid, const std::string &code,
                 std::chrono::seconds ttl = kCodeTtl) {
-        try { _c->set(key::kVerifyCode + cid, code, ttl); }
+        try { _c->set(key::kVerifyCode + cid, code, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Codes.append 失败 {}: {}", cid, e.what()); }
     }
     void remove(const std::string &cid) {
@@ -776,8 +776,17 @@ public:
 
     /* brief: 用户某设备上线 */
     void add(const std::string &uid, const std::string &device_id) {
-        try { _c->sadd(key::kDeviceSet + uid, device_id); }
+        try {
+            const std::string k = key::kDeviceSet + uid;
+            _c->sadd(k, device_id);
+            _c->expire(k, randomized_ttl(kSessionTtl));
+        }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.add 失败 {}-{}: {}", uid, device_id, e.what()); }
+    }
+    /* brief: 用户设备活动时续期 */
+    void touch(const std::string &uid, std::chrono::seconds ttl = kSessionTtl) {
+        try { _c->expire(key::kDeviceSet + uid, randomized_ttl(ttl)); }
+        catch(std::exception &e) { LOG_ERROR("DeviceSet.touch 失败 {}: {}", uid, e.what()); }
     }
     /* brief: 用户某设备下线 */
     void remove(const std::string &uid, const std::string &device_id) {
@@ -1192,7 +1201,7 @@ class OnlineRoute
 {
 public:
     using ptr = std::shared_ptr<OnlineRoute>;
-    OnlineRoute(const RedisClient::ptr &c) : _c(c) {}
+    OnlineRoute(const RedisClient::ptr &c) : _c(c), _devices(c) {}
 
     /* brief: 设备上线 — HSET uid did instance */
     void bind(const std::string &uid, const std::string &device_id,
@@ -1202,19 +1211,26 @@ public:
             std::string k = key::online_key(uid);
             _c->hset(k, device_id, push_instance);
             _c->expire(k, randomized_ttl(ttl));
+            _devices.add(uid, device_id);
         } catch(std::exception &e) {
             LOG_ERROR("OnlineRoute.bind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what());
         }
     }
     /* brief: 心跳续期（续整个 uid 的 HASH） */
     void touch(const std::string &uid, std::chrono::seconds ttl = kOnlineTtl) {
-        try { _c->expire(key::online_key(uid), randomized_ttl(ttl)); }
+        try {
+            _c->expire(key::online_key(uid), randomized_ttl(ttl));
+            _devices.touch(uid);
+        }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
     }
     /* brief: 设备下线 — HDEL uid did */
     void unbind(const std::string &uid, const std::string &device_id,
                 const std::string &push_instance) {
-        try { _c->hdel(key::online_key(uid), device_id); }
+        try {
+            _c->hdel(key::online_key(uid), device_id);
+            _devices.remove(uid, device_id);
+        }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what()); }
     }
     /* brief: 取用户所有在线设备 → device_id 列表 */
@@ -1252,6 +1268,7 @@ public:
     }
 private:
     RedisClient::ptr _c;
+    DeviceSet _devices;
 };
 
 // =============================================================================
@@ -1484,8 +1501,9 @@ public:
             std::string member = std::to_string(user_seq) + ":" + payload_b64;
             _c->zadd(k, member, static_cast<double>(score_ts));
             _c->hset(ik, std::to_string(user_seq), payload_b64);
-            _c->expire(k, ttl);
-            _c->expire(ik, ttl);
+            const auto effective_ttl = randomized_ttl(ttl);
+            _c->expire(k, effective_ttl);
+            _c->expire(ik, effective_ttl);
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.push 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
         }
@@ -1549,8 +1567,9 @@ public:
                     _c->zadd(k, member, static_cast<double>(now), sw::redis::UpdateType::EXIST);
                 }
             }
-            _c->expire(k, ttl);
-            _c->expire(ik, ttl);
+            const auto effective_ttl = randomized_ttl(ttl);
+            _c->expire(k, effective_ttl);
+            _c->expire(ik, effective_ttl);
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.bump_score 失败 {}-{}-{}: {}", uid, device_id, e.what());
         }

@@ -3,14 +3,24 @@
 package func_test
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
 	"chatnow-tests/pkg/client"
@@ -69,6 +79,174 @@ func sendCacheTestMessageResult(user *client.HTTPClient, convID, suffix string) 
 func sendCacheTestMessage(t testing.TB, user *client.HTTPClient, convID, suffix string) {
 	t.Helper()
 	require.NoError(t, sendCacheTestMessageResult(user, convID, suffix))
+}
+
+type cacheTestWebSocket struct {
+	conn net.Conn
+}
+
+func openCacheTestWebSocket(t testing.TB) *cacheTestWebSocket {
+	t.Helper()
+	addr := HTTP.Config().Target.WebsocketAddr
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+
+	keyBytes := make([]byte, 16)
+	_, err = rand.Read(keyBytes)
+	require.NoError(t, err)
+	key := base64.StdEncoding.EncodeToString(keyBytes)
+	req := &http.Request{
+		Method: "GET",
+		URL:    &url.URL{Scheme: "http", Host: addr, Path: "/"},
+		Host:   addr,
+		Header: http.Header{
+			"Connection":            {"Upgrade"},
+			"Upgrade":               {"websocket"},
+			"Sec-Websocket-Key":     {key},
+			"Sec-Websocket-Version": {"13"},
+		},
+	}
+	require.NoError(t, req.Write(conn))
+	rsp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusSwitchingProtocols, rsp.StatusCode)
+	require.NoError(t, conn.SetDeadline(time.Time{}))
+	return &cacheTestWebSocket{conn: conn}
+}
+
+func (ws *cacheTestWebSocket) close() {
+	_ = ws.conn.Close()
+}
+
+func (ws *cacheTestWebSocket) writeBinary(t testing.TB, payload []byte) {
+	t.Helper()
+	frame := []byte{0x82}
+	switch {
+	case len(payload) < 126:
+		frame = append(frame, 0x80|byte(len(payload)))
+	case len(payload) <= 65535:
+		frame = append(frame, 0x80|126, byte(len(payload)>>8), byte(len(payload)))
+	default:
+		frame = append(frame, 0x80|127)
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(payload)))
+		frame = append(frame, size[:]...)
+	}
+	var mask [4]byte
+	_, err := rand.Read(mask[:])
+	require.NoError(t, err)
+	frame = append(frame, mask[:]...)
+	for i, b := range payload {
+		frame = append(frame, b^mask[i%len(mask)])
+	}
+	_, err = ws.conn.Write(frame)
+	require.NoError(t, err)
+}
+
+func appendProtoString(dst []byte, field protowire.Number, value string) []byte {
+	dst = protowire.AppendTag(dst, field, protowire.BytesType)
+	return protowire.AppendString(dst, value)
+}
+
+func cacheTestAuthNotify(accessToken, deviceID string) []byte {
+	var auth []byte
+	auth = appendProtoString(auth, 1, accessToken)
+	auth = appendProtoString(auth, 2, deviceID)
+	var notify []byte
+	notify = protowire.AppendTag(notify, 2, protowire.VarintType)
+	notify = protowire.AppendVarint(notify, 49) // CLIENT_AUTH
+	notify = protowire.AppendTag(notify, 10, protowire.BytesType)
+	return protowire.AppendBytes(notify, auth)
+}
+
+func cacheTestHeartbeatNotify(uid string) []byte {
+	var heartbeat []byte
+	heartbeat = appendProtoString(heartbeat, 1, uid)
+	var notify []byte
+	notify = protowire.AppendTag(notify, 2, protowire.VarintType)
+	notify = protowire.AppendVarint(notify, 51) // CLIENT_HEARTBEAT
+	notify = protowire.AppendTag(notify, 9, protowire.BytesType)
+	return protowire.AppendBytes(notify, heartbeat)
+}
+
+func requireJitteredRedisTTL(t testing.TB, key string, base time.Duration) time.Duration {
+	t.Helper()
+	ttl := verify.RedisTTL(t, key)
+	require.GreaterOrEqual(t, ttl, base*8/10-2*time.Second, key)
+	require.LessOrEqual(t, ttl, base*12/10+2*time.Second, key)
+	return ttl
+}
+
+// FN-CA-04 | cache expirations are bounded, varied, and paired unacked keys
+// share one randomized sample per push operation.
+func TestFN_CA_TTLJitter(t *testing.T) {
+	const sampleCount = 20
+	const sessionTTL = 7 * 24 * time.Hour
+	deviceTTLs := make(map[time.Duration]struct{}, sampleCount)
+	connections := make([]*cacheTestWebSocket, 0, sampleCount)
+	t.Cleanup(func() {
+		for _, ws := range connections {
+			ws.close()
+		}
+	})
+
+	for i := 0; i < sampleCount; i++ {
+		user, _, _ := fixture.RegisterAndLogin(t, HTTP)
+		ws := openCacheTestWebSocket(t)
+		connections = append(connections, ws)
+		ws.writeBinary(t, cacheTestAuthNotify(user.AccessToken, "default_device"))
+		ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
+
+		deviceKey := "im:dev:" + user.UserID
+		require.Eventually(t, func() bool {
+			return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
+		}, 5*time.Second, 50*time.Millisecond, deviceKey)
+		deviceTTLs[requireJitteredRedisTTL(t, deviceKey, sessionTTL)] = struct{}{}
+	}
+	require.GreaterOrEqual(t, len(deviceTTLs), 2,
+		"20 independently randomized device TTLs must not all be identical")
+
+	if os.Getenv("SMTP_HOST") != "" {
+		codeRsp := &identity.SendVerifyCodeRsp{}
+		require.NoError(t, HTTP.DoNoAuth("/service/identity/send_verify_code",
+			&identity.SendVerifyCodeReq{
+				RequestId: client.NewRequestID(),
+				Destination: &identity.SendVerifyCodeReq_Email{
+					Email: fmt.Sprintf("ttl-%s@example.com", strings.ToLower(client.NewRequestID())),
+				},
+			}, codeRsp))
+		require.True(t, codeRsp.GetHeader().GetSuccess(), codeRsp.GetHeader().GetErrorMessage())
+		requireJitteredRedisTTL(t, "im:code:"+codeRsp.GetVerifyCodeId(), 5*time.Minute)
+	}
+
+	sender, recipient, convID := fixture.MakeFriends(t, HTTP)
+	recipientWS := openCacheTestWebSocket(t)
+	connections = append(connections, recipientWS)
+	recipientWS.writeBinary(t, cacheTestAuthNotify(recipient.AccessToken, "default_device"))
+	deviceKey := "im:dev:" + recipient.UserID
+	require.Eventually(t, func() bool {
+		return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
+	}, 5*time.Second, 50*time.Millisecond, deviceKey)
+
+	sendCacheTestMessage(t, sender, convID, "ttl-jitter")
+	unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
+	unackedIndexKey := fmt.Sprintf("im:unack:idx:{%s:default_device}", recipient.UserID)
+	require.Eventually(t, func() bool {
+		return verify.RedisCLI(t, "EXISTS", unackedKey) == "1" &&
+			verify.RedisCLI(t, "EXISTS", unackedIndexKey) == "1"
+	}, 10*time.Second, 100*time.Millisecond, unackedKey)
+	unackedTTL := requireJitteredRedisTTL(t, unackedKey, sessionTTL)
+	indexTTL := requireJitteredRedisTTL(t, unackedIndexKey, sessionTTL)
+	require.LessOrEqual(t, absDuration(unackedTTL-indexTTL), time.Second,
+		"paired unacked keys must share one TTL sample")
+}
+
+func absDuration(value time.Duration) time.Duration {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 // FN-CA-05 | healthy Redis applies the distributed message rate limit.
