@@ -521,3 +521,58 @@ func TestScenario_MultiDeviceLogin(t *testing.T) {
 	// 设备 B 仍可调 API
 	require.NoError(t, deviceB.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}))
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 8: Large Group Fan-Out (Read Diffusion)
+// SC-08 | P1 | scenario | 200+ 成员群发消息，验证读扩散（仅写主表，各成员 sync 收到）
+// ---------------------------------------------------------------------------
+
+func TestScenario_LargeGroupFanOut(t *testing.T) {
+	owner, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	// 批量注册 200 成员（分批避免单次请求过大）
+	members := make([]*client.HTTPClient, 0, 200)
+	for i := 0; i < 200; i++ {
+		m, _, _ := fixture.RegisterAndLogin(t, HTTP)
+		members = append(members, m)
+	}
+
+	// 建群（200 成员 + owner = 201）
+	convID := fixture.CreateGroupWithMembers(t, owner, members, "sc08-large-group-200")
+
+	// owner 发消息
+	sendReq := &transmite.SendMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		Content: &msg.MessageContent{
+			Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "sc08-large-group-msg"}},
+		},
+		ClientMsgId: client.NewRequestID(),
+	}
+	sendRsp := &transmite.SendMessageRsp{}
+	require.NoError(t, owner.DoAuth("/service/transmite/send", sendReq, sendRsp))
+	require.True(t, sendRsp.Header.Success)
+	msgID := sendRsp.Message.MessageId
+
+	// 抽样 10 个成员验证 sync 收到
+	for i := 0; i < 10; i++ {
+		idx := i * 20 // 每隔 20 个抽一个
+		syncReq := &msg.SyncMessagesReq{
+			RequestId:      client.NewRequestID(),
+			ConversationId: convID,
+			AfterSeq:       0,
+			Limit:          10,
+		}
+		syncRsp := &msg.SyncMessagesRsp{}
+		require.NoError(t, members[idx].DoAuth("/service/message/sync", syncReq, syncRsp),
+			"成员 %d sync 失败", idx)
+		require.NotEmpty(t, syncRsp.Messages, "成员 %d 应收到消息", idx)
+		assert.Equal(t, msgID, syncRsp.Messages[0].MessageId, "成员 %d 收到的 message_id 不符", idx)
+	}
+
+	// 数据一致性 - 读扩散：message 表仅 1 条
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	dbV.MessageCount(t, convID, 1)
+}
