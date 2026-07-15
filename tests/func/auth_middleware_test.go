@@ -89,6 +89,7 @@ func TestFN_AM_GatewayTraceHeader(t *testing.T) {
 		"/service/identity/get_profile", req, rsp, authed.AccessToken, traceID,
 	)
 	require.NoError(t, err)
+	require.NotNil(t, rsp.Header)
 	require.True(t, rsp.Header.Success)
 	assert.Equal(t, traceID, headers.Get("X-Trace-Id"))
 }

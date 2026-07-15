@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
 	"regexp"
 	"strings"
@@ -173,19 +174,21 @@ func TestFN_MD_InitMultipart_Success(t *testing.T) {
 	assert.Greater(t, rsp.RecommendedPartSizeBytes, int32(0))
 }
 
-// FN-MD-05 | P1 | error path | 超配额文件拒绝 InitMultipart
+// FN-MD-05 | P1 | error path | 超 MIME 文件大小限制拒绝 InitMultipart
 func TestFN_MD_InitMultipart_FileTooLarge(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	content := []byte("too-large")
 	hash := sha256.Sum256(content)
 	req := &media.InitMultipartReq{
-		RequestId: client.NewRequestID(), FileName: "huge.bin",
-		FileSize: 30 * 1024 * 1024, MimeType: "application/octet-stream",
+		RequestId: client.NewRequestID(), FileName: "huge.jpg",
+		FileSize: 30 * 1024 * 1024, MimeType: "image/jpeg",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	rsp := &media.InitMultipartRsp{}
 	require.NoError(t, authed.DoAuth("/service/media/init_multipart", req, rsp))
-	assert.False(t, rsp.Header.Success)
+	require.NotNil(t, rsp.Header)
+	require.False(t, rsp.Header.Success)
+	require.Equal(t, int32(5001), rsp.Header.ErrorCode)
 }
 
 // FN-MD-06 | P0 | happy path | ApplyPartUpload 获取分片 presigned URL
@@ -251,7 +254,8 @@ func TestFN_MD_CompleteMultipart_MissingPart(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/apply_part_upload", partReq, partRsp))
 
 	partContent := content[:2*1024*1024]
-	httpReq, _ := http.NewRequest("PUT", partRsp.UploadUrl, bytes.NewReader(partContent))
+	httpReq, err := http.NewRequest("PUT", partRsp.UploadUrl, bytes.NewReader(partContent))
+	require.NoError(t, err)
 	putResp, err := http.DefaultClient.Do(httpReq)
 	require.NoError(t, err)
 	putResp.Body.Close()
@@ -393,11 +397,12 @@ func TestFN_MD_ApplyDownload_Success(t *testing.T) {
 	resp, err := http.Get(dlRsp.DownloadUrl)
 	require.NoError(t, err)
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
 	assert.Equal(t, content, body, "下载内容与上传不一致")
 }
 
-// FN-MD-15 | P1 | error path | 非上传者下载私聊文件（权限检查）
+// FN-MD-15 | P1 | service contract | Media 服务持有 file_id 即允许已认证用户申请下载
 func TestFN_MD_ApplyDownload_OtherUser(t *testing.T) {
 	uploader, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	other, _, _ := fixture.RegisterAndLogin(t, HTTP)
@@ -408,15 +413,9 @@ func TestFN_MD_ApplyDownload_OtherUser(t *testing.T) {
 	dlReq := &media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: fileID}
 	dlRsp := &media.ApplyDownloadRsp{}
 	require.NoError(t, other.DoAuth("/service/media/apply_download", dlReq, dlRsp))
-	// 私聊文件应拒绝非上传者（或非会话成员）下载
-	// 注：具体行为取决于服务端 ACL，此处宽松断言
-	if dlRsp.Header.Success {
-		// 如果服务端允许下载（public bucket 或无 ACL），则内容应一致
-		_ = dlRsp.DownloadUrl
-	} else {
-		// 如果拒绝，错误码应为权限相关
-		assert.False(t, dlRsp.Header.Success)
-	}
+	require.NotNil(t, dlRsp.Header)
+	require.True(t, dlRsp.Header.Success)
+	require.NotEmpty(t, dlRsp.DownloadUrl)
 }
 
 // FN-MD-16 | P1 | happy path | 上传后查询 file_info
@@ -463,6 +462,11 @@ func TestFN_MD_ObjectKeyLayout(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
 	defer dbV.Close()
+	minioV := verify.NewMinIOVerifier(
+		os.Getenv("MINIO_ENDPOINT"),
+		os.Getenv("MINIO_ACCESS_KEY"),
+		os.Getenv("MINIO_SECRET_KEY"),
+	)
 
 	chatContent := []byte("fn-md-19-chat-" + client.NewRequestID())
 	chatHash := sha256.Sum256(chatContent)
@@ -473,6 +477,7 @@ func TestFN_MD_ObjectKeyLayout(t *testing.T) {
 	assert.Regexp(t, regexp.MustCompile(`^chat/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-f]{2}/[0-9a-f]{64}$`), chatRecord.ObjectKey)
 	assert.Equal(t, chatHex, path.Base(chatRecord.ObjectKey))
 	assert.True(t, strings.Contains(chatRecord.ObjectKey, "/"+chatHex[:2]+"/"))
+	minioV.ObjectContent(t, chatRecord.Bucket, chatRecord.ObjectKey, chatContent)
 
 	avatarContent := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, []byte(client.NewRequestID())...)
 	avatarHash := sha256.Sum256(avatarContent)
@@ -481,6 +486,7 @@ func TestFN_MD_ObjectKeyLayout(t *testing.T) {
 	avatarRecord := dbV.MediaFile(t, avatarID)
 	assert.Equal(t, "chatnow-media-public", avatarRecord.Bucket)
 	assert.Equal(t, "avatar/"+avatarHex, avatarRecord.ObjectKey)
+	minioV.ObjectContent(t, avatarRecord.Bucket, avatarRecord.ObjectKey, avatarContent)
 }
 
 // FN-MD-20 | P1 | security | 声明 JPEG、实际 PE magic 的文件最终被隔离且不可下载

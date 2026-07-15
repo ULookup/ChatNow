@@ -350,7 +350,8 @@ func TestScenario_MediaUploadFullFlow(t *testing.T) {
 	require.NotEmpty(t, fileID)
 
 	// Step 2: PUT 到 MinIO presigned URL
-	httpReq, _ := http.NewRequest("PUT", applyRsp.UploadUrl, bytes.NewReader(content))
+	httpReq, err := http.NewRequest("PUT", applyRsp.UploadUrl, bytes.NewReader(content))
+	require.NoError(t, err)
 	if applyRsp.Headers != nil {
 		for k, v := range applyRsp.Headers {
 			httpReq.Header.Set(k, v)
@@ -374,7 +375,8 @@ func TestScenario_MediaUploadFullFlow(t *testing.T) {
 	require.True(t, dlRsp.Header.Success)
 	dlResp, err := http.Get(dlRsp.DownloadUrl)
 	require.NoError(t, err)
-	body, _ := io.ReadAll(dlResp.Body)
+	body, err := io.ReadAll(dlResp.Body)
+	require.NoError(t, err)
 	dlResp.Body.Close()
 	assert.Equal(t, content, body, "下载内容与上传不一致")
 
@@ -405,7 +407,8 @@ func TestScenario_MediaUploadFullFlow(t *testing.T) {
 	require.True(t, bigDlRsp.Header.Success)
 	bigResp, err := http.Get(bigDlRsp.DownloadUrl)
 	require.NoError(t, err)
-	bigBody, _ := io.ReadAll(bigResp.Body)
+	bigBody, err := io.ReadAll(bigResp.Body)
+	require.NoError(t, err)
 	bigResp.Body.Close()
 	assert.Equal(t, bigContent, bigBody, "大文件下载内容不一致")
 

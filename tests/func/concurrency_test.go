@@ -80,6 +80,7 @@ func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
 
 	var wg sync.WaitGroup
 	msgIDs := make([]int64, 10)
+	seqIDs := make([]uint64, 10)
 	errs := make([]error, 10)
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
@@ -96,9 +97,23 @@ func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
 			}
 			rsp := &transmite.SendMessageRsp{}
 			errs[idx] = a.DoAuth("/service/transmite/send", req, rsp)
-			if errs[idx] == nil && rsp.Header.Success {
-				msgIDs[idx] = rsp.Message.MessageId
+			if errs[idx] != nil {
+				return
 			}
+			if rsp.Header == nil {
+				errs[idx] = fmt.Errorf("send response missing header")
+				return
+			}
+			if !rsp.Header.Success {
+				errs[idx] = fmt.Errorf("send failed: code=%d message=%s", rsp.Header.ErrorCode, rsp.Header.ErrorMessage)
+				return
+			}
+			if rsp.Message == nil {
+				errs[idx] = fmt.Errorf("successful send response missing message")
+				return
+			}
+			msgIDs[idx] = rsp.Message.MessageId
+			seqIDs[idx] = rsp.Message.SeqId
 		}(i)
 	}
 	wg.Wait()
@@ -107,13 +122,21 @@ func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
 	for i, err := range errs {
 		require.NoError(t, err, "goroutine %d failed", i)
 		require.NotZero(t, msgIDs[i], "goroutine %d 未返回 message_id", i)
+		require.NotZero(t, seqIDs[i], "goroutine %d 未返回 seq_id", i)
 	}
 
-	// 验证 message_id 不重复（等价于 seq 不重复）
-	idSet := make(map[int64]bool)
+	// 验证 message_id 和 seq_id 均不重复
+	messageIDSet := make(map[int64]struct{})
 	for _, id := range msgIDs {
-		require.False(t, idSet[id], "message_id %d 重复", id)
-		idSet[id] = true
+		_, exists := messageIDSet[id]
+		require.False(t, exists, "message_id %d 重复", id)
+		messageIDSet[id] = struct{}{}
+	}
+	seqIDSet := make(map[uint64]struct{})
+	for _, seqID := range seqIDs {
+		_, exists := seqIDSet[seqID]
+		require.False(t, exists, "seq_id %d 重复", seqID)
+		seqIDSet[seqID] = struct{}{}
 	}
 
 	// 直查 DB：message 表有 10 条
@@ -243,6 +266,7 @@ func TestFN_CC_Reaction_SameEmoji(t *testing.T) {
 	var wg sync.WaitGroup
 	emoji := "👍"
 	errs := make([]error, len(reactioners))
+	responses := make([]*msg.AddReactionRsp, len(reactioners))
 	for i, u := range reactioners {
 		wg.Add(1)
 		go func(idx int, user *client.HTTPClient) {
@@ -253,19 +277,32 @@ func TestFN_CC_Reaction_SameEmoji(t *testing.T) {
 				Emoji:     emoji,
 			}
 			rsp := &msg.AddReactionRsp{}
+			responses[idx] = rsp
 			errs[idx] = user.DoAuth("/service/message/add_reaction", req, rsp)
 		}(i, u)
 	}
 	wg.Wait()
 
-	// 验证无致命错误（并发 add_reaction 可能有一方失败或幂等成功）
+	// 两个用户的 reaction 都应成功
 	for i, err := range errs {
-		assert.NoError(t, err, "goroutine %d add_reaction 出错", i)
+		require.NoError(t, err, "goroutine %d add_reaction 出错", i)
+		require.NotNil(t, responses[i], "goroutine %d response 为空", i)
+		require.NotNil(t, responses[i].Header, "goroutine %d response header 为空", i)
+		require.True(t, responses[i].Header.Success, "goroutine %d add_reaction 失败: %s", i,
+			responses[i].Header.ErrorMessage)
 	}
 
-	// 验证 reaction 查询成功（幂等：相同 emoji 不重复计数或 count=1）
+	// 验证同一 emoji 聚合为一组，包含两个用户
 	getReq := &msg.GetReactionsReq{RequestId: client.NewRequestID(), MessageId: mID}
 	getRsp := &msg.GetReactionsRsp{}
 	require.NoError(t, a.DoAuth("/service/message/get_reactions", getReq, getRsp))
+	require.NotNil(t, getRsp.Header)
 	require.True(t, getRsp.Header.Success, "get_reactions 失败: %s", getRsp.Header.ErrorMessage)
+	require.Len(t, getRsp.Reactions, 1, "目标 emoji 应仅有一个 reaction group")
+	reaction := getRsp.Reactions[0]
+	require.NotNil(t, reaction)
+	require.Equal(t, emoji, reaction.Emoji)
+	require.Equal(t, int32(2), reaction.Count)
+	require.ElementsMatch(t, []string{a.UserID, b.UserID}, reaction.RecentUserIds)
+	require.True(t, reaction.SelfReacted, "用户 a 查询时应标记 self_reacted")
 }

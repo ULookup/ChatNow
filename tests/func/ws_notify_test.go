@@ -27,9 +27,6 @@ func TestFN_WS_NewMessageNotify(t *testing.T) {
 	wsBob := fixture.ConnectWS(t, bob)
 	defer wsBob.Close()
 
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
-
 	// alice 发消息
 	fixture.SendTextMessage(t, alice, convID, "ws-notify-test")
 
@@ -56,9 +53,6 @@ func TestFN_WS_FriendRequestNotify(t *testing.T) {
 	// bob 建立 WS 连接
 	wsBob := fixture.ConnectWS(t, bob)
 	defer wsBob.Close()
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
 
 	// alice 向 bob 发好友申请
 	sendReq := &relationship.SendFriendReq{
@@ -88,12 +82,8 @@ func TestFN_WS_FriendAcceptNotify(t *testing.T) {
 	b, _, _ := fixture.RegisterAndLogin(t, HTTP)
 
 	// a 连接 WS
-	wsA, err := client.NewWSClient(HTTP.Config(), a.AccessToken, a.UserID, "device-ws03")
-	require.NoError(t, err)
+	wsA := fixture.ConnectWSWithDeviceID(t, a, "device-ws03")
 	defer wsA.Close()
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
 
 	// a 发好友申请
 	sendReq := &relationship.SendFriendReq{
@@ -116,7 +106,7 @@ func TestFN_WS_FriendAcceptNotify(t *testing.T) {
 	// a 应收到 FRIEND_ADD_PROCESS_NOTIFY（好友申请被处理）
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = wsA.WaitForNotify(ctx, int32(push.NotifyType_FRIEND_ADD_PROCESS_NOTIFY))
+	_, err := wsA.WaitForNotify(ctx, int32(push.NotifyType_FRIEND_ADD_PROCESS_NOTIFY))
 	require.NoError(t, err, "a 应收到好友通过通知")
 }
 
@@ -126,12 +116,8 @@ func TestFN_WS_ConversationCreateNotify(t *testing.T) {
 	member, _, _ := fixture.RegisterAndLogin(t, HTTP)
 
 	// member 连接 WS
-	wsMember, err := client.NewWSClient(HTTP.Config(), member.AccessToken, member.UserID, "device-ws04")
-	require.NoError(t, err)
+	wsMember := fixture.ConnectWSWithDeviceID(t, member, "device-ws04")
 	defer wsMember.Close()
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
 
 	// owner 建群（含 member）
 	convID := fixture.CreateGroupWithMembers(t, owner, []*client.HTTPClient{member}, "ws-conv-create-test")
@@ -139,7 +125,7 @@ func TestFN_WS_ConversationCreateNotify(t *testing.T) {
 	// member 应收到 CONVERSATION_CREATE_NOTIFY
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = wsMember.WaitForNotify(ctx, int32(push.NotifyType_CONVERSATION_CREATE_NOTIFY))
+	_, err := wsMember.WaitForNotify(ctx, int32(push.NotifyType_CONVERSATION_CREATE_NOTIFY))
 	require.NoError(t, err, "member 应收到会话创建通知")
 	_ = convID
 }
@@ -150,12 +136,8 @@ func TestFN_WS_PresenceChangeNotify(t *testing.T) {
 	target, _, _ := fixture.RegisterAndLogin(t, HTTP)
 
 	// subscriber 连接 WS
-	wsSub, err := client.NewWSClient(HTTP.Config(), subscriber.AccessToken, subscriber.UserID, "device-ws05-sub")
-	require.NoError(t, err)
+	wsSub := fixture.ConnectWSWithDeviceID(t, subscriber, "device-ws05-sub")
 	defer wsSub.Close()
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
 
 	// subscriber 订阅 target
 	subReq := &presence.SubscribeReq{
@@ -165,14 +147,13 @@ func TestFN_WS_PresenceChangeNotify(t *testing.T) {
 	require.NoError(t, subscriber.DoAuth("/service/presence/subscribe", subReq, &presence.SubscribeRsp{}))
 
 	// target 上线
-	wsTarget, err := client.NewWSClient(HTTP.Config(), target.AccessToken, target.UserID, "device-ws05-target")
-	require.NoError(t, err)
+	wsTarget := fixture.ConnectWSWithDeviceID(t, target, "device-ws05-target")
 	defer wsTarget.Close()
 
 	// subscriber 应收到 PRESENCE_CHANGE_NOTIFY
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = wsSub.WaitForNotify(ctx, int32(push.NotifyType_PRESENCE_CHANGE_NOTIFY))
+	_, err := wsSub.WaitForNotify(ctx, int32(push.NotifyType_PRESENCE_CHANGE_NOTIFY))
 	require.NoError(t, err, "subscriber 应收到 target 上线通知")
 }
 
@@ -181,11 +162,7 @@ func TestFN_WS_Reconnect(t *testing.T) {
 	a, b, convID := setupConv(t)
 
 	// b 连接 WS
-	wsB1, err := client.NewWSClient(HTTP.Config(), b.AccessToken, b.UserID, "device-ws06-1")
-	require.NoError(t, err)
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
+	wsB1 := fixture.ConnectWSWithDeviceID(t, b, "device-ws06-1")
 
 	// b 断开 WS
 	require.NoError(t, wsB1.Close())
@@ -194,12 +171,8 @@ func TestFN_WS_Reconnect(t *testing.T) {
 	sendMsg(t, a, convID, "msg-while-b-disconnected")
 
 	// b 重连 WS
-	wsB2, err := client.NewWSClient(HTTP.Config(), b.AccessToken, b.UserID, "device-ws06-2")
-	require.NoError(t, err)
+	wsB2 := fixture.ConnectWSWithDeviceID(t, b, "device-ws06-2")
 	defer wsB2.Close()
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
 
 	// b 通过 sync 补齐遗漏消息
 	syncReq := &msg.SyncMessagesReq{
@@ -218,12 +191,8 @@ func TestFN_WS_TypingNotify(t *testing.T) {
 	a, b, convID := setupConv(t)
 
 	// b 连接 WS
-	wsB, err := client.NewWSClient(HTTP.Config(), b.AccessToken, b.UserID, "device-ws07")
-	require.NoError(t, err)
+	wsB := fixture.ConnectWSWithDeviceID(t, b, "device-ws07")
 	defer wsB.Close()
-
-	// 等待 WS 鉴权完成
-	time.Sleep(500 * time.Millisecond)
 
 	// a 发 typing
 	typingReq := &presence.TypingReq{
@@ -236,7 +205,7 @@ func TestFN_WS_TypingNotify(t *testing.T) {
 	// b 应收到 TYPING_NOTIFY
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err = wsB.WaitForNotify(ctx, int32(push.NotifyType_TYPING_NOTIFY))
+	_, err := wsB.WaitForNotify(ctx, int32(push.NotifyType_TYPING_NOTIFY))
 	require.NoError(t, err, "b 应收到 typing 通知")
 }
 
@@ -245,7 +214,6 @@ func TestFN_WS_MQTracePropagation(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
 	wsBob := fixture.ConnectWS(t, bob)
 	defer wsBob.Close()
-	time.Sleep(500 * time.Millisecond)
 
 	traceID := "fedcba9876543210fedcba9876543210"
 	req := &transmite.SendMessageReq{
@@ -260,6 +228,7 @@ func TestFN_WS_MQTracePropagation(t *testing.T) {
 	rsp := &transmite.SendMessageRsp{}
 	_, err := alice.DoWithTrace("/service/transmite/send", req, rsp, alice.AccessToken, traceID)
 	require.NoError(t, err)
+	require.NotNil(t, rsp.Header)
 	require.True(t, rsp.Header.Success)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
