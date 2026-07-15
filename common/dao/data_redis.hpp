@@ -23,7 +23,9 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
@@ -38,74 +40,155 @@
 namespace chatnow
 {
 
+inline bool is_redis_pool_wait_error(const sw::redis::Error &error) noexcept {
+    if (typeid(error) != typeid(sw::redis::Error)) return false;
+    constexpr std::string_view prefix = "Failed to fetch a connection in ";
+    constexpr std::string_view suffix = " milliseconds";
+    const std::string_view message(error.what());
+    if (message.size() <= prefix.size() + suffix.size() ||
+        message.compare(0, prefix.size(), prefix) != 0 ||
+        message.compare(message.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        return false;
+    }
+    const auto milliseconds = message.substr(
+        prefix.size(), message.size() - prefix.size() - suffix.size());
+    for (const char ch : milliseconds) {
+        if (ch < '0' || ch > '9') return false;
+    }
+    return true;
+}
+
 class RedisPipeline {
 public:
     RedisPipeline(sw::redis::Pipeline pipeline,
-                  RedisCircuitBreaker &breaker,
+                  std::shared_ptr<RedisCircuitBreaker> breaker,
                   RedisCircuitBreaker::Permit permit)
-        : _pipeline(std::move(pipeline)), _breaker(&breaker), _permit(permit) {}
+        : _pipeline(std::move(pipeline)), _breaker(std::move(breaker)), _permit(permit) {}
 
-    RedisPipeline(RedisPipeline &&) = default;
-    RedisPipeline &operator=(RedisPipeline &&) = default;
+    RedisPipeline(RedisPipeline &&other) noexcept
+        : _pipeline(std::move(other._pipeline)),
+          _breaker(std::move(other._breaker)),
+          _permit(other._permit),
+          _settled(other._settled) {
+        other._settled = true;
+    }
+    RedisPipeline &operator=(RedisPipeline &&other) noexcept {
+        if (this == &other) return *this;
+        abandon_();
+        _pipeline = std::move(other._pipeline);
+        _breaker = std::move(other._breaker);
+        _permit = other._permit;
+        _settled = other._settled;
+        other._settled = true;
+        return *this;
+    }
     RedisPipeline(const RedisPipeline &) = delete;
     RedisPipeline &operator=(const RedisPipeline &) = delete;
+    ~RedisPipeline() { abandon_(); }
 
     template <typename... Args>
     RedisPipeline &hset(Args &&...args) {
-        _pipeline.hset(std::forward<Args>(args)...);
-        return *this;
+        return queue_([&] { _pipeline.hset(std::forward<Args>(args)...); });
     }
 
     template <typename... Args>
     RedisPipeline &set(Args &&...args) {
-        _pipeline.set(std::forward<Args>(args)...);
-        return *this;
+        return queue_([&] { _pipeline.set(std::forward<Args>(args)...); });
     }
 
     template <typename... Args>
     RedisPipeline &expire(Args &&...args) {
-        _pipeline.expire(std::forward<Args>(args)...);
-        return *this;
+        return queue_([&] { _pipeline.expire(std::forward<Args>(args)...); });
     }
 
     template <typename... Args>
     RedisPipeline &get(Args &&...args) {
-        _pipeline.get(std::forward<Args>(args)...);
-        return *this;
+        return queue_([&] { _pipeline.get(std::forward<Args>(args)...); });
     }
 
     sw::redis::QueuedReplies exec() {
+        if (_settled) {
+            throw std::logic_error("RedisPipeline::exec called more than once");
+        }
         try {
             auto replies = _pipeline.exec();
-            _breaker->on_success(_permit);
-            if (_permit.probe) metrics::g_redis_circuit_recovered_total << 1;
+            settle_success_();
             return replies;
-        } catch (const sw::redis::TimeoutError &) {
-            record_connection_failure_();
-            throw;
         } catch (const sw::redis::IoError &) {
             record_connection_failure_();
             throw;
         } catch (const sw::redis::ClosedError &) {
             record_connection_failure_();
             throw;
+        } catch (const sw::redis::ReplyError &) {
+            settle_success_();
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_();
+            else abandon_();
+            throw;
+        } catch (...) {
+            abandon_();
+            throw;
         }
     }
 
 private:
-    void record_connection_failure_() noexcept {
-        metrics::g_redis_call_failure_total << 1;
-        const auto previous = _breaker->state();
-        _breaker->on_connection_failure(_permit);
-        if (previous != RedisCircuitBreaker::State::Open &&
-            _breaker->state() == RedisCircuitBreaker::State::Open) {
-            metrics::g_redis_circuit_open_total << 1;
+    template <typename F>
+    RedisPipeline &queue_(F &&queue_command) {
+        if (_settled) {
+            throw std::logic_error("RedisPipeline command queued after settlement");
+        }
+        try {
+            std::forward<F>(queue_command)();
+            return *this;
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_();
+            else abandon_();
+            throw;
+        } catch (...) {
+            abandon_();
+            throw;
         }
     }
 
+    void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
+        if (transition == RedisCircuitBreaker::Transition::Opened) {
+            metrics::g_redis_circuit_open_total << 1;
+        } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
+            metrics::g_redis_circuit_recovered_total << 1;
+        }
+    }
+
+    void settle_success_() noexcept {
+        if (_settled) return;
+        _settled = true;
+        record_transition_(_breaker->on_success(_permit));
+    }
+
+    void record_connection_failure_() noexcept {
+        if (_settled) return;
+        _settled = true;
+        metrics::g_redis_call_failure_total << 1;
+        record_transition_(_breaker->on_connection_failure(_permit));
+    }
+
+    void abandon_() noexcept {
+        if (_settled || !_breaker) return;
+        _settled = true;
+        record_transition_(_breaker->on_abandoned(_permit));
+    }
+
     sw::redis::Pipeline _pipeline;
-    RedisCircuitBreaker *_breaker;
+    std::shared_ptr<RedisCircuitBreaker> _breaker;
     RedisCircuitBreaker::Permit _permit;
+    bool _settled = false;
 };
 
 // 类型擦除 Redis 客户端适配器：根据持有的后端类型透明转发到
@@ -117,8 +200,10 @@ class RedisClient
 public:
     using ptr = std::shared_ptr<RedisClient>;
 
-    RedisClient(std::shared_ptr<sw::redis::Redis> r) : _r(std::move(r)) {}
-    RedisClient(std::shared_ptr<sw::redis::RedisCluster> rc) : _rc(std::move(rc)) {}
+    RedisClient(std::shared_ptr<sw::redis::Redis> r)
+        : _r(std::move(r)), _breaker(std::make_shared<RedisCircuitBreaker>()) {}
+    RedisClient(std::shared_ptr<sw::redis::RedisCluster> rc)
+        : _rc(std::move(rc)), _breaker(std::make_shared<RedisCircuitBreaker>()) {}
 
     // --- String commands ---
     sw::redis::OptionalString get(const std::string &key) {
@@ -239,8 +324,26 @@ public:
     // --- Pipeline ---
     RedisPipeline pipeline(const sw::redis::StringView &hash_tag = {}) {
         auto permit = before_call_();
-        return RedisPipeline(_rc ? _rc->pipeline(hash_tag) : _r->pipeline(),
-                             _breaker, permit);
+        try {
+            return RedisPipeline(_rc ? _rc->pipeline(hash_tag) : _r->pipeline(),
+                                 _breaker, permit);
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ReplyError &) {
+            record_success_(permit);
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            else abandon_(permit);
+            throw;
+        } catch (...) {
+            abandon_(permit);
+            throw;
+        }
     }
 
     template <typename Input, typename Output>
@@ -278,39 +381,56 @@ public:
 private:
     RedisCircuitBreaker::Permit before_call_() {
         try {
-            return _breaker.before_call();
+            return _breaker->before_call();
         } catch (const RedisCircuitOpen &) {
             metrics::g_redis_circuit_rejected_total << 1;
             throw;
         }
     }
 
-    void record_connection_failure_(RedisCircuitBreaker::Permit permit) noexcept {
-        metrics::g_redis_call_failure_total << 1;
-        const auto previous = _breaker.state();
-        _breaker.on_connection_failure(permit);
-        if (previous != RedisCircuitBreaker::State::Open &&
-            _breaker.state() == RedisCircuitBreaker::State::Open) {
+    static void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
+        if (transition == RedisCircuitBreaker::Transition::Opened) {
             metrics::g_redis_circuit_open_total << 1;
+        } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
+            metrics::g_redis_circuit_recovered_total << 1;
         }
     }
 
+    void record_success_(RedisCircuitBreaker::Permit permit) noexcept {
+        record_transition_(_breaker->on_success(permit));
+    }
+
+    void abandon_(RedisCircuitBreaker::Permit permit) noexcept {
+        record_transition_(_breaker->on_abandoned(permit));
+    }
+
+    void record_connection_failure_(RedisCircuitBreaker::Permit permit) noexcept {
+        metrics::g_redis_call_failure_total << 1;
+        record_transition_(_breaker->on_connection_failure(permit));
+    }
+
     template <class F>
-    auto guarded_(F &&fn) -> std::invoke_result_t<F> {
+    auto guarded_(F &&fn) -> std::invoke_result_t<F &&> {
         auto permit = before_call_();
         try {
-            auto result = std::forward<F>(fn)();
-            _breaker.on_success(permit);
-            if (permit.probe) metrics::g_redis_circuit_recovered_total << 1;
-            return result;
-        } catch (const sw::redis::TimeoutError &) {
-            record_connection_failure_(permit);
-            throw;
+            decltype(auto) result = std::forward<F>(fn)();
+            record_success_(permit);
+            return std::forward<decltype(result)>(result);
         } catch (const sw::redis::IoError &) {
             record_connection_failure_(permit);
             throw;
         } catch (const sw::redis::ClosedError &) {
             record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ReplyError &) {
+            record_success_(permit);
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            else abandon_(permit);
+            throw;
+        } catch (...) {
+            abandon_(permit);
             throw;
         }
     }
@@ -320,23 +440,29 @@ private:
         auto permit = before_call_();
         try {
             std::forward<F>(fn)();
-            _breaker.on_success(permit);
-            if (permit.probe) metrics::g_redis_circuit_recovered_total << 1;
-        } catch (const sw::redis::TimeoutError &) {
-            record_connection_failure_(permit);
-            throw;
+            record_success_(permit);
         } catch (const sw::redis::IoError &) {
             record_connection_failure_(permit);
             throw;
         } catch (const sw::redis::ClosedError &) {
             record_connection_failure_(permit);
             throw;
+        } catch (const sw::redis::ReplyError &) {
+            record_success_(permit);
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            else abandon_(permit);
+            throw;
+        } catch (...) {
+            abandon_(permit);
+            throw;
         }
     }
 
     std::shared_ptr<sw::redis::Redis> _r;
     std::shared_ptr<sw::redis::RedisCluster> _rc;
-    RedisCircuitBreaker _breaker;
+    std::shared_ptr<RedisCircuitBreaker> _breaker;
 };
 
 /* brief: 默认 TTL 常量 */
