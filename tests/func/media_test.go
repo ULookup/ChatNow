@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +18,7 @@ import (
 
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
+	"chatnow-tests/pkg/verify"
 	media "chatnow-tests/proto/chatnow/media"
 )
 
@@ -451,4 +455,29 @@ func TestFN_MD_SpeechRecognition_EmptyContent(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/speech_recognition", req, rsp))
 	// 空音频应返回失败
 	assert.False(t, rsp.Header.Success)
+}
+
+// FN-MD-19 | P1 | consistency | CHAT 与 AVATAR 使用各自的 object key 布局
+func TestFN_MD_ObjectKeyLayout(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+
+	chatContent := []byte("fn-md-19-chat-" + client.NewRequestID())
+	chatHash := sha256.Sum256(chatContent)
+	chatHex := fmt.Sprintf("%x", chatHash)
+	chatID := fixture.UploadFile(t, authed, chatContent, "text/plain")
+	chatRecord := dbV.MediaFile(t, chatID)
+	assert.Equal(t, "chatnow-media-private", chatRecord.Bucket)
+	assert.Regexp(t, regexp.MustCompile(`^chat/[0-9]{4}/[0-9]{2}/[0-9]{2}/[0-9a-f]{2}/[0-9a-f]{64}$`), chatRecord.ObjectKey)
+	assert.Equal(t, chatHex, path.Base(chatRecord.ObjectKey))
+	assert.True(t, strings.Contains(chatRecord.ObjectKey, "/"+chatHex[:2]+"/"))
+
+	avatarContent := append([]byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A}, []byte(client.NewRequestID())...)
+	avatarHash := sha256.Sum256(avatarContent)
+	avatarHex := fmt.Sprintf("%x", avatarHash)
+	avatarID := fixture.UploadFileForPurpose(t, authed, avatarContent, "image/png", media.MediaPurpose_AVATAR)
+	avatarRecord := dbV.MediaFile(t, avatarID)
+	assert.Equal(t, "chatnow-media-public", avatarRecord.Bucket)
+	assert.Equal(t, "avatar/"+avatarHex, avatarRecord.ObjectKey)
 }

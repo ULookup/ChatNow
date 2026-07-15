@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +15,7 @@ import (
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	identity "chatnow-tests/proto/chatnow/identity"
+	media "chatnow-tests/proto/chatnow/media"
 )
 
 func randUser() string {
@@ -490,6 +492,34 @@ func TestUpdateProfile_NoToken_Error(t *testing.T) {
 	rsp := &identity.UpdateProfileRsp{}
 	err := HTTP.DoNoAuth("/service/identity/update_profile", req, rsp)
 	require.Error(t, err)
+}
+
+// FN-ID-08 | P1 | happy path | 上传头像后更新 profile 并返回公开 avatar URL
+func TestFN_ID_UpdateProfileAvatarUpload(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := append([]byte{0xFF, 0xD8, 0xFF, 0xE0}, []byte(client.NewRequestID())...)
+	fileID := fixture.UploadFileForPurpose(t, authed, content, "image/jpeg", media.MediaPurpose_AVATAR)
+
+	req := &identity.UpdateProfileReq{
+		RequestId:    client.NewRequestID(),
+		AvatarFileId: &fileID,
+	}
+	rsp := &identity.UpdateProfileRsp{}
+	require.NoError(t, authed.DoAuth("/service/identity/update_profile", req, rsp))
+	require.True(t, rsp.Header.Success)
+	require.NotNil(t, rsp.UserInfo)
+	require.NotEmpty(t, rsp.UserInfo.AvatarUrl)
+	assert.True(t, strings.HasSuffix(rsp.UserInfo.AvatarUrl, "/avatar/"+fileID))
+
+	getRsp := &identity.GetProfileRsp{}
+	require.NoError(t, authed.DoAuth(
+		"/service/identity/get_profile",
+		&identity.GetProfileReq{RequestId: client.NewRequestID()},
+		getRsp,
+	))
+	require.True(t, getRsp.Header.Success)
+	require.NotNil(t, getRsp.UserInfo)
+	assert.Equal(t, rsp.UserInfo.AvatarUrl, getRsp.UserInfo.AvatarUrl)
 }
 
 // ---------------------------------------------------------------------------

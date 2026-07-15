@@ -14,6 +14,11 @@ import (
 // UploadFile 完成三步上传（ApplyUpload -> PUT MinIO -> CompleteUpload）并返回 file_id。
 // 适用于单段上传（<=100MB）。content 为文件内容，mime 为 MIME 类型。
 func UploadFile(t testing.TB, c *client.HTTPClient, content []byte, mime string) string {
+	return UploadFileForPurpose(t, c, content, mime, media.MediaPurpose_CHAT)
+}
+
+// UploadFileForPurpose 完成指定用途的三步上传并返回 file_id。
+func UploadFileForPurpose(t testing.TB, c *client.HTTPClient, content []byte, mime string, purpose media.MediaPurpose) string {
 	t.Helper()
 	hash := sha256.Sum256(content)
 	req := &media.ApplyUploadReq{
@@ -22,7 +27,7 @@ func UploadFile(t testing.TB, c *client.HTTPClient, content []byte, mime string)
 		FileSize:    int64(len(content)),
 		MimeType:    mime,
 		ContentHash: fmt.Sprintf("sha256:%x", hash),
-		Purpose:     media.MediaPurpose_CHAT,
+		Purpose:     purpose,
 	}
 	rsp := &media.ApplyUploadRsp{}
 	if err := c.DoAuth("/service/media/apply_upload", req, rsp); err != nil {
