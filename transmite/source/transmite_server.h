@@ -637,7 +637,21 @@ public:
                       rsp.header().error_message());
             return std::nullopt;
         }
-        return rsp.user_info();
+        if (!rsp.has_user_info()) {
+            LOG_ERROR("获取用户信息响应缺少 user_info uid={}", uid);
+            return std::nullopt;
+        }
+        auto bytes = rsp.user_info().SerializeAsString();
+        if (bytes.empty()) {
+            LOG_ERROR("获取用户信息响应序列化为空 uid={}", uid);
+            return std::nullopt;
+        }
+        chatnow::common::UserInfo info;
+        if (!info.ParseFromString(bytes)) {
+            LOG_ERROR("获取用户信息响应无法解析 uid={}", uid);
+            return std::nullopt;
+        }
+        return info;
     }
 
     std::optional<std::vector<std::string>> fetch_members_from_conversation_service_(

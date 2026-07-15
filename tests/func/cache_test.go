@@ -46,8 +46,7 @@ func redisRaw(t testing.TB, key string) []byte {
 	return bytes.TrimSuffix(out, []byte("\n"))
 }
 
-func sendCacheTestMessage(t testing.TB, user *client.HTTPClient, convID, suffix string) {
-	t.Helper()
+func sendCacheTestMessageResult(user *client.HTTPClient, convID, suffix string) error {
 	rsp := &transmite.SendMessageRsp{}
 	err := user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
 		RequestId:      client.NewRequestID(),
@@ -58,8 +57,18 @@ func sendCacheTestMessage(t testing.TB, user *client.HTTPClient, convID, suffix 
 		},
 		ClientMsgId: client.NewRequestID(),
 	}, rsp)
-	require.NoError(t, err)
-	require.True(t, rsp.GetHeader().GetSuccess(), rsp.GetHeader().GetErrorMessage())
+	if err != nil {
+		return err
+	}
+	if !rsp.GetHeader().GetSuccess() {
+		return fmt.Errorf("send failed: %s", rsp.GetHeader().GetErrorMessage())
+	}
+	return nil
+}
+
+func sendCacheTestMessage(t testing.TB, user *client.HTTPClient, convID, suffix string) {
+	t.Helper()
+	require.NoError(t, sendCacheTestMessageResult(user, convID, suffix))
 }
 
 // FN-CA-05 | healthy Redis applies the distributed message rate limit.
@@ -108,6 +117,7 @@ func TestFN_CA_UserInfoSingleflight(t *testing.T) {
 	before := verify.BVar(t, HTTP.Config().Infra.TransmiteVars, "user_info_rpc_total")
 
 	start := make(chan struct{})
+	results := make(chan error, 200)
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
 		i := i
@@ -115,11 +125,15 @@ func TestFN_CA_UserInfoSingleflight(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			sendCacheTestMessage(t, user, convID, fmt.Sprintf("flight-%d", i))
+			results <- sendCacheTestMessageResult(user, convID, fmt.Sprintf("flight-%d", i))
 		}()
 	}
 	close(start)
 	wg.Wait()
+	close(results)
+	for err := range results {
+		require.NoError(t, err)
+	}
 
 	after := verify.BVar(t, HTTP.Config().Infra.TransmiteVars, "user_info_rpc_total")
 	require.LessOrEqual(t, after-before, int64(1))
