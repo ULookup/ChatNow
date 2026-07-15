@@ -16,6 +16,7 @@ import (
 	presence "chatnow-tests/proto/chatnow/presence"
 	push "chatnow-tests/proto/chatnow/push"
 	relationship "chatnow-tests/proto/chatnow/relationship"
+	transmite "chatnow-tests/proto/chatnow/transmite"
 )
 
 // FN-WS-01 | P0 | WebSocket 推送 | 发消息后接收方 WS 收到 CHAT_MESSAGE_NOTIFY
@@ -237,4 +238,33 @@ func TestFN_WS_TypingNotify(t *testing.T) {
 	defer cancel()
 	_, err = wsB.WaitForNotify(ctx, int32(push.NotifyType_TYPING_NOTIFY))
 	require.NoError(t, err, "b 应收到 typing 通知")
+}
+
+// FN-WS-08 | P1 | trace | Gateway trace 经 MQ 透传到接收方 WS notify
+func TestFN_WS_MQTracePropagation(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	wsBob := fixture.ConnectWS(t, bob)
+	defer wsBob.Close()
+	time.Sleep(500 * time.Millisecond)
+
+	traceID := "fedcba9876543210fedcba9876543210"
+	req := &transmite.SendMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		Content: &msg.MessageContent{
+			Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "trace-propagation"}},
+		},
+		ClientMsgId: client.NewRequestID(),
+	}
+	rsp := &transmite.SendMessageRsp{}
+	_, err := alice.DoWithTrace("/service/transmite/send", req, rsp, alice.AccessToken, traceID)
+	require.NoError(t, err)
+	require.True(t, rsp.Header.Success)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	notify, err := wsBob.WaitForNotify(ctx, int32(push.NotifyType_CHAT_MESSAGE_NOTIFY))
+	require.NoError(t, err)
+	assert.Equal(t, traceID, notify.GetTraceId())
 }

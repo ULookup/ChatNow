@@ -77,3 +77,18 @@ func TestJWTRequired_ExpiredToken(t *testing.T) {
 	err := expiredClient.DoAuth("/service/identity/get_profile", req, rsp)
 	require.Error(t, err)
 }
+
+// FN-AM-06 | P1 | trace | Gateway 回传客户端提供的合法 X-Trace-Id
+func TestFN_AM_GatewayTraceHeader(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	traceID := "0123456789abcdef0123456789abcdef"
+	req := &identity.GetProfileReq{RequestId: client.NewRequestID()}
+	rsp := &identity.GetProfileRsp{}
+
+	headers, err := authed.DoWithTrace(
+		"/service/identity/get_profile", req, rsp, authed.AccessToken, traceID,
+	)
+	require.NoError(t, err)
+	require.True(t, rsp.Header.Success)
+	assert.Equal(t, traceID, headers.Get("X-Trace-Id"))
+}

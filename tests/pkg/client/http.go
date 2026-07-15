@@ -48,39 +48,53 @@ func NewDeviceID() string {
 
 // Do sends a protobuf request to path and unmarshals the protobuf response into resp.
 func (c *HTTPClient) Do(path string, req proto.Message, resp proto.Message, accessToken string) error {
+	_, err := c.do(path, req, resp, accessToken, "")
+	return err
+}
+
+// DoWithTrace sends a protobuf request with the provided trace ID and returns response headers.
+func (c *HTTPClient) DoWithTrace(path string, req proto.Message, resp proto.Message, accessToken, traceID string) (http.Header, error) {
+	return c.do(path, req, resp, accessToken, traceID)
+}
+
+func (c *HTTPClient) do(path string, req proto.Message, resp proto.Message, accessToken, traceID string) (http.Header, error) {
 	body, err := proto.Marshal(req)
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequest("POST", c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/x-protobuf")
 	if accessToken != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+accessToken)
 	}
+	if traceID != "" {
+		httpReq.Header.Set("X-Trace-Id", traceID)
+	}
 
 	httpResp, err := c.client.Do(httpReq)
 	if err != nil {
-		return fmt.Errorf("http request: %w", err)
+		return nil, fmt.Errorf("http request: %w", err)
 	}
 	defer httpResp.Body.Close()
 
 	respBody, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+		return httpResp.Header.Clone(), fmt.Errorf("read response: %w", err)
 	}
+	headers := httpResp.Header.Clone()
 
-	if httpResp.StatusCode != 200 {
-		return fmt.Errorf("http status %d: %s", httpResp.StatusCode, string(respBody))
+	if httpResp.StatusCode != http.StatusOK {
+		return headers, fmt.Errorf("http status %d: %s", httpResp.StatusCode, string(respBody))
 	}
 
 	if err := proto.Unmarshal(respBody, resp); err != nil {
-		return fmt.Errorf("unmarshal response: %w", err)
+		return headers, fmt.Errorf("unmarshal response: %w", err)
 	}
-	return nil
+	return headers, nil
 }
 
 // DoNoAuth sends without Authorization header (for whitelisted endpoints).
