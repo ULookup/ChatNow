@@ -33,6 +33,7 @@
 #include "infra/logger.hpp"
 #include "infra/metrics.hpp"
 #include "utils/cache_version.hpp"
+#include "utils/local_rate_limiter.hpp"
 #include "utils/random_ttl.hpp"
 #include "utils/redis_circuit_breaker.hpp"
 #include "utils/redis_keys.hpp"
@@ -1168,7 +1169,10 @@ public:
             return cur == 1;
         } catch(std::exception &e) {
             LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
-            return true;
+            metrics::g_rate_limit_local_fallback_total << 1;
+            const bool allowed = _local.allow(key_full, max_count, window_sec);
+            if (!allowed) metrics::g_rate_limit_local_rejected_total << 1;
+            return allowed;
         }
     }
     bool allow_user(const std::string &uid, int max_count, int window_sec) {
@@ -1179,6 +1183,7 @@ public:
     }
 private:
     RedisClient::ptr _c;
+    LocalRateLimiter _local;
     static const std::string kRateLimitScript;
 };
 
