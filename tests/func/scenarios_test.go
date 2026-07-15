@@ -481,3 +481,43 @@ func TestScenario_MessageReliability(t *testing.T) {
 	dbV.MessageCount(t, convID, 1)
 	dbV.MessageByClientMsgId(t, clientMsgID, true)
 }
+
+// ---------------------------------------------------------------------------
+// Scenario 7: Multi-Device Login Kick
+// SC-07 | P1 | scenario | 多设备登录：设备 A 登录 -> 设备 B 登录 -> A 被踢 -> A token 失效
+// ---------------------------------------------------------------------------
+
+func TestScenario_MultiDeviceLogin(t *testing.T) {
+	// 先注册用户（LoginUser 要求用户已存在）
+	username := "sc07_user_" + client.NewRequestID()[:8]
+	password := "Sc07@123456"
+
+	regReq := &identity.RegisterReq{
+		RequestId: client.NewRequestID(),
+		Credential: &identity.RegisterReq_UsernamePwd{
+			UsernamePwd: &identity.UsernamePassword{Username: username, Password: password},
+		},
+		Nickname: username,
+	}
+	require.NoError(t, HTTP.DoNoAuth("/service/identity/register", regReq, &identity.RegisterRsp{}))
+
+	// 设备 A 登录
+	deviceA := fixture.LoginUser(t, HTTP, username, password)
+	require.NotEmpty(t, deviceA.AccessToken)
+
+	// 验证 A 能调 API
+	profileReq := &identity.GetProfileReq{RequestId: client.NewRequestID()}
+	require.NoError(t, deviceA.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}))
+
+	// 设备 B 登录同用户
+	deviceB := fixture.LoginUser(t, HTTP, username, password)
+	require.NotEmpty(t, deviceB.AccessToken)
+	require.NotEqual(t, deviceA.AccessToken, deviceB.AccessToken, "B 的 token 应不同于 A")
+
+	// 设备 A 的 token 应失效（被踢）
+	err := deviceA.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{})
+	assert.Error(t, err, "设备 A 被踢后 token 应失效")
+
+	// 设备 B 仍可调 API
+	require.NoError(t, deviceB.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}))
+}
