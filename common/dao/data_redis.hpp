@@ -1155,24 +1155,24 @@ public:
      *   - 命中限制返回 false（业务可返回 429 / RATE_LIMITED）
      */
     bool allow(const std::string &key_full, int max_count, int window_sec) {
+        std::vector<std::string> keys = {key_full};
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::vector<std::string> args = {
+            std::to_string(max_count),
+            std::to_string(window_sec),
+            std::to_string(now_ms)
+        };
         try {
-            std::vector<std::string> keys = {key_full};
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            std::vector<std::string> args = {
-                std::to_string(max_count),
-                std::to_string(window_sec),
-                std::to_string(now_ms)
-            };
             long long cur = _c->eval<long long>(kRateLimitScript, keys.begin(), keys.end(),
                                                 args.begin(), args.end());
             return cur == 1;
-        } catch(std::exception &e) {
+        } catch (const RedisCircuitOpen &e) {
             LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
-            metrics::g_rate_limit_local_fallback_total << 1;
-            const bool allowed = _local.allow(key_full, max_count, window_sec);
-            if (!allowed) metrics::g_rate_limit_local_rejected_total << 1;
-            return allowed;
+            return allow_local_(key_full, max_count, window_sec);
+        } catch (const sw::redis::Error &e) {
+            LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
+            return allow_local_(key_full, max_count, window_sec);
         }
     }
     bool allow_user(const std::string &uid, int max_count, int window_sec) {
@@ -1182,6 +1182,13 @@ public:
         return allow(key::kRateSsid + ssid, max_count, window_sec);
     }
 private:
+    bool allow_local_(const std::string &key_full, int max_count, int window_sec) {
+        metrics::g_rate_limit_local_fallback_total << 1;
+        const bool allowed = _local.allow(key_full, max_count, window_sec);
+        if (!allowed) metrics::g_rate_limit_local_rejected_total << 1;
+        return allowed;
+    }
+
     RedisClient::ptr _c;
     LocalRateLimiter _local;
     static const std::string kRateLimitScript;

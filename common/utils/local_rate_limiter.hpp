@@ -36,7 +36,10 @@ public:
 
         auto found = shard.buckets.find(key);
         if (found == shard.buckets.end()) {
-            if (!reserve_bucket_()) return false;
+            if (!reserve_bucket_()) {
+                cleanup_(shard, now_ms, window_sec);
+                if (!reserve_bucket_()) return false;
+            }
             try {
                 found = shard.buckets.emplace(
                     key, Bucket{static_cast<double>(capacity - 1), now_ms, now_ms}).first;
