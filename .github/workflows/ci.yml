@@ -22,6 +22,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
       - name: Go vet
         run: cd tests && go vet ./...
       - name: Go fmt check
@@ -46,6 +52,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -73,6 +81,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -100,6 +110,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services

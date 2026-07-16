@@ -582,16 +582,16 @@ func TestScenario_LargeGroupFanOut(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Scenario 9: Unread Count Consistency（未读数跨服务一致性）
-// SC-09 | P0 | scenario | 未读数跨服务跨设备一致：发消息 unread+1 -> UpdateReadAck -> unread=0
+// SC-09 | P0 | scenario | 未读数跨服务跨设备一致：发消息 unread+1 -> MarkRead -> unread=0
 // ---------------------------------------------------------------------------
 
 func TestScenario_UnreadCountConsistency(t *testing.T) {
 	a, b, convID := setupConv(t) // MakeFriends
 
 	// Step 1: a 发 3 条消息
-	var lastMessageID int64
+	var lastSeq uint64
 	for i := 0; i < 3; i++ {
-		lastMessageID, _ = sendMsg(t, a, convID, "sc09-unread-"+string(rune('0'+i)))
+		_, lastSeq = sendMsg(t, a, convID, "sc09-unread-"+string(rune('0'+i)))
 	}
 
 	// Step 2: b ListConversations，验证 unread_count=3
@@ -613,13 +613,14 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 	defer dbV.Close()
 	dbV.UnreadCount(t, b.UserID, convID, 3)
 
-	// Step 4: b UpdateReadAck（读到最后一条 seq）
-	ackReq := &msg.UpdateReadAckReq{
+	// Step 4: b MarkRead（读到最后一条 seq）
+	markReadReq := &conversation.MarkReadReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		MessageId:      uint64(lastMessageID),
+		LastReadSeq:    lastSeq,
 	}
-	require.NoError(t, b.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
+	require.NoError(t, b.DoAuth(
+		"/service/conversation/mark_read", markReadReq, &conversation.MarkReadRsp{}))
 
 	// Step 5: b 再次 ListConversations，unread_count=0
 	listRsp2 := &conversation.ListConversationsRsp{}
