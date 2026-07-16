@@ -3,6 +3,11 @@ set -euo pipefail
 
 services=(conversation gateway identity media message presence push relationship transmite)
 artifact_root="${1:-compose-artifacts}"
+if [[ ! -d "$artifact_root" ]]; then
+    echo "missing artifact root directory: $artifact_root" >&2
+    exit 1
+fi
+artifact_root="$(cd "$artifact_root" && pwd -P)"
 manifest="$artifact_root/MANIFEST.sha256"
 ldd_command="${LDD:-ldd}"
 sha256sum_command="${SHA256SUM:-sha256sum}"

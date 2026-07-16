@@ -177,6 +177,30 @@ func TestComposeArtifactScriptsEndToEnd(t *testing.T) {
 		require.Contains(t, output, "outside packaged closure")
 	})
 
+	t.Run("validates a relative artifact root", func(t *testing.T) {
+		fixture := newArtifactFixture(t, root)
+		fixture.packageArtifacts(t)
+
+		output, err := fixture.validateRelative(t, fixture.lddPath)
+		require.NoError(t, err, "%s", output)
+	})
+
+	t.Run("rejects relative artifact root symlink escape", func(t *testing.T) {
+		fixture := newArtifactFixture(t, root)
+		fixture.packageArtifacts(t)
+		hostLibrary := filepath.Join(fixture.temp, "host", "libfixture.so")
+		require.NoError(t, os.MkdirAll(filepath.Dir(hostLibrary), 0o755))
+		require.NoError(t, os.WriteFile(hostLibrary, []byte("host library\n"), 0o644))
+		packagedLibrary := filepath.Join(fixture.artifactRoot, "relationship", "depends", "libfixture.so")
+		require.NoError(t, os.Remove(packagedLibrary))
+		require.NoError(t, os.Symlink(hostLibrary, packagedLibrary))
+		fixture.rewriteManifest(t)
+
+		output, err := fixture.validateRelative(t, fixture.lddPath)
+		require.Error(t, err)
+		require.Contains(t, output, "outside packaged closure")
+	})
+
 	t.Run("rejects unlisted artifact file", func(t *testing.T) {
 		fixture := newArtifactFixture(t, root)
 		fixture.packageArtifacts(t)
@@ -272,6 +296,15 @@ func (fixture artifactFixture) packageArtifacts(t *testing.T) {
 func (fixture artifactFixture) validate(t *testing.T, lddPath string) (string, error) {
 	t.Helper()
 	command := exec.Command("bash", filepath.Join(fixture.root, "scripts/validate_compose_artifacts.sh"), fixture.artifactRoot)
+	command.Env = append(os.Environ(), "LDD="+lddPath, "SHA256SUM="+fixture.sha256sumPath)
+	output, err := command.CombinedOutput()
+	return string(output), err
+}
+
+func (fixture artifactFixture) validateRelative(t *testing.T, lddPath string) (string, error) {
+	t.Helper()
+	command := exec.Command("bash", filepath.Join(fixture.root, "scripts/validate_compose_artifacts.sh"), filepath.Base(fixture.artifactRoot))
+	command.Dir = fixture.temp
 	command.Env = append(os.Environ(), "LDD="+lddPath, "SHA256SUM="+fixture.sha256sumPath)
 	output, err := command.CombinedOutput()
 	return string(output), err
