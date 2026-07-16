@@ -140,12 +140,14 @@ func assertDecoratedCommandsDoNotSatisfyGate(t *testing.T) {
 func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target string) {
 	t.Helper()
 	gate := exactRunStepIndex(valid, target)
+	setupGo := exactUsesStepIndex(valid, "actions/setup-go@v5")
 	start := exactRunStepIndex(valid, "docker compose up -d --build")
 	wait := exactRunStepIndex(valid, "./scripts/wait_for_services.sh")
 	proto := exactRunStepIndex(valid, "cd tests && make proto")
 	deps := exactRunStepIndex(valid, "cd tests && go mod download")
 	teardown := exactRunStepIndex(valid, "docker compose down -v")
 	require.NotEqual(t, -1, gate)
+	require.NotEqual(t, -1, setupGo)
 	require.NotEqual(t, -1, start)
 	require.NotEqual(t, -1, wait)
 	require.NotEqual(t, -1, proto)
@@ -153,6 +155,9 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	require.NotEqual(t, -1, teardown)
 
 	for name, mutate := range map[string]func(*workflowJob){
+		"Go setup allowed to fail": func(job *workflowJob) {
+			job.Steps[setupGo].ContinueOnError = true
+		},
 		"gate disabled by if": func(job *workflowJob) {
 			job.Steps[gate].If = "${{ false }}"
 		},
@@ -272,7 +277,7 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 	if strings.TrimSpace(job.Steps[gate].If) != "" {
 		return fmt.Errorf("gate step must not have a step-level if condition")
 	}
-	for _, required := range ordered[4:9] {
+	for _, required := range ordered[:len(ordered)-1] {
 		if continueOnErrorEnabled(job.Steps[required.index].ContinueOnError) {
 			return fmt.Errorf("%s step must not continue on error", required.label)
 		}
