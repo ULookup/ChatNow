@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create ChatNow Issues"
+  short_description: "Create scoped, testable ChatNow engineering Issues"
+  default_prompt: "Use $chatnow-creating-issues to create a valid Issue before changing ChatNow."

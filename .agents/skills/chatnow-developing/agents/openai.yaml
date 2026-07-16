@@ -1,0 +1,4 @@
+interface:
+  display_name: "Develop ChatNow Services"
+  short_description: "Implement safe changes in ChatNow services"
+  default_prompt: "Use $chatnow-developing to implement this ChatNow production change safely."
