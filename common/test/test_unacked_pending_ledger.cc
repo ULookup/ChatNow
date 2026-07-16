@@ -169,6 +169,86 @@ void test_due_read_progresses_across_hash_orphan_pages(const RedisClient::ptr &r
             "repair cursor must be deleted after a full stable scan completes");
 }
 
+void test_repair_cursor_follows_push_bump_ack_mutation_policy(const RedisClient::ptr &redis) {
+    Fixture fixture(redis, "repair-mutation-policy");
+    fixture.ledger.push(fixture.uid, fixture.device, 73, "payload-A", 1,
+                        std::chrono::seconds(300));
+
+    redis->set(fixture.repair_key, "7", std::chrono::seconds(30));
+    fixture.ledger.bump_score(fixture.uid, fixture.device, {73},
+                              std::chrono::seconds(300));
+    auto cursor = redis->get(fixture.repair_key);
+    require(cursor && *cursor == "7",
+            "bump changes only ZSET scores and must preserve the HASH repair cursor");
+    require(std::llabs(ttl(redis, fixture.repair_key) - ttl(redis, fixture.payload_key)) <= 1,
+            "bump must renew an existing repair cursor with the HASH paired TTL sample");
+
+    fixture.ledger.push(fixture.uid, fixture.device, 73, "payload-B", 1,
+                        std::chrono::seconds(300));
+    require(!redis->get(fixture.repair_key),
+            "push mutates the HASH and must reset its repair cursor");
+
+    redis->set(fixture.repair_key, "9", std::chrono::seconds(30));
+    fixture.ledger.ack(fixture.uid, fixture.device, 73);
+    require(!redis->get(fixture.repair_key),
+            "ACK mutates the HASH and must reset its repair cursor");
+}
+
+void test_peek_bump_flow_keeps_multi_page_repair_progress(const RedisClient::ptr &redis) {
+    Fixture fixture(redis, "peek-bump-progress");
+    fixture.ledger.push(fixture.uid, fixture.device, 81, "due", 1,
+                        std::chrono::seconds(300));
+    for (unsigned long seq = 11000; seq < 11700; ++seq) {
+        redis->hset(fixture.payload_key, std::to_string(seq), "hash-only");
+    }
+
+    auto due = fixture.ledger.peek_due(fixture.uid, fixture.device, 5, 0);
+    require(due.size() == 1 && due.front().first == 81,
+            "first production-flow peek must return the due complete entry");
+    auto first_cursor = redis->get(fixture.repair_key);
+    require(first_cursor && *first_cursor != "0",
+            "first production-flow peek must begin progressive orphan repair");
+    fixture.ledger.bump_score(fixture.uid, fixture.device, {81},
+                              std::chrono::seconds(300));
+    require(redis->get(fixture.repair_key) == first_cursor,
+            "production-flow bump must not restart the HASH scan at cursor zero");
+
+    for (int pass = 0; pass < 1000; ++pass) {
+        if (redis->hlen(fixture.payload_key) == 1 && !redis->get(fixture.repair_key)) break;
+        due = fixture.ledger.peek_due(fixture.uid, fixture.device, 5, -1);
+        if (!due.empty()) {
+            fixture.ledger.bump_score(fixture.uid, fixture.device, {due.front().first},
+                                      std::chrono::seconds(300));
+        }
+    }
+    require(redis->hlen(fixture.payload_key) == 1,
+            "peek-then-bump production flow must clean every HASH-only orphan page");
+    require(!redis->get(fixture.repair_key),
+            "peek-then-bump production flow must finish and remove the repair cursor");
+}
+
+void test_wrong_type_repair_metadata_cannot_block_due_delivery(const RedisClient::ptr &redis) {
+    Fixture wrong_type(redis, "repair-wrong-type");
+    wrong_type.ledger.push(wrong_type.uid, wrong_type.device, 82, "due", 1);
+    redis->hset(wrong_type.repair_key, "bad", "metadata");
+    auto due = wrong_type.ledger.peek_due(wrong_type.uid, wrong_type.device, 5, 0);
+    require(due.size() == 1 && due.front().first == 82,
+            "wrong-type repair metadata must be discarded without blocking due delivery");
+    require(!redis->get(wrong_type.repair_key),
+            "wrong-type repair metadata must be removed after restarting from zero");
+}
+
+void test_malformed_repair_cursor_cannot_block_due_delivery(const RedisClient::ptr &redis) {
+    Fixture malformed(redis, "repair-malformed");
+    malformed.ledger.push(malformed.uid, malformed.device, 83, "due", 1);
+    redis->set(malformed.repair_key, "not-a-redis-cursor", std::chrono::seconds(300));
+    auto due = malformed.ledger.peek_due(malformed.uid, malformed.device, 5, 0);
+    require(due.size() == 1 && due.front().first == 83,
+            "malformed repair cursor must be discarded and restarted from zero");
+    require(!redis->get(malformed.repair_key),
+            "malformed repair cursor must be removed after restarting from zero");
+}
+
 void test_bump_updates_only_complete_entries(const RedisClient::ptr &redis) {
     Fixture fixture(redis, "bump-complete");
     fixture.ledger.push(fixture.uid, fixture.device, 71, "complete", 1);
@@ -215,6 +295,10 @@ int main() {
             {"ack wrong type is atomic", test_ack_wrong_type_does_not_partially_remove_zset},
             {"due-read heals both directions", test_due_read_removes_both_orphan_directions},
             {"due-read repair is progressive", test_due_read_progresses_across_hash_orphan_pages},
+            {"repair cursor mutation policy", test_repair_cursor_follows_push_bump_ack_mutation_policy},
+            {"peek-bump repair is progressive", test_peek_bump_flow_keeps_multi_page_repair_progress},
+            {"wrong-type repair metadata is fail-soft", test_wrong_type_repair_metadata_cannot_block_due_delivery},
+            {"malformed repair cursor is fail-soft", test_malformed_repair_cursor_cannot_block_due_delivery},
             {"bump updates complete entries", test_bump_updates_only_complete_entries},
         };
         int failures = 0;

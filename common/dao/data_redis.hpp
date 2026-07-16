@@ -1818,8 +1818,8 @@ public:
     static std::string idx_key_for(const std::string &uid, const std::string &device_id) {
         return std::string(key::kUnacked) + "idx:{" + uid + ":" + device_id + "}";
     }
-    // HSCAN continuation for bounded HASH-only orphan repair. All normal ledger
-    // mutations delete it, so the cursor is resumed only across stable read-heal passes.
+    // HSCAN continuation for bounded HASH-only orphan repair. HASH mutations
+    // (push/ack) delete it; score-only bump preserves and renews it.
     static std::string repair_key_for(const std::string &uid, const std::string &device_id) {
         return std::string(key::kUnacked) + "repair:{" + uid + ":" + device_id + "}";
     }
@@ -1940,7 +1940,21 @@ local ht = key_type(KEYS[2])
 local rt = key_type(KEYS[3])
 if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
 if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
-if rt ~= 'none' and rt ~= 'string' then return redis.error_reply('unacked repair key wrong type') end
+local cursor = '0'
+if rt == 'string' then
+    cursor = redis.call('GET', KEYS[3]) or '0'
+    if not string.match(cursor, '^%d+$') then
+        redis.call('DEL', KEYS[3])
+        cursor = '0'
+    end
+elseif rt ~= 'none' then
+    redis.call('DEL', KEYS[3])
+end
+local scan = redis.pcall('HSCAN', KEYS[2], cursor, 'COUNT', limit)
+if type(scan) == 'table' and scan.err then
+    redis.call('DEL', KEYS[3])
+    scan = redis.call('HSCAN', KEYS[2], 0, 'COUNT', limit)
+end
 local result = {}
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, limit)
 for _, seq in ipairs(due) do
@@ -1952,8 +1966,6 @@ for _, seq in ipairs(due) do
         redis.call('ZREM', KEYS[1], seq)
     end
 end
-local cursor = redis.call('GET', KEYS[3]) or '0'
-local scan = redis.call('HSCAN', KEYS[2], cursor, 'COUNT', limit)
 local fields = scan[2]
 for i = 1, #fields, 2 do
     local seq = fields[i]
@@ -2006,8 +2018,9 @@ for i = 3, #ARGV do
 end
 redis.call('EXPIRE', KEYS[1], ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
--- Score/member mutation invalidates an in-progress HSCAN continuation.
-redis.call('DEL', KEYS[3])
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    redis.call('EXPIRE', KEYS[3], ttl)
+end
 return updated
 )lua";
 
