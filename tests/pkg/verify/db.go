@@ -13,6 +13,12 @@ type DBVerifier struct {
 	db *sql.DB
 }
 
+type MediaFileRecord struct {
+	Bucket    string
+	ObjectKey string
+	Status    int
+}
+
 // NewDBVerifier 创建 MySQL 直查验证器。
 func NewDBVerifier(dsn string) *DBVerifier {
 	db, err := sql.Open("mysql", dsn)
@@ -184,6 +190,18 @@ func (v *DBVerifier) MediaQuota(t testing.TB, userID string, expectedUsedBytes i
 	if used != expectedUsedBytes {
 		t.Fatalf("media quota user=%s 期望 %d，实际 %d", userID, expectedUsedBytes, used)
 	}
+}
+
+func (v *DBVerifier) MediaFile(t testing.TB, fileID string) MediaFileRecord {
+	t.Helper()
+	var record MediaFileRecord
+	err := v.db.QueryRow(
+		"SELECT bucket, object_key, status FROM media_file WHERE file_id = ?", fileID,
+	).Scan(&record.Bucket, &record.ObjectKey, &record.Status)
+	if err != nil {
+		t.Fatalf("query media_file %s: %v", fileID, err)
+	}
+	return record
 }
 
 // ConversationMemberRole 验证 conversation_member.role（0=MEMBER, 1=ADMIN, 2=OWNER）。

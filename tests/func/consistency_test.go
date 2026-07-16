@@ -12,6 +12,7 @@ import (
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	"chatnow-tests/pkg/verify"
+	msg "chatnow-tests/proto/chatnow/message"
 )
 
 // FN-DC-01 | P0 | 数据一致性 | 发消息后 DB 写扩散：message 1 行 + user_timeline N 行
@@ -74,4 +75,97 @@ func TestFN_DC_UnreadCount(t *testing.T) {
 	// bob sync 消息后，HTTP 响应也应显示 unread=3
 	// （sync 不会清未读，需要 UpdateReadAck 才清）
 	// 这里只验证 DB 一致性，不测 HTTP（HTTP 测试在 FN-MS 中覆盖）
+}
+
+// FN-DC-04 | P1 | consistency | 撤回后直查 DB：message.status=RECALLED，timeline 不删
+func TestFN_DC_RecallMessage(t *testing.T) {
+	a, _, convID := setupConv(t)
+	mID, _ := sendMsg(t, a, convID, "will-recall-for-dc")
+
+	// 等待 MQ 消费 + DB 写入完成
+	time.Sleep(1 * time.Second)
+
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+
+	// 撤回前直查 DB：status=NORMAL(0)
+	dbV.MessageStatus(t, mID, 0)
+
+	// 撤回
+	recallReq := &msg.RecallMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		MessageId:      mID,
+	}
+	require.NoError(t, a.DoAuth("/service/message/recall", recallReq, &msg.RecallMessageRsp{}))
+
+	// 等待 DB 写入
+	time.Sleep(1 * time.Second)
+
+	// 撤回后直查 DB：status=RECALLED(1)
+	dbV.MessageStatus(t, mID, 1)
+
+	// timeline 仍存在（不因撤回删除）
+	dbV.UserTimelineExists(t, a.UserID, convID, 1)
+}
+
+// FN-DC-05 | P1 | consistency | 用户删聊天记录后直查 DB：user_timeline 删除，message 保留
+func TestFN_DC_DeleteTimeline(t *testing.T) {
+	a, _, convID := setupConv(t)
+	mID, _ := sendMsg(t, a, convID, "will-delete-timeline")
+
+	// 等待 MQ 消费 + DB 写入完成
+	time.Sleep(1 * time.Second)
+
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+
+	// 删除前直查 DB：timeline 存在
+	dbV.UserTimelineExists(t, a.UserID, convID, 1)
+
+	// 删除消息（仅删当前用户的 timeline）
+	delReq := &msg.DeleteMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		MessageIds:     []int64{mID},
+	}
+	require.NoError(t, a.DoAuth("/service/message/delete", delReq, &msg.DeleteMessagesRsp{}))
+
+	// 等待 DB 写入
+	time.Sleep(1 * time.Second)
+
+	// 删除后直查 DB：message 表记录保留，user_timeline 已删
+	dbV.MessageExists(t, mID)
+	dbV.UserTimelineExists(t, a.UserID, convID, 0)
+}
+
+// FN-DC-06 | P1 | consistency | 加好友后直查 DB：friend 表双向各 1 行
+func TestFN_DC_FriendRelation(t *testing.T) {
+	a, b, _ := setupConv(t) // setupConv 内部调 MakeFriends
+
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+
+	// 直查 DB：friend 表双向各 1 行
+	dbV.FriendRelationExists(t, a.UserID, b.UserID)
+	dbV.FriendRelationExists(t, b.UserID, a.UserID)
+}
+
+// FN-DC-07 | P1 | consistency | 上传后直查 DB：media_user_quota 增量正确
+func TestFN_DC_MediaQuota(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	content := []byte("dc-media-quota-check")
+	fileID := fixture.UploadFile(t, authed, content, "text/plain")
+	require.NotEmpty(t, fileID)
+
+	// 等待 DB 写入
+	time.Sleep(1 * time.Second)
+
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+
+	// 上传后直查 DB：used_bytes == len(content)
+	// 新用户首次上传，quota 起始为 0，上传后 used_bytes 等于文件大小
+	dbV.MediaQuota(t, authed.UserID, int64(len(content)))
 }
