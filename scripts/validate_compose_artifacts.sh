@@ -4,15 +4,27 @@ set -euo pipefail
 services=(conversation gateway identity media message presence push relationship transmite)
 artifact_root="${1:-compose-artifacts}"
 manifest="$artifact_root/MANIFEST.sha256"
+ldd_command="${LDD:-ldd}"
+sha256sum_command="${SHA256SUM:-sha256sum}"
 
 if [[ ! -f "$manifest" ]]; then
     echo "missing artifact manifest: $manifest" >&2
     exit 1
 fi
 
+actual_manifest="$(mktemp)"
+trap 'rm -f "$actual_manifest"' EXIT
 (
     cd "$artifact_root"
-    sha256sum --check MANIFEST.sha256
+    find . \( -type f -o -type l \) ! -name MANIFEST.sha256 -print0 \
+        | LC_ALL=C sort -z \
+        | xargs -0 "$sha256sum_command" > "$actual_manifest"
+    if ! cmp -s MANIFEST.sha256 "$actual_manifest"; then
+        echo "manifest mismatch or unlisted artifact file" >&2
+        exit 1
+    fi
+    # sha256sum --check is retained as an explicit integrity gate.
+    "$sha256sum_command" --check MANIFEST.sha256
 )
 
 for service in "${services[@]}"; do
@@ -26,8 +38,9 @@ for service in "${services[@]}"; do
         echo "missing shared-library directory: $depends_dir" >&2
         exit 1
     fi
+    depends_dir_real="$(cd "$depends_dir" && pwd -P)"
 
-    ldd_output="$(env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH="$depends_dir" ldd "$binary" 2>&1)" || {
+    ldd_output="$(env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH="$depends_dir" "$ldd_command" "$binary" 2>&1)" || {
         echo "isolated ldd failed for $binary: $ldd_output" >&2
         exit 1
     }
@@ -37,15 +50,33 @@ for service in "${services[@]}"; do
         exit 1
     fi
 
-    while IFS= read -r library; do
+    while IFS=$'\t' read -r entry_kind library; do
         [[ -n "$library" ]] || continue
         library_name="$(basename "$library")"
-        if [[ ! -f "$depends_dir/$library_name" ]]; then
+        if [[ "$entry_kind" == "loader" ]]; then
+            case "$library_name" in
+                ld-linux*.so.*|ld-musl-*.so.*) continue ;;
+                *)
+                    echo "unexpected system library outside packaged closure for $binary: $library" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+
+        if [[ ! -f "$library" ]]; then
             echo "shared library is outside packaged closure for $binary: $library" >&2
             exit 1
         fi
+        resolved_library="$(realpath "$library")"
+        case "$resolved_library" in
+            "$depends_dir_real"/*) ;;
+            *)
+                echo "shared library is outside packaged closure for $binary: $library" >&2
+                exit 1
+                ;;
+        esac
     done < <(awk '
-        /=> \/[^ ]+/ { print $3; next }
-        /^[[:space:]]*\/[^ ]+/ { print $1 }
+        /=> \/[^ ]+/ { print "dependency\t" $3; next }
+        /^[[:space:]]*\/[^ ]+/ { print "loader\t" $1 }
     ' <<<"$ldd_output" | LC_ALL=C sort -u)
 done

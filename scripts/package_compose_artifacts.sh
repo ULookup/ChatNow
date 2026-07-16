@@ -4,6 +4,8 @@ set -euo pipefail
 services=(conversation gateway identity media message presence push relationship transmite)
 build_root="${1:-build}"
 artifact_root="${2:-compose-artifacts}"
+ldd_command="${LDD:-ldd}"
+sha256sum_command="${SHA256SUM:-sha256sum}"
 
 rm -rf "$artifact_root"
 mkdir -p "$artifact_root"
@@ -20,7 +22,7 @@ for service in "${services[@]}"; do
     mkdir -p "$service_root/build" "$depends_dir"
     cp -p "$binary" "$service_root/build/${service}_server"
 
-    ldd_output="$(ldd "$binary" 2>&1)" || {
+    ldd_output="$("$ldd_command" "$binary" 2>&1)" || {
         echo "ldd failed for $binary: $ldd_output" >&2
         exit 1
     }
@@ -42,7 +44,7 @@ done
 
 (
     cd "$artifact_root"
-    find . -type f ! -name MANIFEST.sha256 -print0 \
+    find . \( -type f -o -type l \) ! -name MANIFEST.sha256 -print0 \
         | LC_ALL=C sort -z \
-        | xargs -0 sha256sum > MANIFEST.sha256
+        | xargs -0 "$sha256sum_command" > MANIFEST.sha256
 )

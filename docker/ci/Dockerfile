@@ -157,6 +157,9 @@ RUN set -euo pipefail; \
     git -C /tmp/aws-sdk-cpp fetch --depth 1 origin "$AWS_SDK_CPP_REV"; \
     git -C /tmp/aws-sdk-cpp checkout --detach FETCH_HEAD; \
     test "$(git -C /tmp/aws-sdk-cpp rev-parse HEAD)" = "$AWS_SDK_CPP_REV"; \
+    git -C /tmp/aws-sdk-cpp submodule sync --recursive; \
+    git -C /tmp/aws-sdk-cpp submodule update --init --recursive --depth 1; \
+    test -z "$(git -C /tmp/aws-sdk-cpp submodule status --recursive | grep -E '^[+-]' || true)"; \
     cmake -S /tmp/aws-sdk-cpp -B /tmp/aws-sdk-cpp-build -G Ninja \
         -DBUILD_ONLY=s3 \
         -DBUILD_SHARED_LIBS=ON \
