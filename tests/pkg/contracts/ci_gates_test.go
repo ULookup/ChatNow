@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -65,6 +66,7 @@ func TestCIGates(t *testing.T) {
 	require.Equal(t, "github.event_name == 'schedule'", perfCache.If)
 	assertFullStackGateJob(t, perfCache, "cd tests && make test-perf-cache-gate")
 	assertTargetAbsent(t, perfCache, "test-perf-cache")
+	assertInvalidGateJobsRejected(t, perfCache, "cd tests && make test-perf-cache-gate")
 
 	require.Equal(t, "2147483647", gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_USER_MAX"))
 	require.Equal(t, "2147483647", gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_SESSION_MAX"))
@@ -79,17 +81,7 @@ func TestCIGates(t *testing.T) {
 
 func assertFullStackGateJob(t *testing.T, job workflowJob, target string) {
 	t.Helper()
-	require.NotEqual(t, -1, exactUsesStepIndex(job, "actions/checkout@v4"))
-	require.NotEqual(t, -1, exactUsesStepIndex(job, "actions/setup-go@v5"))
-	for _, command := range []string{
-		"sudo apt-get install -y protobuf-compiler netcat-openbsd",
-		"go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11",
-		"docker compose up -d --build", "./scripts/wait_for_services.sh",
-		"cd tests && make proto", "cd tests && go mod download", target,
-	} {
-		require.NotEqual(t, -1, exactRunStepIndex(job, command), "missing exact executable command %q", command)
-	}
-	require.True(t, hasAlwaysTeardown(job), "gate job must always tear down its own stack")
+	require.NoError(t, validateFullStackGateJob(job, target))
 }
 
 func assertContractsRunInBuild(t *testing.T, build workflowJob) {
@@ -106,10 +98,8 @@ func assertContractsRunInBuild(t *testing.T, build workflowJob) {
 
 func exactRunStepIndex(job workflowJob, wanted string) int {
 	for index, step := range job.Steps {
-		for _, command := range executableCommands(step.Run) {
-			if command == wanted {
-				return index
-			}
+		if strings.TrimSpace(step.Run) == wanted {
+			return index
 		}
 	}
 	return -1
@@ -133,43 +123,121 @@ func assertDecoratedCommandsDoNotSatisfyGate(t *testing.T) {
 		"echo '" + gate + "'",
 		gate + "-disabled",
 		"false && " + gate,
+		"exit 0\n" + gate,
+		"if false; then " + gate + "; fi",
 		gate + " # disabled",
+		gate + "\nexit 0",
+		"cat <<'EOF'\n" + gate + "\nEOF",
+		"gate() { " + gate + "; }\ngate",
+		`cd tests && make "test-perf-cache"`,
 	} {
 		job := workflowJob{Steps: []workflowStep{{Run: lookalike}}}
 		require.Equal(t, -1, exactRunStepIndex(job, gate), "%q must not satisfy the executable gate contract", lookalike)
 	}
 }
 
-func executableCommands(script string) []string {
-	var commands []string
-	for _, line := range strings.Split(script, "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" && !strings.HasPrefix(line, "#") {
-			commands = append(commands, line)
-		}
+func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target string) {
+	t.Helper()
+	gate := exactRunStepIndex(valid, target)
+	deps := exactRunStepIndex(valid, "cd tests && go mod download")
+	teardown := exactRunStepIndex(valid, "docker compose down -v")
+	require.NotEqual(t, -1, gate)
+	require.NotEqual(t, -1, deps)
+	require.NotEqual(t, -1, teardown)
+
+	for name, mutate := range map[string]func(*workflowJob){
+		"exit zero after gate": func(job *workflowJob) {
+			job.Steps[gate].Run = target + "\nexit 0"
+		},
+		"if false gate": func(job *workflowJob) {
+			job.Steps[gate].Run = "if false; then " + target + "; fi"
+		},
+		"quoted skip target": func(job *workflowJob) {
+			job.Steps[gate].Run = `cd tests && make "test-perf-cache"`
+		},
+		"gate before dependencies": func(job *workflowJob) {
+			job.Steps[gate], job.Steps[deps] = job.Steps[deps], job.Steps[gate]
+		},
+		"teardown before gate": func(job *workflowJob) {
+			job.Steps[gate], job.Steps[teardown] = job.Steps[teardown], job.Steps[gate]
+		},
+		"teardown not last": func(job *workflowJob) {
+			job.Steps = append(job.Steps, workflowStep{Run: "true"})
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := cloneWorkflowJob(valid)
+			mutate(&invalid)
+			require.Error(t, validateFullStackGateJob(invalid, target))
+		})
 	}
-	return commands
+}
+
+func cloneWorkflowJob(job workflowJob) workflowJob {
+	clone := job
+	clone.Steps = append([]workflowStep(nil), job.Steps...)
+	return clone
 }
 
 func assertTargetAbsent(t *testing.T, job workflowJob, target string) {
 	t.Helper()
 	for _, step := range job.Steps {
-		for _, command := range executableCommands(step.Run) {
-			words := strings.FieldsFunc(command, func(r rune) bool {
-				return strings.ContainsRune(" \t;&|()<>#", r)
-			})
-			require.NotContains(t, words, target, "PF-09 CI must not execute the skip-capable discovery target")
-		}
+		require.NotEqual(t, "cd tests && make "+target, strings.TrimSpace(step.Run),
+			"PF-09 CI must not execute the skip-capable discovery target")
 	}
 }
 
-func hasAlwaysTeardown(job workflowJob) bool {
+func validateFullStackGateJob(job workflowJob, target string) error {
+	const install = "sudo apt-get update\nsudo apt-get install -y protobuf-compiler netcat-openbsd"
+	ordered := []struct {
+		label string
+		index int
+	}{
+		{"checkout", exactUsesStepIndex(job, "actions/checkout@v4")},
+		{"Go setup", exactUsesStepIndex(job, "actions/setup-go@v5")},
+		{"system dependency install", exactRunStepIndex(job, install)},
+		{"protoc generator install", exactRunStepIndex(job, "go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11")},
+		{"full-stack startup", exactRunStepIndex(job, "docker compose up -d --build")},
+		{"service wait", exactRunStepIndex(job, "./scripts/wait_for_services.sh")},
+		{"protobuf generation", exactRunStepIndex(job, "cd tests && make proto")},
+		{"dependency download", exactRunStepIndex(job, "cd tests && go mod download")},
+		{"gate", exactRunStepIndex(job, target)},
+		{"teardown", exactRunStepIndex(job, "docker compose down -v")},
+	}
+	previous := -1
+	for _, step := range ordered {
+		if step.index < 0 {
+			return fmt.Errorf("missing exact %s step", step.label)
+		}
+		if step.index <= previous {
+			return fmt.Errorf("%s step is out of order", step.label)
+		}
+		previous = step.index
+	}
+	teardown := ordered[len(ordered)-1].index
+	if teardown != len(job.Steps)-1 {
+		return fmt.Errorf("teardown must be the final step")
+	}
+	if job.Steps[teardown].If != "always()" {
+		return fmt.Errorf("teardown must use if: always()")
+	}
+	if countExactRunSteps(job, target) != 1 {
+		return fmt.Errorf("gate command must appear exactly once")
+	}
+	if countExactRunSteps(job, "docker compose down -v") != 1 {
+		return fmt.Errorf("teardown command must appear exactly once")
+	}
+	return nil
+}
+
+func countExactRunSteps(job workflowJob, wanted string) int {
+	count := 0
 	for _, step := range job.Steps {
-		if step.If == "always()" && len(executableCommands(step.Run)) == 1 && executableCommands(step.Run)[0] == "docker compose down -v" {
-			return true
+		if strings.TrimSpace(step.Run) == wanted {
+			count++
 		}
 	}
-	return false
+	return count
 }
 
 func gateEnv(t *testing.T, job workflowJob, name string) string {
@@ -177,7 +245,7 @@ func gateEnv(t *testing.T, job workflowJob, name string) string {
 	raw := job.Env[name]
 	if raw == "" {
 		for _, step := range job.Steps {
-			if len(executableCommands(step.Run)) == 1 && executableCommands(step.Run)[0] == "docker compose up -d --build" && step.Env[name] != "" {
+			if strings.TrimSpace(step.Run) == "docker compose up -d --build" && step.Env[name] != "" {
 				raw = step.Env[name]
 				break
 			}
