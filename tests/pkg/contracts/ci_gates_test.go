@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -51,25 +50,24 @@ func TestCIGates(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(workflowBytes, &workflow), "workflow must be valid YAML")
 	require.NotNil(t, workflow.On.PullRequest, "workflow must handle pull requests")
 	require.NotEmpty(t, workflow.On.Schedule, "workflow must define a schedule")
+	assertDecoratedCommandsDoNotSatisfyGate(t)
+	assertContractsRunInBuild(t, workflow.Jobs["build"])
 
 	reliability, ok := workflow.Jobs["reliability"]
 	require.True(t, ok, "RL-05 must have a dedicated reliability job")
 	require.Nil(t, reliability.Needs, "reliability must own its setup instead of depending on another job")
-	require.Contains(t, reliability.If, "github.event_name == 'pull_request'")
-	require.Contains(t, reliability.If, "github.event_name == 'schedule'")
-	assertFullStackGateJob(t, reliability, "make test-reliability")
+	require.Equal(t, "github.event_name == 'pull_request' || github.event_name == 'schedule'", reliability.If)
+	assertFullStackGateJob(t, reliability, "cd tests && make test-reliability")
 
 	perfCache, ok := workflow.Jobs["perf-cache"]
 	require.True(t, ok, "PF-09 must have a dedicated perf-cache job")
 	require.Nil(t, perfCache.Needs, "perf-cache must own its setup instead of depending on another job")
-	require.Contains(t, perfCache.If, "github.event_name == 'schedule'")
-	assertFullStackGateJob(t, perfCache, "make test-perf-cache-gate")
-	require.NotContains(t, allRuns(perfCache), "make test-perf-cache\n", "PF-09 CI must not use the skip-capable discovery target")
+	require.Equal(t, "github.event_name == 'schedule'", perfCache.If)
+	assertFullStackGateJob(t, perfCache, "cd tests && make test-perf-cache-gate")
+	assertTargetAbsent(t, perfCache, "test-perf-cache")
 
-	userLimit := gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_USER_MAX")
-	sessionLimit := gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_SESSION_MAX")
-	require.Greater(t, userLimit, 50000, "PF-09 user limit must exceed its 5000 msg/s ten-second load")
-	require.Greater(t, sessionLimit, 50000, "PF-09 session limit must exceed its 5000 msg/s ten-second load")
+	require.Equal(t, "2147483647", gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_USER_MAX"))
+	require.Equal(t, "2147483647", gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_SESSION_MAX"))
 
 	var compose composeContract
 	require.NoError(t, yaml.Unmarshal(composeBytes, &compose), "Compose file must be valid YAML")
@@ -81,59 +79,112 @@ func TestCIGates(t *testing.T) {
 
 func assertFullStackGateJob(t *testing.T, job workflowJob, target string) {
 	t.Helper()
-	runs := allRuns(job)
-	require.Contains(t, uses(job), "actions/checkout@v4")
-	require.Contains(t, uses(job), "actions/setup-go@v5")
+	require.NotEqual(t, -1, exactUsesStepIndex(job, "actions/checkout@v4"))
+	require.NotEqual(t, -1, exactUsesStepIndex(job, "actions/setup-go@v5"))
 	for _, command := range []string{
-		"protobuf-compiler", "protoc-gen-go", "docker compose up -d --build",
-		"wait_for_services.sh", "make proto", "go mod download", target,
+		"sudo apt-get install -y protobuf-compiler netcat-openbsd",
+		"go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11",
+		"docker compose up -d --build", "./scripts/wait_for_services.sh",
+		"cd tests && make proto", "cd tests && go mod download", target,
 	} {
-		require.Contains(t, runs, command)
+		require.NotEqual(t, -1, exactRunStepIndex(job, command), "missing exact executable command %q", command)
 	}
 	require.True(t, hasAlwaysTeardown(job), "gate job must always tear down its own stack")
 }
 
-func allRuns(job workflowJob) string {
-	var runs strings.Builder
-	for _, step := range job.Steps {
-		runs.WriteString(step.Run)
-		runs.WriteByte('\n')
-	}
-	return runs.String()
+func assertContractsRunInBuild(t *testing.T, build workflowJob) {
+	t.Helper()
+	setupGo := exactUsesStepIndex(build, "actions/setup-go@v5")
+	proto := exactRunStepIndex(build, "cd tests && make proto")
+	deps := exactRunStepIndex(build, "cd tests && go mod download")
+	contracts := exactRunStepIndex(build, "cd tests && go test ./pkg/contracts -count=1")
+	require.NotEqual(t, -1, setupGo, "build must set up Go")
+	require.Greater(t, proto, setupGo, "protobuf generation must follow Go setup")
+	require.Greater(t, deps, proto, "dependency download must follow protobuf generation")
+	require.Greater(t, contracts, deps, "CI contract tests must run after setup, protobuf generation, and dependency download")
 }
 
-func uses(job workflowJob) string {
-	var values []string
-	for _, step := range job.Steps {
-		values = append(values, step.Uses)
+func exactRunStepIndex(job workflowJob, wanted string) int {
+	for index, step := range job.Steps {
+		for _, command := range executableCommands(step.Run) {
+			if command == wanted {
+				return index
+			}
+		}
 	}
-	return strings.Join(values, "\n")
+	return -1
+}
+
+func exactUsesStepIndex(job workflowJob, wanted string) int {
+	for index, step := range job.Steps {
+		if step.Uses == wanted {
+			return index
+		}
+	}
+	return -1
+}
+
+func assertDecoratedCommandsDoNotSatisfyGate(t *testing.T) {
+	t.Helper()
+	const gate = "cd tests && make test-perf-cache-gate"
+	require.Equal(t, 0, exactRunStepIndex(workflowJob{Steps: []workflowStep{{Run: gate}}}, gate))
+	for _, lookalike := range []string{
+		"# " + gate,
+		"echo '" + gate + "'",
+		gate + "-disabled",
+		"false && " + gate,
+		gate + " # disabled",
+	} {
+		job := workflowJob{Steps: []workflowStep{{Run: lookalike}}}
+		require.Equal(t, -1, exactRunStepIndex(job, gate), "%q must not satisfy the executable gate contract", lookalike)
+	}
+}
+
+func executableCommands(script string) []string {
+	var commands []string
+	for _, line := range strings.Split(script, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			commands = append(commands, line)
+		}
+	}
+	return commands
+}
+
+func assertTargetAbsent(t *testing.T, job workflowJob, target string) {
+	t.Helper()
+	for _, step := range job.Steps {
+		for _, command := range executableCommands(step.Run) {
+			words := strings.FieldsFunc(command, func(r rune) bool {
+				return strings.ContainsRune(" \t;&|()<>#", r)
+			})
+			require.NotContains(t, words, target, "PF-09 CI must not execute the skip-capable discovery target")
+		}
+	}
 }
 
 func hasAlwaysTeardown(job workflowJob) bool {
 	for _, step := range job.Steps {
-		if step.If == "always()" && strings.Contains(step.Run, "docker compose down -v") {
+		if step.If == "always()" && len(executableCommands(step.Run)) == 1 && executableCommands(step.Run)[0] == "docker compose down -v" {
 			return true
 		}
 	}
 	return false
 }
 
-func gateEnv(t *testing.T, job workflowJob, name string) int {
+func gateEnv(t *testing.T, job workflowJob, name string) string {
 	t.Helper()
 	raw := job.Env[name]
 	if raw == "" {
 		for _, step := range job.Steps {
-			if strings.Contains(step.Run, "docker compose up -d --build") && step.Env[name] != "" {
+			if len(executableCommands(step.Run)) == 1 && executableCommands(step.Run)[0] == "docker compose up -d --build" && step.Env[name] != "" {
 				raw = step.Env[name]
 				break
 			}
 		}
 	}
 	require.NotEmpty(t, raw, "%s must be supplied to the PF-09 stack", name)
-	value, err := strconv.Atoi(raw)
-	require.NoError(t, err, "%s must be an explicit integer", name)
-	return value
+	return raw
 }
 
 func repositoryRoot(t *testing.T) string {
