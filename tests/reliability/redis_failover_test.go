@@ -141,6 +141,15 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 		require.NoError(t, readErr)
 	}
 
+	// A successful end-to-end warm delivery deterministically fills this Push
+	// instance's two-second route L1 immediately before the outage choreography.
+	warmMarker := "rl-unacked-warm-" + client.NewRequestID()
+	sendReliabilityMessage(t, sender, convID, warmMarker)
+	require.True(t, readWebSocketMarker(ws, warmMarker, 5*time.Second), "warm Push delivery missing")
+	pushEndpoints := reliabilityPushEndpoints(t)
+	persistBefore := reliabilitySumBVar(t, pushEndpoints, "push_unacked_persist_failure_total")
+	requeueBefore := reliabilitySumBVar(t, pushEndpoints, "push_message_requeue_total")
+
 	pushContainer := HTTP.Config().Infra.PushContainer
 	require.NotEmpty(t, pushContainer)
 	requireDocker(t, "pause", pushContainer)
@@ -157,20 +166,15 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 	})
 
 	marker := "rl-unacked-" + client.NewRequestID()
-	sendRsp := &transmite.SendMessageRsp{}
-	require.NoError(t, sender.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
-		RequestId: client.NewRequestID(), ConversationId: convID,
-		Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
-			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: marker}}},
-		ClientMsgId: client.NewRequestID(),
-	}, sendRsp))
-	require.True(t, sendRsp.GetHeader().GetSuccess(), sendRsp.GetHeader().GetErrorMessage())
+	sendReliabilityMessage(t, sender, convID, marker)
 
 	chaos.StopRedisCluster(t, HTTP.Config())
 	redisStopped = true
 	requireDocker(t, "unpause", pushContainer)
 	paused = false
-	if payload, readErr := ws.ReadFrame(2 * time.Second); readErr == nil {
+	requireBVarIncrease(t, pushEndpoints, "push_unacked_persist_failure_total", persistBefore, 5*time.Second)
+	requireBVarIncrease(t, pushEndpoints, "push_message_requeue_total", requeueBefore, 5*time.Second)
+	if payload, readErr := ws.ReadFrame(500 * time.Millisecond); readErr == nil {
 		t.Fatalf("Push delivered before durable Unacked persistence: %x", payload)
 	} else if timeout, ok := readErr.(net.Error); !ok || !timeout.Timeout() {
 		t.Fatalf("websocket failed while awaiting Redis outage: %v", readErr)
@@ -180,22 +184,49 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 	chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
 	redisStopped = false
 
-	delivered := false
-	deadline = time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		payload, readErr := ws.ReadFrame(time.Until(deadline))
-		if readErr != nil {
-			break
-		}
-		if bytes.Contains(payload, []byte(marker)) {
-			delivered = true
-			break
-		}
-	}
-	require.True(t, delivered, "requeued Push was not delivered after Redis recovery")
+	require.True(t, readWebSocketMarker(ws, marker, 20*time.Second),
+		"requeued Push was not delivered after Redis recovery")
 	unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
 	require.Equal(t, "1", verify.RedisCLI(t, "EXISTS", unackedKey),
 		"delivery must follow durable Unacked persistence")
+}
+
+func sendReliabilityMessage(t testing.TB, sender *client.HTTPClient, convID, marker string) {
+	t.Helper()
+	rsp := &transmite.SendMessageRsp{}
+	require.NoError(t, sender.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
+		RequestId: client.NewRequestID(), ConversationId: convID,
+		Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: marker}}},
+		ClientMsgId: client.NewRequestID(),
+	}, rsp))
+	require.True(t, rsp.GetHeader().GetSuccess(), rsp.GetHeader().GetErrorMessage())
+}
+
+func readWebSocketMarker(ws *client.WebSocket, marker string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		payload, err := ws.ReadFrame(time.Until(deadline))
+		if err != nil {
+			return false
+		}
+		if bytes.Contains(payload, []byte(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+func requireBVarIncrease(t testing.TB, endpoints []string, metric string, before int64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if reliabilitySumBVar(t, endpoints, metric) > before {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("%s did not increase from %d", metric, before)
 }
 
 func requireDocker(t testing.TB, args ...string) {
@@ -207,8 +238,18 @@ func requireDocker(t testing.TB, args ...string) {
 
 func reliabilityTransmiteEndpoints(t testing.TB) []string {
 	t.Helper()
+	return reliabilityEndpoints(t, HTTP.Config().Infra.TransmiteVars)
+}
+
+func reliabilityPushEndpoints(t testing.TB) []string {
+	t.Helper()
+	return reliabilityEndpoints(t, HTTP.Config().Infra.PushVars)
+}
+
+func reliabilityEndpoints(t testing.TB, rawEndpoints string) []string {
+	t.Helper()
 	var endpoints []string
-	for _, raw := range strings.Split(HTTP.Config().Infra.TransmiteVars, ",") {
+	for _, raw := range strings.Split(rawEndpoints, ",") {
 		if endpoint := strings.TrimRight(strings.TrimSpace(raw), "/"); endpoint != "" {
 			endpoints = append(endpoints, endpoint)
 		}

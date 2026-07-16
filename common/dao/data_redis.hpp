@@ -1136,7 +1136,15 @@ public:
 
     struct BatchResult {
         std::unordered_map<std::string, std::string> hits;
-        std::vector<std::string> misses;
+        struct Miss {
+            std::string uid;
+            std::optional<uint64_t> observed_generation;
+        };
+        std::vector<Miss> misses;
+    };
+    struct FencedValue {
+        std::string serialized;
+        uint64_t observed_generation;
     };
 
     explicit UserInfoCache(const RedisClient::ptr &c) : _c(c) {}
@@ -1158,7 +1166,7 @@ public:
         BatchResult result;
         const size_t count = std::min<size_t>(uids.size(), 2000);
         if (!_c) {
-            result.misses.assign(uids.begin(), uids.begin() + count);
+            for (size_t i = 0; i < count; ++i) result.misses.push_back({uids[i], std::nullopt});
             return result;
         }
         std::unordered_map<uint32_t, std::vector<std::pair<std::string, std::string>>> groups;
@@ -1170,28 +1178,41 @@ public:
             const auto &entries = group.second;
             std::vector<std::string> keys;
             keys.reserve(entries.size());
-            for (const auto &entry : entries) keys.push_back(entry.second);
+            for (const auto &entry : entries) {
+                keys.push_back(entry.second);
+                keys.push_back(key::user_info_generation_key(entry.first));
+            }
             try {
                 std::vector<sw::redis::OptionalString> values;
                 values.reserve(keys.size());
                 _c->mget(keys.begin(), keys.end(), std::back_inserter(values));
                 for (size_t i = 0; i < entries.size(); ++i) {
-                    if (i < values.size() && values[i]) result.hits[entries[i].first] = *values[i];
-                    else result.misses.push_back(entries[i].first);
+                    const size_t value_index = i * 2;
+                    if (value_index < values.size() && values[value_index]) {
+                        result.hits[entries[i].first] = *values[value_index];
+                    } else {
+                        std::optional<uint64_t> observed;
+                        if (value_index + 1 < values.size()) {
+                            try {
+                                observed = values[value_index + 1]
+                                    ? std::stoull(*values[value_index + 1]) : uint64_t{0};
+                            } catch (const std::exception &) {}
+                        }
+                        result.misses.push_back({entries[i].first, observed});
+                    }
                 }
             } catch (const RedisCircuitOpen &) {
-                for (const auto &entry : entries) result.misses.push_back(entry.first);
+                for (const auto &entry : entries) result.misses.push_back({entry.first, std::nullopt});
             } catch (const std::exception &) {
-                for (const auto &entry : entries) result.misses.push_back(entry.first);
+                for (const auto &entry : entries) result.misses.push_back({entry.first, std::nullopt});
             }
         }
         return result;
     }
 
-    void set(const std::string &uid, const std::string &serialized) {
-        if (!_c) return;
-        const auto observed = generation(uid);
-        if (observed) (void)set_if_generation(uid, serialized, *observed);
+    bool set(const std::string &uid, const std::string &serialized,
+             uint64_t observed_generation) {
+        return set_if_generation(uid, serialized, observed_generation);
     }
 
     std::optional<uint64_t> generation(const std::string &uid) {
@@ -1227,13 +1248,38 @@ public:
         }
     }
 
-    void batch_set(const std::unordered_map<std::string, std::string> &values) {
-        if (!_c) return;
+    size_t batch_set(const std::unordered_map<std::string, FencedValue> &values) {
+        if (!_c) return 0;
+        std::unordered_map<uint32_t, std::vector<std::pair<std::string, FencedValue>>> groups;
         size_t count = 0;
         for (const auto &entry : values) {
             if (count++ >= 2000) break;
-            set(entry.first, entry.second);
+            groups[key::user_info_bucket(entry.first)].push_back(entry);
         }
+        size_t written = 0;
+        for (const auto &group : groups) {
+            std::vector<std::string> keys;
+            std::vector<std::string> args;
+            keys.reserve(group.second.size() * 2);
+            args.reserve(group.second.size() * 3);
+            for (const auto &[uid, value] : group.second) {
+                keys.push_back(key::user_info_key(uid));
+                keys.push_back(key::user_info_generation_key(uid));
+                args.push_back(std::to_string(value.observed_generation));
+                args.push_back(value.serialized);
+                const auto ttl = value.serialized.empty()
+                    ? randomized_ttl(std::chrono::seconds(5))
+                    : randomized_ttl(kUserInfoTtl);
+                args.push_back(std::to_string(ttl.count()));
+            }
+            try {
+                written += static_cast<size_t>(_c->eval<long long>(
+                    kBatchSetIfGenerationLua, keys.begin(), keys.end(),
+                    args.begin(), args.end()));
+            } catch (const RedisCircuitOpen &) {
+            } catch (const std::exception &) {}
+        }
+        return written;
     }
 
     bool invalidate(const std::string &uid) noexcept {
@@ -1267,6 +1313,19 @@ redis.call('INCR', KEYS[2])
 redis.call('EXPIRE', KEYS[2], 604800)
 redis.call('DEL', KEYS[1])
 return 1
+)lua";
+    static constexpr const char *kBatchSetIfGenerationLua = R"lua(
+local written = 0
+for i = 1, #KEYS, 2 do
+    local arg = ((i - 1) / 2) * 3 + 1
+    local generation = tonumber(redis.call('GET', KEYS[i + 1]) or '0')
+    if generation == tonumber(ARGV[arg]) then
+        redis.call('SET', KEYS[i], ARGV[arg + 1], 'EX', ARGV[arg + 2])
+        redis.call('EXPIRE', KEYS[i + 1], 604800)
+        written = written + 1
+    end
+end
+return written
 )lua";
     RedisClient::ptr _c;
 };

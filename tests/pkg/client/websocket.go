@@ -16,7 +16,8 @@ import (
 )
 
 type WebSocket struct {
-	conn net.Conn
+	conn   net.Conn
+	reader *bufio.Reader
 }
 
 func OpenWebSocket(cfg *Config) (*WebSocket, error) {
@@ -42,7 +43,8 @@ func OpenWebSocket(cfg *Config) (*WebSocket, error) {
 	if err := req.Write(conn); err != nil {
 		return fail(err)
 	}
-	rsp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	reader := bufio.NewReader(conn)
+	rsp, err := http.ReadResponse(reader, req)
 	if err != nil {
 		return fail(err)
 	}
@@ -52,13 +54,17 @@ func OpenWebSocket(cfg *Config) (*WebSocket, error) {
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		return fail(err)
 	}
-	return &WebSocket{conn: conn}, nil
+	return &WebSocket{conn: conn, reader: reader}, nil
 }
 
 func (ws *WebSocket) Close() error { return ws.conn.Close() }
 
 func (ws *WebSocket) WriteBinary(payload []byte) error {
-	frame := []byte{0x82}
+	return ws.writeFrame(0x2, payload)
+}
+
+func (ws *WebSocket) writeFrame(opcode byte, payload []byte) error {
+	frame := []byte{0x80 | opcode}
 	switch {
 	case len(payload) < 126:
 		frame = append(frame, 0x80|byte(len(payload)))
@@ -86,44 +92,99 @@ func (ws *WebSocket) ReadFrame(timeout time.Duration) ([]byte, error) {
 	if err := ws.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, err
 	}
-	var header [2]byte
-	if _, err := io.ReadFull(ws.conn, header[:]); err != nil {
-		return nil, err
+	var message []byte
+	continuing := false
+	for {
+		fin, opcode, payload, err := ws.readRawFrame()
+		if err != nil {
+			return nil, err
+		}
+		switch opcode {
+		case 0x8:
+			_ = ws.Close()
+			return nil, io.EOF
+		case 0x9:
+			if err := ws.writeFrame(0xA, payload); err != nil {
+				return nil, err
+			}
+			continue
+		case 0xA:
+			continue
+		case 0x1, 0x2:
+			if continuing {
+				_ = ws.Close()
+				return nil, fmt.Errorf("new data frame during continuation")
+			}
+			message = append(message, payload...)
+			if fin {
+				return message, nil
+			}
+			continuing = true
+		case 0x0:
+			if !continuing {
+				_ = ws.Close()
+				return nil, fmt.Errorf("unexpected continuation frame")
+			}
+			message = append(message, payload...)
+			if fin {
+				return message, nil
+			}
+		default:
+			_ = ws.Close()
+			return nil, fmt.Errorf("unsupported websocket opcode %d", opcode)
+		}
 	}
+}
+
+func (ws *WebSocket) readRawFrame() (bool, byte, []byte, error) {
+	var header [2]byte
+	n, err := io.ReadFull(ws.reader, header[:])
+	if err != nil {
+		if n != 0 {
+			_ = ws.Close()
+		}
+		return false, 0, nil, err
+	}
+	fin, opcode := header[0]&0x80 != 0, header[0]&0x0f
 	length := uint64(header[1] & 0x7f)
 	switch length {
 	case 126:
 		var size [2]byte
-		if _, err := io.ReadFull(ws.conn, size[:]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(ws.reader, size[:]); err != nil {
+			_ = ws.Close()
+			return false, 0, nil, err
 		}
 		length = uint64(binary.BigEndian.Uint16(size[:]))
 	case 127:
 		var size [8]byte
-		if _, err := io.ReadFull(ws.conn, size[:]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(ws.reader, size[:]); err != nil {
+			_ = ws.Close()
+			return false, 0, nil, err
 		}
 		length = binary.BigEndian.Uint64(size[:])
 	}
 	if length > 1<<20 {
-		return nil, fmt.Errorf("websocket frame too large: %d", length)
+		_ = ws.Close()
+		return false, 0, nil, fmt.Errorf("websocket frame too large: %d", length)
 	}
 	var mask [4]byte
 	if header[1]&0x80 != 0 {
-		if _, err := io.ReadFull(ws.conn, mask[:]); err != nil {
-			return nil, err
+		if _, err := io.ReadFull(ws.reader, mask[:]); err != nil {
+			_ = ws.Close()
+			return false, 0, nil, err
 		}
 	}
 	payload := make([]byte, length)
-	if _, err := io.ReadFull(ws.conn, payload); err != nil {
-		return nil, err
+	if _, err := io.ReadFull(ws.reader, payload); err != nil {
+		_ = ws.Close()
+		return false, 0, nil, err
 	}
 	if header[1]&0x80 != 0 {
 		for i := range payload {
 			payload[i] ^= mask[i%len(mask)]
 		}
 	}
-	return payload, nil
+	return fin, opcode, payload, nil
 }
 
 func PushAuthNotify(accessToken, deviceID string) []byte {

@@ -128,17 +128,13 @@ public:
             auto route = resolve_route(request->user_id());
             // Persist before delivery. On failure the RPC is retryable and no
             // client has observed a payload without durable retransmit state.
-            if (request->has_user_seq() && !_unacked) {
-                throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
-                                              "unacked persistence unavailable");
-            }
             if (request->has_user_seq()) {
                 std::string payload_b64 = _utils_base64_encode(payload);
                 long long now_ts = static_cast<long long>(time(nullptr));
                 for (const auto &did : route.device_ids) {
                     if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
-                    _unacked->push(request->user_id(), did,
-                                   request->user_seq(), payload_b64, now_ts);
+                    persist_unacked_(request->user_id(), did, request->user_seq(),
+                                     payload_b64, now_ts);
                 }
             }
 
@@ -209,13 +205,9 @@ public:
                 }
 
                 for (const auto &did : route.device_ids) {
-                    if (it != uid2seq.end() && !_unacked) {
-                        throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
-                                                      "unacked persistence unavailable");
-                    }
                     if (it != uid2seq.end()) {
-                        _unacked->push(uid, did, it->second,
-                                       _utils_base64_encode(payload), now_ts);
+                        persist_unacked_(uid, did, it->second,
+                                         _utils_base64_encode(payload), now_ts);
                     }
                     if (_local_send(uid, did, payload) > 0) ++total;
                 }
@@ -275,10 +267,10 @@ public:
                 route = resolve_route(uid);
             } catch (const RedisCircuitOpen &e) {
                 LOG_WARN("Push-Consumer: route circuit unavailable: {}", e.what());
-                return ConsumeAction::NackRequeue;
+                return requeue_();
             } catch (const sw::redis::Error &e) {
                 LOG_WARN("Push-Consumer: route Redis unavailable: {}", e.what());
-                return ConsumeAction::NackRequeue;
+                return requeue_();
             }
             if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
 
@@ -299,16 +291,21 @@ public:
                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                 if (inst == _instance_id) {
                     if (itu != uid2seq.end()) {
-                        if (!_unacked) return ConsumeAction::NackRequeue;
                         try {
-                            _unacked->push(uid, did, itu->second,
-                                           _utils_base64_encode(user_payload), now_ts);
+                            persist_unacked_(uid, did, itu->second,
+                                             _utils_base64_encode(user_payload), now_ts);
                         } catch (const RedisCircuitOpen &e) {
                             LOG_WARN("Push-Consumer: unacked circuit unavailable: {}", e.what());
-                            return ConsumeAction::NackRequeue;
+                            return requeue_();
                         } catch (const sw::redis::Error &e) {
                             LOG_WARN("Push-Consumer: unacked Redis unavailable: {}", e.what());
-                            return ConsumeAction::NackRequeue;
+                            return requeue_();
+                        } catch (const ::chatnow::ServiceError &e) {
+                            LOG_WARN("Push-Consumer: unacked unavailable: {}", e.what());
+                            return requeue_();
+                        } catch (const std::exception &e) {
+                            LOG_WARN("Push-Consumer: unacked persistence failed: {}", e.what());
+                            return requeue_();
                         }
                         if (_local_send(uid, did, user_payload) > 0) any_local = true;
                     } else {
@@ -330,9 +327,9 @@ public:
             try {
                 route = resolve_route(uid);
             } catch (const RedisCircuitOpen &) {
-                return ConsumeAction::NackRequeue;
+                return requeue_();
             } catch (const sw::redis::Error &) {
-                return ConsumeAction::NackRequeue;
+                return requeue_();
             }
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
@@ -351,7 +348,7 @@ public:
             auto channel = _mm_channels->choose(peer);
             if (!channel) {
                 LOG_WARN("Push-Consumer: 对端 {} 不可达", peer);
-                return ConsumeAction::NackRequeue;
+                return requeue_();
             }
             PushService_Stub stub(channel.get());
             PushBatchReq req;
@@ -371,7 +368,7 @@ public:
             if (cntl.Failed() || !rsp.header().success()) {
                 LOG_WARN("PushBatch persistence failed peer={}: {} {}", peer,
                          cntl.ErrorText(), rsp.header().error_message());
-                return ConsumeAction::NackRequeue;
+                return requeue_();
             }
         }
         return ConsumeAction::Ack;
@@ -474,6 +471,27 @@ public:
     }
 
 private:
+    void persist_unacked_(const std::string &uid, const std::string &did,
+                          unsigned long user_seq, const std::string &payload_b64,
+                          long long score_ts) {
+        if (!_unacked) {
+            metrics::g_push_unacked_persist_failure_total << 1;
+            throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
+                                          "unacked persistence unavailable");
+        }
+        try {
+            _unacked->push(uid, did, user_seq, payload_b64, score_ts);
+        } catch (...) {
+            metrics::g_push_unacked_persist_failure_total << 1;
+            throw;
+        }
+    }
+
+    static ConsumeAction requeue_() {
+        metrics::g_push_message_requeue_total << 1;
+        return ConsumeAction::NackRequeue;
+    }
+
     void _handle_client_auth_(const NotifyClientAuth &auth,
                               server_t::connection_ptr conn) {
         if (auth.access_token().empty() || auth.device_id().empty()) {
