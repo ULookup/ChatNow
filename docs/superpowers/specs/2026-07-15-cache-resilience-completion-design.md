@@ -277,11 +277,19 @@ C++ gtest 或 Python 合约测试。
 
 文件：`tests/perf/cache_test.go`，build tag：`perf`。
 
-- `PF-09` 分别记录冷缓存、L2 命中和 L1 命中的吞吐与 p50/p95/p99。
+- `PF-09` 分别记录冷缓存、L2 命中和 L1 命中的吞吐与 p95。
 - 目标负载为 5000 msg/s，报告分配量和每请求耗时。
 - 同一 uid 的热路径 Identity RPC 降幅至少 95%。
 - 200 个并发请求访问同一冷 key 时，只允许一次进程内 RPC 回源。
 - nightly 基线吞吐下降超过 10% 时失败。
+- 性能门禁仅在 `PF09_RUN_FULLSTACK=1` 的 Linux 完整服务环境启用；普通编译发现
+  明确 Skip，不把缺少业务栈伪装成性能通过。L2 阶段由测试向真实 Redis Cluster
+  原子写入从 Identity 读取的 UserInfo，确保 fresh sender 的 L1 未预热；L1 阶段再
+  通过真实发送路径预热。
+- 多 Transmite 实例压测通过 `PF09_TRANSMITE_VARS_URLS` 提供所有 bvar 地址并求和，
+  防止遗漏实例导致 RPC 降幅虚高。门禁使用代码库内 5000 msg/s 基线，基线可向上
+  调整但不可降低；5 秒以内的 Go benchmark 校准轮次只报告、不判定，10 秒正式轮次
+  执行吞吐、RPC 降幅和 10% 回退门禁。
 
 ### 10.4 测试辅助设施
 
