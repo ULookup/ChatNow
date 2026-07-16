@@ -26,6 +26,7 @@ var pullRequestSectionRules = []issueSectionRule{
 	{heading: "Unverified Items", rule: "PR_UNVERIFIED_ITEMS_REQUIRED"},
 	{heading: "Rollback Plan", rule: "PR_ROLLBACK_PLAN_REQUIRED"},
 	{heading: "Stacked PR Dependencies", rule: "PR_STACKED_DEPENDENCIES_REQUIRED"},
+	{heading: "Full-diff Self-review", rule: "PR_FULL_DIFF_SELF_REVIEW_REQUIRED"},
 }
 
 // ValidatePullRequest validates the machine-checkable ChatNow pull request

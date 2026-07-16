@@ -59,6 +59,10 @@ Closes #N
 
 <!-- 列出依赖 PR 及合入顺序；没有时说明理由。 -->
 
+## Full-diff Self-review
+
+<!-- 记录 base...HEAD 范围，并说明范围、正确性、测试、安全、兼容性、生成文件、Skill 同步及无关改动的审查结论。 -->
+
 ## Agent Acknowledgements
 
 - [ ] 我已执行自审，并核对 Issue 范围与非目标。

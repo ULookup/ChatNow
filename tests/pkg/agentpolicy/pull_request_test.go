@@ -13,6 +13,7 @@ func TestPullRequestTemplateContract(t *testing.T) {
 		"Closes #N",
 		"<!-- architecture-impact: yes|no -->",
 		"<!-- core-flow-impact: yes|no -->",
+		"## Full-diff Self-review",
 		"human merge",
 	} {
 		if !strings.Contains(content, required) {
@@ -82,6 +83,7 @@ func TestValidatePullRequest(t *testing.T) {
 					"没有未验证项目。", "No unverified items.",
 					"回滚提交并检查离线箱。", "Revert the commit and inspect the outbox.",
 					"没有堆叠依赖。", "No stacked dependency.",
+					"已审查 origin/3.0-dev...HEAD 的完整差异，没有无关改动。", "Reviewed the complete origin/3.0-dev...HEAD diff and found no unrelated change.",
 				).Replace(input.Body)
 			},
 			wantRules: []string{"PR_BODY_CHINESE_REQUIRED"},
@@ -90,6 +92,11 @@ func TestValidatePullRequest(t *testing.T) {
 			name:      "empty RED evidence",
 			mutate:    func(input *PullRequestInput) { input.Body = emptySection(input.Body, "RED Evidence") },
 			wantRules: []string{"PR_RED_EVIDENCE_REQUIRED"},
+		},
+		{
+			name:      "empty full diff self review",
+			mutate:    func(input *PullRequestInput) { input.Body = emptySection(input.Body, "Full-diff Self-review") },
+			wantRules: []string{"PR_FULL_DIFF_SELF_REVIEW_REQUIRED"},
 		},
 		{
 			name:      "invalid title type",
@@ -166,5 +173,8 @@ None：没有未验证项目。
 
 ## Stacked PR Dependencies
 None：没有堆叠依赖。
+
+## Full-diff Self-review
+已审查 origin/3.0-dev...HEAD 的完整差异，没有无关改动。
 `
 }
