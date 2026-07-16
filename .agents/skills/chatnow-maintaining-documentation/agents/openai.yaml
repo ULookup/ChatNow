@@ -1,4 +1,0 @@
-interface:
-  display_name: "Maintain ChatNow Documentation"
-  short_description: "Keep ChatNow engineering facts and Skills synchronized"
-  default_prompt: "Use $chatnow-maintaining-documentation to update ChatNow engineering documentation."
