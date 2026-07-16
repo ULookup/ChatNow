@@ -1825,11 +1825,10 @@ public:
               long long score_ts, std::chrono::seconds ttl = kUnackedTtl) {
         std::string k = key_for(uid, device_id);
         std::string ik = idx_key_for(uid, device_id);
-        std::string member = std::to_string(user_seq) + ":" + payload_b64;
         const auto effective_ttl = randomized_ttl(ttl);
         std::vector<std::string> keys = {k, ik};
         std::vector<std::string> args = {
-            std::to_string(score_ts), member, std::to_string(user_seq), payload_b64,
+            std::to_string(score_ts), std::to_string(user_seq), payload_b64,
             std::to_string(effective_ttl.count())};
         _c->eval<long long>(kPushLua, keys.begin(), keys.end(),
                             args.begin(), args.end());
@@ -1856,19 +1855,16 @@ public:
         if(limit <= 0) return res;
         try {
             std::string k = key_for(uid, device_id);
+            std::string ik = idx_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
-            using namespace sw::redis;
             std::vector<std::string> raw;
-            _c->zrangebyscore(k,
-                              BoundedInterval<double>(0, static_cast<double>(now - max_age_sec),
-                                                       BoundType::CLOSED),
-                              LimitOptions{0, limit},
-                              std::back_inserter(raw));
-            for (const auto &s : raw) {
-                auto pos = s.find(':');
-                if (pos == std::string::npos) continue;
-                unsigned long seq = std::stoull(s.substr(0, pos));
-                res.emplace_back(seq, s.substr(pos + 1));
+            std::vector<std::string> keys = {k, ik};
+            std::vector<std::string> args = {
+                std::to_string(now - max_age_sec), std::to_string(limit)};
+            _c->eval(kPeekDueLua, keys.begin(), keys.end(),
+                     args.begin(), args.end(), std::back_inserter(raw));
+            for (size_t i = 0; i + 1 < raw.size(); i += 2) {
+                res.emplace_back(std::stoull(raw[i]), std::move(raw[i + 1]));
             }
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.peek_due 失败 {}-{}-{}: {}", uid, device_id, e.what());
@@ -1907,17 +1903,52 @@ local function key_type(k)
     return t
 end
 local score = tonumber(ARGV[1])
-local ttl = tonumber(ARGV[5])
+local ttl = tonumber(ARGV[4])
 if not score or not ttl or ttl <= 0 then return redis.error_reply('invalid arguments') end
 local zt = key_type(KEYS[1])
 local ht = key_type(KEYS[2])
 if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
 if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
 redis.call('ZADD', KEYS[1], score, ARGV[2])
-redis.call('HSET', KEYS[2], ARGV[3], ARGV[4])
+redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
 redis.call('EXPIRE', KEYS[1], ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
 return 1
+)lua";
+
+    static constexpr const char *kPeekDueLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local cutoff = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+if not cutoff or not limit or limit <= 0 then return redis.error_reply('invalid arguments') end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+local result = {}
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, limit)
+for _, seq in ipairs(due) do
+    local payload = redis.call('HGET', KEYS[2], seq)
+    if payload then
+        table.insert(result, seq)
+        table.insert(result, payload)
+    else
+        redis.call('ZREM', KEYS[1], seq)
+    end
+end
+local scan = redis.call('HSCAN', KEYS[2], 0, 'COUNT', limit)
+local fields = scan[2]
+for i = 1, #fields, 2 do
+    local seq = fields[i]
+    if not redis.call('ZSCORE', KEYS[1], seq) then
+        redis.call('HDEL', KEYS[2], seq)
+    end
+end
+return result
 )lua";
 
     static constexpr const char *kBumpScoreLua = R"lua(
@@ -1937,8 +1968,12 @@ local updated = 0
 for i = 3, #ARGV do
     local payload = redis.call('HGET', KEYS[2], ARGV[i])
     if payload then
-        redis.call('ZADD', KEYS[1], 'XX', score, ARGV[i] .. ':' .. payload)
-        updated = updated + 1
+        if redis.call('ZSCORE', KEYS[1], ARGV[i]) then
+            redis.call('ZADD', KEYS[1], 'XX', score, ARGV[i])
+            updated = updated + 1
+        end
+    else
+        redis.call('ZREM', KEYS[1], ARGV[i])
     end
 end
 redis.call('EXPIRE', KEYS[1], ttl)
@@ -1947,11 +1982,9 @@ return updated
 )lua";
 
     static constexpr const char *kAckLua = R"lua(
-local payload = redis.call('HGET', KEYS[2], ARGV[1])
-if not payload then return 0 end
-redis.call('ZREM', KEYS[1], ARGV[1] .. ':' .. payload)
-redis.call('HDEL', KEYS[2], ARGV[1])
-return 1
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+removed = removed + redis.call('HDEL', KEYS[2], ARGV[1])
+return removed
 )lua";
 
     RedisClient::ptr _c;
