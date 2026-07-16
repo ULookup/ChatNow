@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"chatnow-tests/pkg/client"
+	"chatnow-tests/pkg/fixture"
+	"chatnow-tests/pkg/verify"
 	msg "chatnow-tests/proto/chatnow/message"
 	transmite "chatnow-tests/proto/chatnow/transmite"
 )
@@ -345,4 +347,147 @@ func TestClearConversation_Success(t *testing.T) {
 	err := a.DoAuth("/service/message/clear", req, rsp)
 	require.NoError(t, err)
 	assert.True(t, rsp.GetHeader().GetSuccess())
+}
+
+// ---------------------------------------------------------------------------
+// L2 P0 补充：message 错误路径 + 未测 API
+// ---------------------------------------------------------------------------
+
+// FN-MS-01 | P0 | error path | 非成员同步消息应失败
+func TestFN_MS_SyncMessages_NotMember(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	fixture.SendTextMessage(t, alice, convID, "member-only-msg")
+
+	// 第三方非成员尝试 sync
+	attacker, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	req := &msg.SyncMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		AfterSeq:       0,
+		Limit:          10,
+	}
+	rsp := &msg.SyncMessagesRsp{}
+	err := attacker.DoAuth("/service/message/sync", req, rsp)
+	require.NoError(t, err)
+	require.False(t, rsp.Header.Success, "非成员 sync 应失败")
+	assert.Equal(t, int32(3002), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NOT_MEMBER(3002)")
+	_ = bob
+}
+
+// FN-MS-06 | P0 | error path | 非发送者撤回消息应失败
+func TestFN_MS_RecallMessage_ByNonAuthor(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	msgID, _ := fixture.SendTextMessage(t, alice, convID, "will-try-recall")
+
+	// bob（非发送者）尝试撤回 alice 的消息
+	req := &msg.RecallMessageReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		MessageId:      msgID,
+	}
+	rsp := &msg.RecallMessageRsp{}
+	err := bob.DoAuth("/service/message/recall", req, rsp)
+	require.NoError(t, err)
+	require.False(t, rsp.Header.Success, "非发送者撤回应失败")
+	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")
+}
+
+// FN-MS-10 | P0 | error path | 删除他人消息应失败
+func TestFN_MS_DeleteMessages_NotOwned(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	msgID, _ := fixture.SendTextMessage(t, alice, convID, "will-try-delete")
+
+	// bob 尝试删除 alice 的消息
+	req := &msg.DeleteMessagesReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		MessageIds:     []int64{msgID},
+	}
+	rsp := &msg.DeleteMessagesRsp{}
+	err := bob.DoAuth("/service/message/delete", req, rsp)
+	require.NoError(t, err)
+	require.False(t, rsp.Header.Success, "删除他人消息应失败")
+	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")
+}
+
+// FN-MS (untested) | P0 | SelectByClientMsgId 查询存在
+func TestFN_MS_SelectByClientMsgId_Found(t *testing.T) {
+	alice, _, convID := fixture.MakeFriends(t, HTTP)
+	clientMsgID := client.NewRequestID()
+	msgID, _, _ := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "select-by-client-msg-id", clientMsgID)
+
+	req := &msg.SelectByClientMsgIdReq{
+		RequestId:   client.NewRequestID(),
+		ClientMsgId: clientMsgID,
+	}
+	rsp := &msg.SelectByClientMsgIdRsp{}
+	err := alice.DoAuth("/service/message/select_by_client_msg_id", req, rsp)
+	require.NoError(t, err)
+	require.True(t, rsp.Header.Success, "select_by_client_msg_id 失败: %s", rsp.Header.ErrorMessage)
+	require.NotNil(t, rsp.Message)
+	assert.Equal(t, msgID, rsp.Message.MessageId)
+}
+
+// FN-MS (untested) | P0 | SelectByClientMsgId 查询不存在
+func TestFN_MS_SelectByClientMsgId_NotFound(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	req := &msg.SelectByClientMsgIdReq{
+		RequestId:   client.NewRequestID(),
+		ClientMsgId: "nonexistent-client-msg-id-12345",
+	}
+	rsp := &msg.SelectByClientMsgIdRsp{}
+	err := authed.DoAuth("/service/message/select_by_client_msg_id", req, rsp)
+	require.NoError(t, err)
+	require.True(t, rsp.Header.Success)
+	assert.Nil(t, rsp.Message, "不存在的 client_msg_id 应返回 nil message")
+}
+
+// FN-MS (untested) | P0 | UpdateReadAck 更新 last_read_msg_id
+func TestFN_MS_UpdateReadAck_Success(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	_, seqID := fixture.SendTextMessage(t, alice, convID, "ack-test-msg")
+
+	req := &msg.UpdateReadAckReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		SeqId:          seqID,
+	}
+	rsp := &msg.UpdateReadAckRsp{}
+	err := bob.DoAuth("/service/message/update_read_ack", req, rsp)
+	require.NoError(t, err)
+	require.True(t, rsp.Header.Success, "update_read_ack 失败: %s", rsp.Header.ErrorMessage)
+
+	// 直查 DB 验证 last_read_seq 更新
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.LastReadSeq(t, bob.UserID, convID, seqID)
+}
+
+// FN-MS (untested) | P0 | UpdateReadAck 幂等（重复 ACK 不回退）
+func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
+	alice, bob, convID := fixture.MakeFriends(t, HTTP)
+	_, seq1 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-1")
+	_, seq2 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-2")
+
+	// ACK 到 seq2
+	ackReq := &msg.UpdateReadAckReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		SeqId:          seq2,
+	}
+	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
+
+	// 再 ACK 到 seq1（小于 seq2），last_read_seq 不应回退
+	ackReq2 := &msg.UpdateReadAckReq{
+		RequestId:      client.NewRequestID(),
+		ConversationId: convID,
+		SeqId:          seq1,
+	}
+	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq2, &msg.UpdateReadAckRsp{}))
+
+	// 直查 DB 验证 last_read_seq 仍为 seq2
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.LastReadSeq(t, bob.UserID, convID, seq2)
 }

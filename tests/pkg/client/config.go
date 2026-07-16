@@ -7,9 +7,10 @@ import (
 )
 
 type Config struct {
-	Target  TargetConfig  `yaml:"target"`
-	Timeout TimeoutConfig `yaml:"timeout"`
-	Log     LogConfig     `yaml:"log"`
+	Target   TargetConfig   `yaml:"target"`
+	Timeout  TimeoutConfig  `yaml:"timeout"`
+	Database DatabaseConfig `yaml:"database"`
+	Log      LogConfig      `yaml:"log"`
 }
 
 type TargetConfig struct {
@@ -20,6 +21,12 @@ type TargetConfig struct {
 type TimeoutConfig struct {
 	HTTPRequestSec int `yaml:"http_request_sec"`
 	WSReadSec      int `yaml:"ws_read_sec"`
+}
+
+type DatabaseConfig struct {
+	MySQLDSN   string   `yaml:"mysql_dsn"`
+	ESURL      string   `yaml:"es_url"`
+	RedisNodes []string `yaml:"redis_nodes"`
 }
 
 type LogConfig struct {
@@ -44,6 +51,12 @@ func LoadConfig(path string) *Config {
 	}
 	if v := os.Getenv("WEBSOCKET_ADDR"); v != "" {
 		cfg.Target.WebsocketAddr = v
+	}
+	if v := os.Getenv("MYSQL_DSN"); v != "" {
+		cfg.Database.MySQLDSN = v
+	}
+	if v := os.Getenv("ES_URL"); v != "" {
+		cfg.Database.ESURL = v
 	}
 	return cfg
 }

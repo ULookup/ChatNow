@@ -51,7 +51,7 @@ func TestWhitelist_SendVerifyCode_NoAuth(t *testing.T) {
 		t.Skip("SMTP_HOST not set — skipping send_verify_code integration test")
 	}
 	req := &identity.SendVerifyCodeReq{
-		RequestId: client.NewRequestID(),
+		RequestId:   client.NewRequestID(),
 		Destination: &identity.SendVerifyCodeReq_Email{Email: "test@example.com"},
 	}
 	rsp := &identity.SendVerifyCodeRsp{}

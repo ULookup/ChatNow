@@ -1,7 +1,6 @@
-// NOTE: Tests require full docker-compose stack running. See docs/superpowers/plans/2026-07-09-phase1-bvt-core-and-infra.md
-//go:build func
+//go:build bvt
 
-package func_test
+package bvt_test
 
 import (
 	"os"

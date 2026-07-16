@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, 3.0-dev]
+  pull_request:
+    branches: [3.0-dev]
+  schedule:
+    - cron: "0 2 * * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential protobuf-compiler netcat-openbsd
+      - name: Build C++ services
+        run: mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc)
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Go vet
+        run: cd tests && go vet ./...
+      - name: Go fmt check
+        run: |
+          cd tests
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+  bvt:
+    needs: build
+    runs-on: ubuntu-22.04
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Start full stack
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run BVT smoke tests
+        run: cd tests && make test-bvt
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  func:
+    needs: bvt
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Start full stack
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run functional tests
+        run: cd tests && make test-func
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  perf:
+    needs: func
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Start full stack
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run performance tests
+        run: cd tests && make test-perf
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

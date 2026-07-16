@@ -305,7 +305,8 @@ func TestSendVerifyCode_InvalidEmail_Error(t *testing.T) {
 	require.NotNil(t, rsp.Header)
 	assert.False(t, rsp.Header.Success)
 	assert.Equal(t, int32(1001), rsp.Header.ErrorCode)
-	}
+}
+
 // ---------------------------------------------------------------------------
 
 func TestRefreshToken_Success(t *testing.T) {

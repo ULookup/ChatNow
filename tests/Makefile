@@ -1,16 +1,35 @@
-.PHONY: proto test-func test-scenario test-perf clean deps
+.PHONY: proto test-bvt test-func test-scenario test-perf clean deps
 
 # Generate Go protobuf from proto/ definitions
+# NOTE: protoc-gen-go >= v1.35 requires go_package option or M flags to derive
+# the Go import path. The proto files here do not declare go_package, so we
+# build M mappings dynamically from the directory layout:
+#   <dir>/<file>.proto  ->  chatnow-tests/proto/chatnow/<dir>
+# NOTE: notify.proto is NOT skipped. The original plan assumed notify.proto
+# duplicates types from push_service.proto, but this is incorrect:
+# notify.proto defines NotifyMessage/NotifyType/NotifyClientAuth etc.,
+# push_service.proto defines PushToUserReq/PushBatchReq etc. Both are needed.
 proto:
 	@echo "Generating protobuf..."
 	PROTO_BASE=../proto OUT_BASE=./proto; \
-	for dir in common identity relationship conversation message transmite media presence; do \
+	GO_OPTS="module=chatnow-tests/proto"; \
+	for p in $$PROTO_BASE/*/*.proto; do \
+		[ -f "$$p" ] || continue; \
+		rel=$${p#$$PROTO_BASE/}; \
+		dir=$$(dirname $$rel); \
+		GO_OPTS="$$GO_OPTS,M$$rel=chatnow-tests/proto/chatnow/$$dir"; \
+	done; \
+	for dir in common identity relationship conversation message transmite media presence push; do \
 		mkdir -p "$$OUT_BASE/chatnow/$$dir"; \
 		for f in "$$PROTO_BASE/$$dir"/*.proto; do \
 			[ -f "$$f" ] || continue; \
-			protoc --proto_path="$$PROTO_BASE" --go_out="$$OUT_BASE" --go_opt=module=chatnow-tests/proto "$$f"; \
+			protoc --proto_path="$$PROTO_BASE" --go_out="$$OUT_BASE" --go_opt=$$GO_OPTS "$$f"; \
 		done; \
 	done
+
+# Run BVT smoke tests (L1) - fastest, runs first as gate
+test-bvt:
+	go test -tags=bvt ./bvt/... -v -count=1 -timeout=300s
 
 # Run all functional tests (L2)
 test-func:
