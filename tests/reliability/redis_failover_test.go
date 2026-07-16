@@ -120,6 +120,16 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 // stopped, resuming Push must requeue before websocket delivery. Recovery then
 // permits the half-open probe, durable Unacked write, and at-least-once delivery.
 func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
+	// This black-box choreography is intentionally tied to the compose topology:
+	// one Push container owns the websocket and exposes the sole configured bvar
+	// endpoint. Multi-instance CI must provide a dedicated single-Push test stack.
+	pushEndpoint := reliabilitySinglePushEndpoint(t)
+	pushContainer := HTTP.Config().Infra.PushContainer
+	require.NotEmpty(t, pushContainer,
+		"pause-container Push test requires the websocket-owning container name")
+	require.GreaterOrEqual(t, HTTP.Config().Infra.PushRouteL1TTLSec, 15,
+		"Push reliability stack requires route L1 TTL >=15s; docker config uses 30s")
+
 	sender, recipient, convID := fixture.MakeFriends(t, HTTP)
 	ws, err := client.OpenWebSocket(HTTP.Config())
 	require.NoError(t, err)
@@ -141,17 +151,14 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 		require.NoError(t, readErr)
 	}
 
-	// A successful end-to-end warm delivery deterministically fills this Push
-	// instance's two-second route L1 immediately before the outage choreography.
+	// A successful end-to-end delivery warms that instance's route L1 before it
+	// is paused. The test-only TTL keeps the route through the outage choreography.
 	warmMarker := "rl-unacked-warm-" + client.NewRequestID()
 	sendReliabilityMessage(t, sender, convID, warmMarker)
 	require.True(t, readWebSocketMarker(ws, warmMarker, 5*time.Second), "warm Push delivery missing")
-	pushEndpoints := reliabilityPushEndpoints(t)
-	persistBefore := reliabilitySumBVar(t, pushEndpoints, "push_unacked_persist_failure_total")
-	requeueBefore := reliabilitySumBVar(t, pushEndpoints, "push_message_requeue_total")
+	persistBefore := verify.BVar(t, pushEndpoint, "push_unacked_persist_failure_total")
+	requeueBefore := verify.BVar(t, pushEndpoint, "push_message_requeue_total")
 
-	pushContainer := HTTP.Config().Infra.PushContainer
-	require.NotEmpty(t, pushContainer)
 	requireDocker(t, "pause", pushContainer)
 	paused := true
 	redisStopped := false
@@ -172,8 +179,8 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 	redisStopped = true
 	requireDocker(t, "unpause", pushContainer)
 	paused = false
-	requireBVarIncrease(t, pushEndpoints, "push_unacked_persist_failure_total", persistBefore, 5*time.Second)
-	requireBVarIncrease(t, pushEndpoints, "push_message_requeue_total", requeueBefore, 5*time.Second)
+	requireBVarIncrease(t, pushEndpoint, "push_unacked_persist_failure_total", persistBefore, 5*time.Second)
+	requireBVarIncrease(t, pushEndpoint, "push_message_requeue_total", requeueBefore, 5*time.Second)
 	if payload, readErr := ws.ReadFrame(500 * time.Millisecond); readErr == nil {
 		t.Fatalf("Push delivered before durable Unacked persistence: %x", payload)
 	} else if timeout, ok := readErr.(net.Error); !ok || !timeout.Timeout() {
@@ -217,11 +224,11 @@ func readWebSocketMarker(ws *client.WebSocket, marker string, timeout time.Durat
 	return false
 }
 
-func requireBVarIncrease(t testing.TB, endpoints []string, metric string, before int64, timeout time.Duration) {
+func requireBVarIncrease(t testing.TB, endpoint, metric string, before int64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if reliabilitySumBVar(t, endpoints, metric) > before {
+		if verify.BVar(t, endpoint, metric) > before {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -241,9 +248,12 @@ func reliabilityTransmiteEndpoints(t testing.TB) []string {
 	return reliabilityEndpoints(t, HTTP.Config().Infra.TransmiteVars)
 }
 
-func reliabilityPushEndpoints(t testing.TB) []string {
+func reliabilitySinglePushEndpoint(t testing.TB) string {
 	t.Helper()
-	return reliabilityEndpoints(t, HTTP.Config().Infra.PushVars)
+	endpoints := reliabilityEndpoints(t, HTTP.Config().Infra.PushVars)
+	require.Len(t, endpoints, 1,
+		"pause-container Push test requires one bvar endpoint for the websocket-owning container; use a dedicated single-instance Push test stack")
+	return endpoints[0]
 }
 
 func reliabilityEndpoints(t testing.TB, rawEndpoints string) []string {

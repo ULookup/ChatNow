@@ -1314,7 +1314,36 @@ redis.call('EXPIRE', KEYS[2], 604800)
 redis.call('DEL', KEYS[1])
 return 1
 )lua";
+    // Redis scripts are isolated but do not roll back writes after a runtime
+    // error. Validate every entry before mutating so deterministic late errors
+    // cannot partially fill a bucket. Server OOM during SET is a Redis-level
+    // limitation and is surfaced as a failed best-effort cache fill.
     static constexpr const char *kBatchSetIfGenerationLua = R"lua(
+if (#KEYS % 2) ~= 0 or #ARGV ~= (#KEYS / 2) * 3 then
+    return redis.error_reply('invalid batch cache arguments')
+end
+local function key_type(key)
+    local reply = redis.call('TYPE', key)
+    if type(reply) == 'table' then return reply.ok end
+    return reply
+end
+for i = 1, #KEYS, 2 do
+    local arg = ((i - 1) / 2) * 3 + 1
+    local value_type = key_type(KEYS[i])
+    local generation_type = key_type(KEYS[i + 1])
+    local expected = tonumber(ARGV[arg])
+    local ttl = tonumber(ARGV[arg + 2])
+    local generation = nil
+    if generation_type == 'none' then generation = 0 end
+    if generation_type == 'string' then generation = tonumber(redis.call('GET', KEYS[i + 1])) end
+    if (value_type ~= 'none' and value_type ~= 'string') or
+       (generation_type ~= 'none' and generation_type ~= 'string') or
+       generation == nil or expected == nil or expected < 0 or
+       expected ~= math.floor(expected) or ARGV[arg + 1] == nil or ttl == nil or
+       ttl <= 0 or ttl ~= math.floor(ttl) then
+        return redis.error_reply('invalid batch cache entry')
+    end
+end
 local written = 0
 for i = 1, #KEYS, 2 do
     local arg = ((i - 1) / 2) * 3 + 1

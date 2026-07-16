@@ -97,6 +97,9 @@ func (ws *WebSocket) ReadFrame(timeout time.Duration) ([]byte, error) {
 	for {
 		fin, opcode, payload, err := ws.readRawFrame()
 		if err != nil {
+			if continuing {
+				_ = ws.Close()
+			}
 			return nil, err
 		}
 		switch opcode {
@@ -146,7 +149,17 @@ func (ws *WebSocket) readRawFrame() (bool, byte, []byte, error) {
 		return false, 0, nil, err
 	}
 	fin, opcode := header[0]&0x80 != 0, header[0]&0x0f
-	length := uint64(header[1] & 0x7f)
+	masked := header[1]&0x80 != 0
+	if masked {
+		_ = ws.Close()
+		return false, 0, nil, fmt.Errorf("masked websocket server frame")
+	}
+	lengthCode := header[1] & 0x7f
+	if opcode&0x8 != 0 && (!fin || lengthCode > 125) {
+		_ = ws.Close()
+		return false, 0, nil, fmt.Errorf("invalid websocket control frame")
+	}
+	length := uint64(lengthCode)
 	switch length {
 	case 126:
 		var size [2]byte
@@ -167,22 +180,10 @@ func (ws *WebSocket) readRawFrame() (bool, byte, []byte, error) {
 		_ = ws.Close()
 		return false, 0, nil, fmt.Errorf("websocket frame too large: %d", length)
 	}
-	var mask [4]byte
-	if header[1]&0x80 != 0 {
-		if _, err := io.ReadFull(ws.reader, mask[:]); err != nil {
-			_ = ws.Close()
-			return false, 0, nil, err
-		}
-	}
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(ws.reader, payload); err != nil {
 		_ = ws.Close()
 		return false, 0, nil, err
-	}
-	if header[1]&0x80 != 0 {
-		for i := range payload {
-			payload[i] ^= mask[i%len(mask)]
-		}
 	}
 	return fin, opcode, payload, nil
 }

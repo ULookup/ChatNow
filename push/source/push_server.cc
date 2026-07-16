@@ -35,6 +35,7 @@ DEFINE_string(mq_push_binding_key, "push", "推送绑定键");
 // M5: 心跳触发未 ack 重传的可调参数
 DEFINE_int32(resend_batch, 50, "心跳触发未 ack 重传的批量上限");
 DEFINE_int32(resend_max_age_sec, 5, "未 ack 项入队后等待多少秒视为可重传");
+DEFINE_int32(route_l1_ttl_sec, 2, "Push 在线路由 L1 TTL（1-300 秒）");
 
 // JWT — 统一从 auth.json 加载（与 identity/gateway 共享密钥源）
 DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
@@ -55,6 +56,7 @@ int main(int argc, char *argv[])
     psb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_message_service, FLAGS_push_service);
     psb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);
     psb.set_resend_params(FLAGS_resend_batch, FLAGS_resend_max_age_sec);
+    psb.set_route_l1_ttl(FLAGS_route_l1_ttl_sec);
     psb.set_etcd_client(std::make_shared<etcd::Client>(FLAGS_registry_host));
     psb.set_push_service_dir(FLAGS_base_service + FLAGS_push_service);
     psb.make_cross_reaper_election();

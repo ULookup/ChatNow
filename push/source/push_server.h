@@ -41,6 +41,7 @@
 #include <thread>
 #include <chrono>
 #include <limits>
+#include <stdexcept>
 #include <tuple>
 #include <unordered_set>
 
@@ -65,7 +66,8 @@ public:
                     const ServiceManager::ptr &channels,
                     LeaderElection::ptr cross_reaper_election = nullptr,
                     LocalCache<RouteEntry>::ptr local_route_cache = nullptr,
-                    InflightRegistry::ptr inflight_registry = nullptr)
+                    InflightRegistry::ptr inflight_registry = nullptr,
+                    std::chrono::seconds route_l1_ttl = std::chrono::seconds(2))
         : _connections(connections),
           _jwt_codec(jwt_codec),
           _redis(redis),
@@ -77,7 +79,12 @@ public:
           _mm_channels(channels),
           _cross_reaper_election(std::move(cross_reaper_election)),
           _local_route_cache(std::move(local_route_cache)),
-          _inflight_registry(std::move(inflight_registry)) {}
+          _inflight_registry(std::move(inflight_registry)),
+          _route_l1_ttl(route_l1_ttl) {
+        if (_route_l1_ttl.count() < 1 || _route_l1_ttl.count() > 300) {
+            throw std::invalid_argument("Push route L1 TTL must be within 1..300 seconds");
+        }
+    }
 
     void set_resend_params(long batch, long max_age_sec) {
         _resend_batch = batch;
@@ -698,7 +705,7 @@ private:
             route.device_to_instance[did] = inst;
         }
         if (_local_route_cache) {
-            _local_route_cache->set(cache_key, route, randomized_ttl(std::chrono::seconds(2)));
+            _local_route_cache->set(cache_key, route, randomized_ttl(_route_l1_ttl));
         }
 
         lk.unlock();
@@ -979,6 +986,7 @@ private:
     LeaderElection::ptr _cross_reaper_election;
     LocalCache<RouteEntry>::ptr _local_route_cache;
     InflightRegistry::ptr _inflight_registry;
+    std::chrono::seconds _route_l1_ttl{2};
     std::mutex _dummy_mu_;
 };
 
@@ -1182,6 +1190,12 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
+    void set_route_l1_ttl(int ttl_sec) {
+        if (ttl_sec < 1 || ttl_sec > 300) {
+            throw std::invalid_argument("Push route L1 TTL must be within 1..300 seconds");
+        }
+        _route_l1_ttl = std::chrono::seconds(ttl_sec);
+    }
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
     void set_etcd_client(std::shared_ptr<etcd::Client> etcd) { _etcd_client = etcd; }
 
@@ -1220,7 +1234,7 @@ public:
         _push_service = new PushServiceImpl(
             _connections, _jwt_codec, _redis_client, _online_route, _unacked, _cross_outbox,
             _instance_id, _message_service_name, _mm_channels,
-            _cross_reaper_election, _local_route_cache, _inflight_registry);
+            _cross_reaper_election, _local_route_cache, _inflight_registry, _route_l1_ttl);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if (ret == -1) { LOG_ERROR("Push: AddService 失败"); abort(); }
@@ -1308,6 +1322,7 @@ private:
     LeaderElection::ptr _cross_reaper_election;
     LocalCache<RouteEntry>::ptr _local_route_cache;
     InflightRegistry::ptr _inflight_registry;
+    std::chrono::seconds _route_l1_ttl{2};
     std::string _push_service_dir;
     LeaderElection::ptr _stale_reaper_election;
     std::thread _stale_reaper_thread;

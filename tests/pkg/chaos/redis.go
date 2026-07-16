@@ -24,9 +24,7 @@ func compose(t testing.TB, cfg *client.Config, args ...string) {
 }
 
 func StopRedisCluster(t testing.TB, cfg *client.Config) {
-	// Fail all AOF-backed test nodes immediately so short-lived service L1
-	// entries remain warm for deterministic failover tests.
-	compose(t, cfg, append([]string{"stop", "-t", "0"}, redisServices...)...)
+	compose(t, cfg, append([]string{"stop"}, redisServices...)...)
 }
 
 func StartRedisCluster(t testing.TB, cfg *client.Config) {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,8 +48,7 @@ func TestWebSocketPreservesFrameBufferedWithUpgrade(t *testing.T) {
 
 func pipeWebSocket(t *testing.T, frames ...[]byte) *WebSocket {
 	t.Helper()
-	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() { _ = clientConn.Close(); _ = serverConn.Close() })
+	ws, serverConn := newPipeWebSocket(t)
 	go func() {
 		for _, frame := range frames {
 			_, _ = serverConn.Write(frame)
@@ -58,7 +58,26 @@ func pipeWebSocket(t *testing.T, frames ...[]byte) *WebSocket {
 			}
 		}
 	}()
-	return &WebSocket{conn: clientConn, reader: bufio.NewReader(clientConn)}
+	return ws
+}
+
+func newPipeWebSocket(t *testing.T) (*WebSocket, net.Conn) {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { _ = clientConn.Close(); _ = serverConn.Close() })
+	return &WebSocket{conn: clientConn, reader: bufio.NewReader(clientConn)}, serverConn
+}
+
+func requirePeerClosed(t *testing.T, peer net.Conn) {
+	t.Helper()
+	_ = peer.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+	_, err := peer.Write(serverFrame(true, 2, "probe"))
+	if err == nil {
+		t.Fatal("websocket peer remained writable")
+	}
+	if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatalf("websocket peer was not closed: %v", err)
+	}
 }
 
 func TestWebSocketSkipsPingBeforeData(t *testing.T) {
@@ -78,5 +97,44 @@ func TestWebSocketReassemblesFragmentsAcrossControlFrame(t *testing.T) {
 	payload, err := ws.ReadFrame(time.Second)
 	if err != nil || string(payload) != "frag-ment" {
 		t.Fatalf("payload=%q err=%v", payload, err)
+	}
+}
+
+func TestWebSocketTimeoutBetweenFragmentsClosesConnection(t *testing.T) {
+	ws, serverConn := newPipeWebSocket(t)
+	go func() { _, _ = serverConn.Write(serverFrame(false, 2, "partial")) }()
+	_, err := ws.ReadFrame(30 * time.Millisecond)
+	if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("expected fragment timeout, got %v", err)
+	}
+	requirePeerClosed(t, serverConn)
+}
+
+func TestWebSocketRejectsMaskedServerFrame(t *testing.T) {
+	ws, serverConn := newPipeWebSocket(t)
+	masked := []byte{0x82, 0x81, 1, 2, 3, 4, 'x' ^ 1}
+	go func() { _, _ = serverConn.Write(masked) }()
+	_, err := ws.ReadFrame(time.Second)
+	if err == nil || !strings.Contains(err.Error(), "masked") {
+		t.Fatalf("expected masked-server error, got %v", err)
+	}
+	requirePeerClosed(t, serverConn)
+}
+
+func TestWebSocketRejectsInvalidControlFrames(t *testing.T) {
+	tests := map[string][]byte{
+		"fragmented": serverFrame(false, 9, "p"),
+		"oversized":  {0x89, 126, 0, 126},
+	}
+	for name, frame := range tests {
+		t.Run(name, func(t *testing.T) {
+			ws, serverConn := newPipeWebSocket(t)
+			go func() { _, _ = serverConn.Write(frame) }()
+			_, err := ws.ReadFrame(time.Second)
+			if err == nil || !strings.Contains(err.Error(), "control") {
+				t.Fatalf("expected control-frame error, got %v", err)
+			}
+			requirePeerClosed(t, serverConn)
+		})
 	}
 }
