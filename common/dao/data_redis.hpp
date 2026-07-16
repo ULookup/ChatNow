@@ -1129,6 +1129,31 @@ private:
 // 用户资料缓存（value 为序列化 UserInfo protobuf；DAO 不依赖 protobuf 类型）
 // =============================================================================
 
+enum class GenerationWriteResult {
+    Committed,
+    Conflict,
+    Unavailable,
+};
+
+enum class UserInfoL1Publication {
+    GenerationFenced,
+    Denied,
+    ShortLivedFallback,
+};
+
+constexpr UserInfoL1Publication
+user_info_l1_publication(GenerationWriteResult result) noexcept {
+    switch (result) {
+    case GenerationWriteResult::Committed:
+        return UserInfoL1Publication::GenerationFenced;
+    case GenerationWriteResult::Conflict:
+        return UserInfoL1Publication::Denied;
+    case GenerationWriteResult::Unavailable:
+        return UserInfoL1Publication::ShortLivedFallback;
+    }
+    return UserInfoL1Publication::Denied;
+}
+
 class UserInfoCache
 {
 public:
@@ -1212,7 +1237,8 @@ public:
 
     bool set(const std::string &uid, const std::string &serialized,
              uint64_t observed_generation) {
-        return set_if_generation(uid, serialized, observed_generation);
+        return set_if_generation(uid, serialized, observed_generation) ==
+               GenerationWriteResult::Committed;
     }
 
     std::optional<uint64_t> generation(const std::string &uid) {
@@ -1227,9 +1253,10 @@ public:
         }
     }
 
-    bool set_if_generation(const std::string &uid, const std::string &serialized,
-                           uint64_t expected_generation) {
-        if (!_c) return false;
+    GenerationWriteResult set_if_generation(const std::string &uid,
+                                            const std::string &serialized,
+                                            uint64_t expected_generation) {
+        if (!_c) return GenerationWriteResult::Unavailable;
         const auto ttl = serialized.empty()
             ? randomized_ttl(std::chrono::seconds(5))
             : randomized_ttl(kUserInfoTtl);
@@ -1239,12 +1266,14 @@ public:
             std::vector<std::string> args = {
                 std::to_string(expected_generation), serialized,
                 std::to_string(ttl.count())};
-            return _c->eval<long long>(kSetIfGenerationLua, keys.begin(), keys.end(),
-                                       args.begin(), args.end()) == 1;
+            const auto result = _c->eval<long long>(
+                kSetIfGenerationLua, keys.begin(), keys.end(), args.begin(), args.end());
+            return result == 0 ? GenerationWriteResult::Conflict
+                               : GenerationWriteResult::Committed;
         } catch (const RedisCircuitOpen &) {
-            return false;
+            return GenerationWriteResult::Unavailable;
         } catch (const std::exception &) {
-            return false;
+            return GenerationWriteResult::Unavailable;
         }
     }
 

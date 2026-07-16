@@ -605,13 +605,16 @@ public:
                 return std::nullopt;
             }
             auto bytes = info->SerializeAsString();
+            auto publication = UserInfoL1Publication::ShortLivedFallback;
             if (generation && _user_info_cache) {
-                _user_info_cache->set_if_generation(uid, bytes, *generation);
+                const auto write_result =
+                    _user_info_cache->set_if_generation(uid, bytes, *generation);
+                publication = user_info_l1_publication(write_result);
             }
-            // L1 is deliberately short-lived and remains available even when the
-            // Redis generation read failed. This lets singleflight followers share
-            // a successful Identity result without allowing an unfenced L2 write.
-            if (_local_user_cache) {
+            // A real generation conflict means invalidation won the race, so the
+            // stale Identity response is returned only to its current caller. If
+            // Redis was unavailable, retain the short-lived availability fallback.
+            if (_local_user_cache && publication != UserInfoL1Publication::Denied) {
                 _local_user_cache->set(
                     lkey, bytes, randomized_ttl(std::chrono::seconds(45)));
             }
