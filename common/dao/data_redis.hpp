@@ -777,35 +777,53 @@ public:
     /* brief: 用户某设备上线 */
     void add(const std::string &uid, const std::string &device_id) {
         try {
-            const std::string k = key::kDeviceSet + uid;
-            _c->sadd(k, device_id);
-            _c->expire(k, randomized_ttl(kSessionTtl));
+            const auto effective_ttl = randomized_ttl(kSessionTtl);
+            std::vector<std::string> keys = {key::device_set_key(uid)};
+            std::vector<std::string> args = {
+                device_id, std::to_string(effective_ttl.count())};
+            _c->eval<long long>(kAddLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.add 失败 {}-{}: {}", uid, device_id, e.what()); }
     }
     /* brief: 用户设备活动时续期 */
     void touch(const std::string &uid, std::chrono::seconds ttl = kSessionTtl) {
-        try { _c->expire(key::kDeviceSet + uid, randomized_ttl(ttl)); }
+        try { _c->expire(key::device_set_key(uid), randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.touch 失败 {}: {}", uid, e.what()); }
     }
     /* brief: 用户某设备下线 */
     void remove(const std::string &uid, const std::string &device_id) {
-        try { _c->srem(key::kDeviceSet + uid, device_id); }
+        try { _c->srem(key::device_set_key(uid), device_id); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.rem 失败 {}-{}: {}", uid, device_id, e.what()); }
     }
     /* brief: 取用户当前所有在线设备 */
     std::vector<std::string> list(const std::string &uid) {
         std::vector<std::string> res;
-        try { _c->smembers(key::kDeviceSet + uid, std::inserter(res, res.end())); }
+        try { _c->smembers(key::device_set_key(uid), std::inserter(res, res.end())); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.list 失败 {}: {}", uid, e.what()); }
         return res;
     }
     /* brief: 用户是否有任意在线设备 */
     bool any(const std::string &uid) {
-        try { return _c->scard(key::kDeviceSet + uid) > 0; }
+        try { return _c->scard(key::device_set_key(uid)) > 0; }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.any 失败 {}: {}", uid, e.what()); return false; }
     }
 private:
+    static constexpr const char *kAddLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then return redis.error_reply('invalid ttl') end
+local t = key_type(KEYS[1])
+if t ~= 'none' and t ~= 'set' then return redis.error_reply('device key wrong type') end
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ttl)
+return 1
+)lua";
+
     RedisClient::ptr _c;
 };
 
@@ -1201,17 +1219,22 @@ class OnlineRoute
 {
 public:
     using ptr = std::shared_ptr<OnlineRoute>;
-    OnlineRoute(const RedisClient::ptr &c) : _c(c), _devices(c) {}
+    OnlineRoute(const RedisClient::ptr &c) : _c(c) {}
 
     /* brief: 设备上线 — HSET uid did instance */
     void bind(const std::string &uid, const std::string &device_id,
               const std::string &push_instance,
               std::chrono::seconds ttl = kOnlineTtl) {
         try {
-            std::string k = key::online_key(uid);
-            _c->hset(k, device_id, push_instance);
-            _c->expire(k, randomized_ttl(ttl));
-            _devices.add(uid, device_id);
+            const auto route_ttl = randomized_ttl(ttl);
+            const auto device_ttl = randomized_ttl(kSessionTtl);
+            std::vector<std::string> keys = {
+                key::online_key(uid), key::device_set_key(uid)};
+            std::vector<std::string> args = {
+                device_id, push_instance, std::to_string(route_ttl.count()),
+                std::to_string(device_ttl.count())};
+            _c->eval<long long>(kBindLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("OnlineRoute.bind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what());
         }
@@ -1219,8 +1242,15 @@ public:
     /* brief: 心跳续期（续整个 uid 的 HASH） */
     void touch(const std::string &uid, std::chrono::seconds ttl = kOnlineTtl) {
         try {
-            _c->expire(key::online_key(uid), randomized_ttl(ttl));
-            _devices.touch(uid);
+            const auto route_ttl = randomized_ttl(ttl);
+            const auto device_ttl = randomized_ttl(kSessionTtl);
+            std::vector<std::string> keys = {
+                key::online_key(uid), key::device_set_key(uid)};
+            std::vector<std::string> args = {
+                std::to_string(route_ttl.count()),
+                std::to_string(device_ttl.count())};
+            _c->eval<long long>(kTouchLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
     }
@@ -1228,8 +1258,11 @@ public:
     void unbind(const std::string &uid, const std::string &device_id,
                 const std::string &push_instance) {
         try {
-            _c->hdel(key::online_key(uid), device_id);
-            _devices.remove(uid, device_id);
+            std::vector<std::string> keys = {
+                key::online_key(uid), key::device_set_key(uid)};
+            std::vector<std::string> args = {device_id, push_instance};
+            _c->eval<long long>(kUnbindLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what()); }
     }
@@ -1267,8 +1300,68 @@ public:
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.online 失败 {}: {}", uid, e.what()); return false; }
     }
 private:
+    static constexpr const char *kBindLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local route_ttl = tonumber(ARGV[3])
+local device_ttl = tonumber(ARGV[4])
+if not route_ttl or route_ttl <= 0 or not device_ttl or device_ttl <= 0 then
+    return redis.error_reply('invalid ttl')
+end
+local rt = key_type(KEYS[1])
+local dt = key_type(KEYS[2])
+if rt ~= 'none' and rt ~= 'hash' then return redis.error_reply('route key wrong type') end
+if dt ~= 'none' and dt ~= 'set' then return redis.error_reply('device key wrong type') end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('EXPIRE', KEYS[1], route_ttl)
+redis.call('EXPIRE', KEYS[2], device_ttl)
+return 1
+)lua";
+
+    static constexpr const char *kTouchLua = R"lua(
+local route_ttl = tonumber(ARGV[1])
+local device_ttl = tonumber(ARGV[2])
+if not route_ttl or route_ttl <= 0 or not device_ttl or device_ttl <= 0 then
+    return redis.error_reply('invalid ttl')
+end
+redis.call('EXPIRE', KEYS[1], route_ttl)
+redis.call('EXPIRE', KEYS[2], device_ttl)
+return 1
+)lua";
+
+    static constexpr const char *kUnbindLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local rt = key_type(KEYS[1])
+local dt = key_type(KEYS[2])
+if rt ~= 'none' and rt ~= 'hash' then return redis.error_reply('route key wrong type') end
+if dt ~= 'none' and dt ~= 'set' then return redis.error_reply('device key wrong type') end
+local removed = 0
+if ARGV[1] == '' then
+    local entries = redis.call('HGETALL', KEYS[1])
+    for i = 1, #entries, 2 do
+        if entries[i + 1] == ARGV[2] then
+            redis.call('HDEL', KEYS[1], entries[i])
+            redis.call('SREM', KEYS[2], entries[i])
+            removed = removed + 1
+        end
+    end
+elseif redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    redis.call('SREM', KEYS[2], ARGV[1])
+    removed = 1
+end
+return removed
+)lua";
+
     RedisClient::ptr _c;
-    DeviceSet _devices;
 };
 
 // =============================================================================
@@ -1499,11 +1592,13 @@ public:
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
             std::string member = std::to_string(user_seq) + ":" + payload_b64;
-            _c->zadd(k, member, static_cast<double>(score_ts));
-            _c->hset(ik, std::to_string(user_seq), payload_b64);
             const auto effective_ttl = randomized_ttl(ttl);
-            _c->expire(k, effective_ttl);
-            _c->expire(ik, effective_ttl);
+            std::vector<std::string> keys = {k, ik};
+            std::vector<std::string> args = {
+                std::to_string(score_ts), member, std::to_string(user_seq), payload_b64,
+                std::to_string(effective_ttl.count())};
+            _c->eval<long long>(kPushLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.push 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
         }
@@ -1560,22 +1655,68 @@ public:
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
-            for (unsigned long seq : user_seqs) {
-                auto payload = _c->hget(ik, std::to_string(seq));
-                if (payload) {
-                    std::string member = std::to_string(seq) + ":" + *payload;
-                    _c->zadd(k, member, static_cast<double>(now), sw::redis::UpdateType::EXIST);
-                }
-            }
             const auto effective_ttl = randomized_ttl(ttl);
-            _c->expire(k, effective_ttl);
-            _c->expire(ik, effective_ttl);
+            std::vector<std::string> keys = {k, ik};
+            std::vector<std::string> args = {
+                std::to_string(effective_ttl.count()), std::to_string(now)};
+            args.reserve(2 + user_seqs.size());
+            for (unsigned long seq : user_seqs) {
+                args.push_back(std::to_string(seq));
+            }
+            _c->eval<long long>(kBumpScoreLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.bump_score 失败 {}-{}-{}: {}", uid, device_id, e.what());
         }
     }
 
 private:
+    static constexpr const char *kPushLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local score = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[5])
+if not score or not ttl or ttl <= 0 then return redis.error_reply('invalid arguments') end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+redis.call('ZADD', KEYS[1], score, ARGV[2])
+redis.call('HSET', KEYS[2], ARGV[3], ARGV[4])
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
+return 1
+)lua";
+
+    static constexpr const char *kBumpScoreLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local ttl = tonumber(ARGV[1])
+local score = tonumber(ARGV[2])
+if not ttl or ttl <= 0 or not score then return redis.error_reply('invalid arguments') end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+local updated = 0
+for i = 3, #ARGV do
+    local payload = redis.call('HGET', KEYS[2], ARGV[i])
+    if payload then
+        redis.call('ZADD', KEYS[1], 'XX', score, ARGV[i] .. ':' .. payload)
+        updated = updated + 1
+    end
+end
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
+return updated
+)lua";
+
     RedisClient::ptr _c;
 };
 
@@ -1623,7 +1764,7 @@ public:
         try {
             auto k = key::presence_device_key(uid, device_id);
             _r->hset(k, "state", "ONLINE");
-            _r->expire(k, std::chrono::seconds(120));
+            _r->expire(k, randomized_ttl(std::chrono::seconds(120)));
         } catch(std::exception &e) {
             LOG_ERROR("PresenceRedis.add_device 失败 {}-{}: {}", uid, device_id, e.what());
         }
@@ -1655,7 +1796,7 @@ public:
         try {
             auto k = key::kPresenceTyping + uid;
             _r->sadd(k, conv_id);
-            _r->expire(k, std::chrono::seconds(10));
+            _r->expire(k, randomized_ttl(std::chrono::seconds(10)));
         } catch(std::exception &e) {
             LOG_ERROR("PresenceRedis.set_typing 失败 {}-{}: {}", uid, conv_id, e.what());
         }

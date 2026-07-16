@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -183,7 +184,6 @@ func requireJitteredRedisTTL(t testing.TB, key string, base time.Duration) time.
 func TestFN_CA_TTLJitter(t *testing.T) {
 	const sampleCount = 20
 	const sessionTTL = 7 * 24 * time.Hour
-	deviceTTLs := make(map[time.Duration]struct{}, sampleCount)
 	connections := make([]*cacheTestWebSocket, 0, sampleCount)
 	t.Cleanup(func() {
 		for _, ws := range connections {
@@ -191,23 +191,12 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 		}
 	})
 
-	for i := 0; i < sampleCount; i++ {
-		user, _, _ := fixture.RegisterAndLogin(t, HTTP)
-		ws := openCacheTestWebSocket(t)
-		connections = append(connections, ws)
-		ws.writeBinary(t, cacheTestAuthNotify(user.AccessToken, "default_device"))
-		ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
+	t.Log("Session and Status DAOs have no production call sites; the ignored Task 5 DAO harness covers append/touch")
 
-		deviceKey := "im:dev:" + user.UserID
-		require.Eventually(t, func() bool {
-			return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
-		}, 5*time.Second, 50*time.Millisecond, deviceKey)
-		deviceTTLs[requireJitteredRedisTTL(t, deviceKey, sessionTTL)] = struct{}{}
-	}
-	require.GreaterOrEqual(t, len(deviceTTLs), 2,
-		"20 independently randomized device TTLs must not all be identical")
-
-	if os.Getenv("SMTP_HOST") != "" {
+	t.Run("Codes", func(t *testing.T) {
+		if os.Getenv("SMTP_HOST") == "" {
+			t.Skip("SMTP_HOST is not configured; only the Codes reachable-path subtest is skipped")
+		}
 		codeRsp := &identity.SendVerifyCodeRsp{}
 		require.NoError(t, HTTP.DoNoAuth("/service/identity/send_verify_code",
 			&identity.SendVerifyCodeReq{
@@ -218,28 +207,68 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 			}, codeRsp))
 		require.True(t, codeRsp.GetHeader().GetSuccess(), codeRsp.GetHeader().GetErrorMessage())
 		requireJitteredRedisTTL(t, "im:code:"+codeRsp.GetVerifyCodeId(), 5*time.Minute)
-	}
+	})
 
-	sender, recipient, convID := fixture.MakeFriends(t, HTTP)
-	recipientWS := openCacheTestWebSocket(t)
-	connections = append(connections, recipientWS)
-	recipientWS.writeBinary(t, cacheTestAuthNotify(recipient.AccessToken, "default_device"))
-	deviceKey := "im:dev:" + recipient.UserID
-	require.Eventually(t, func() bool {
-		return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
-	}, 5*time.Second, 50*time.Millisecond, deviceKey)
+	t.Run("DeviceSet", func(t *testing.T) {
+		deviceTTLs := make(map[time.Duration]struct{}, sampleCount)
+		var heartbeatBefore time.Duration
+		for i := 0; i < sampleCount; i++ {
+			user, _, _ := fixture.RegisterAndLogin(t, HTTP)
+			ws := openCacheTestWebSocket(t)
+			connections = append(connections, ws)
+			ws.writeBinary(t, cacheTestAuthNotify(user.AccessToken, "default_device"))
 
-	sendCacheTestMessage(t, sender, convID, "ttl-jitter")
-	unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
-	unackedIndexKey := fmt.Sprintf("im:unack:idx:{%s:default_device}", recipient.UserID)
-	require.Eventually(t, func() bool {
-		return verify.RedisCLI(t, "EXISTS", unackedKey) == "1" &&
-			verify.RedisCLI(t, "EXISTS", unackedIndexKey) == "1"
-	}, 10*time.Second, 100*time.Millisecond, unackedKey)
-	unackedTTL := requireJitteredRedisTTL(t, unackedKey, sessionTTL)
-	indexTTL := requireJitteredRedisTTL(t, unackedIndexKey, sessionTTL)
-	require.LessOrEqual(t, absDuration(unackedTTL-indexTTL), time.Second,
-		"paired unacked keys must share one TTL sample")
+			deviceKey := fmt.Sprintf("im:dev:{%s}", user.UserID)
+			require.Eventually(t, func() bool {
+				return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
+			}, 5*time.Second, 50*time.Millisecond, deviceKey)
+			if i == 0 {
+				verify.RedisCLI(t, "EXPIRE", deviceKey, "60")
+				heartbeatBefore = verify.RedisTTL(t, deviceKey)
+				ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
+				require.Eventually(t, func() bool {
+					seconds, err := strconv.ParseInt(verify.RedisCLI(t, "TTL", deviceKey), 10, 64)
+					return err == nil && time.Duration(seconds)*time.Second > heartbeatBefore+24*time.Hour
+				}, 5*time.Second, 50*time.Millisecond, "heartbeat must renew DeviceSet TTL")
+			} else {
+				ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
+			}
+			deviceTTLs[requireJitteredRedisTTL(t, deviceKey, sessionTTL)] = struct{}{}
+		}
+		require.GreaterOrEqual(t, len(deviceTTLs), 2,
+			"20 independently randomized device TTLs must not all be identical")
+	})
+
+	t.Run("UnackedPush", func(t *testing.T) {
+		sender, recipient, convID := fixture.MakeFriends(t, HTTP)
+		recipientWS := openCacheTestWebSocket(t)
+		connections = append(connections, recipientWS)
+		recipientWS.writeBinary(t, cacheTestAuthNotify(recipient.AccessToken, "default_device"))
+		deviceKey := fmt.Sprintf("im:dev:{%s}", recipient.UserID)
+		require.Eventually(t, func() bool {
+			return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
+		}, 5*time.Second, 50*time.Millisecond, deviceKey)
+
+		unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
+		unackedIndexKey := fmt.Sprintf("im:unack:idx:{%s:default_device}", recipient.UserID)
+		initial, err := strconv.Atoi(verify.RedisCLI(t, "ZCARD", unackedKey))
+		require.NoError(t, err)
+		unackedTTLs := make(map[time.Duration]struct{})
+		for i := 0; i < 12; i++ {
+			sendCacheTestMessage(t, sender, convID, fmt.Sprintf("ttl-jitter-%d", i))
+			require.Eventually(t, func() bool {
+				count, parseErr := strconv.Atoi(verify.RedisCLI(t, "ZCARD", unackedKey))
+				return parseErr == nil && count >= initial+i+1
+			}, 10*time.Second, 100*time.Millisecond, unackedKey)
+			unackedTTL := requireJitteredRedisTTL(t, unackedKey, sessionTTL)
+			indexTTL := requireJitteredRedisTTL(t, unackedIndexKey, sessionTTL)
+			require.LessOrEqual(t, absDuration(unackedTTL-indexTTL), time.Second,
+				"paired unacked keys must share one TTL sample")
+			unackedTTLs[unackedTTL] = struct{}{}
+		}
+		require.GreaterOrEqual(t, len(unackedTTLs), 2,
+			"repeated UnackedPush operations must produce varied paired TTL samples")
+	})
 }
 
 func absDuration(value time.Duration) time.Duration {

@@ -92,6 +92,10 @@ inline std::string online_key(const std::string &uid) {
     return std::string(kOnline) + hash_tag(uid);
 }
 
+inline std::string device_set_key(const std::string &uid) {
+    return std::string(kDeviceSet) + hash_tag(uid);
+}
+
 inline std::string online_scan_pattern() {
     return std::string(kOnline) + "*";
 }

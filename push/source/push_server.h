@@ -41,6 +41,7 @@
 #include <thread>
 #include <chrono>
 #include <limits>
+#include <tuple>
 #include <unordered_set>
 
 namespace chatnow::push {
@@ -503,12 +504,13 @@ private:
     void _write_presence_online_(const std::string &uid, const std::string &did) {
         try {
             std::string k = key::presence_device_key(uid, did);
+            const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
             auto pipe = _redis->pipeline();
             pipe.hset(k, "state", "ONLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
+            pipe.expire(k, effective_ttl);
             pipe.exec();
         } catch (std::exception &e) {
             LOG_WARN("Presence write failed uid={} did={}: {}", uid, did, e.what());
@@ -518,12 +520,13 @@ private:
     void _write_presence_offline_(const std::string &uid, const std::string &did) {
         try {
             std::string k = key::presence_device_key(uid, did);
+            const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
             auto pipe = _redis->pipeline();
             pipe.hset(k, "state", "OFFLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
+            pipe.expire(k, effective_ttl);
             pipe.exec();
         } catch (std::exception &e) {
             LOG_WARN("Presence offline write failed uid={} did={}: {}", uid, did, e.what());
@@ -533,7 +536,7 @@ private:
     void _refresh_presence_ttl_(const std::string &uid, const std::string &did) {
         try {
             std::string k = key::presence_device_key(uid, did);
-            _redis->expire(k, std::chrono::seconds(kPresenceTtlSec));
+            _redis->expire(k, randomized_ttl(std::chrono::seconds(kPresenceTtlSec)));
         } catch (std::exception &e) {
             LOG_WARN("Presence TTL refresh failed uid={} did={}: {}", uid, did, e.what());
         }
@@ -809,7 +812,7 @@ public:
                 continue;
             }
 
-            std::vector<std::pair<std::string, std::string>> stale_entries;
+            std::vector<std::tuple<std::string, std::string, std::string>> stale_entries;
             // Cluster mode: for_each traverses all nodes via RedisClient::scan().
             long long cursor = 0;
             do {
@@ -824,14 +827,14 @@ public:
                     for (const auto &[did, instance] : device_map) {
                         if (std::find(online_instances.begin(), online_instances.end(), instance)
                             == online_instances.end()) {
-                            stale_entries.emplace_back(uid, did);
+                            stale_entries.emplace_back(uid, did, instance);
                         }
                     }
                 }
             } while (cursor != 0);
 
-            for (const auto &[uid, did] : stale_entries) {
-                _online_route->unbind(uid, did, "");
+            for (const auto &[uid, did, instance] : stale_entries) {
+                _online_route->unbind(uid, did, instance);
                 if (_local_route_cache) _local_route_cache->invalidate(key::local_route_cache_key(uid));
             }
             if (!stale_entries.empty())

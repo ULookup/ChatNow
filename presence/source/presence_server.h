@@ -13,6 +13,7 @@
 #include "error/error_codes.hpp"
 #include "error/service_error.hpp"
 #include "utils/brpc_closure.hpp"
+#include "utils/random_ttl.hpp"
 
 #include "common/types.pb.h"
 #include "common/error.pb.h"
@@ -292,7 +293,8 @@ public:
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 _redis->sadd("im:presence:typing:" + conv_id,
                              auth.user_id + ":" + std::to_string(now_ms));
-                _redis->expire("im:presence:typing:" + conv_id, std::chrono::seconds(5));
+                _redis->expire("im:presence:typing:" + conv_id,
+                               randomized_ttl(std::chrono::seconds(5)));
             } else {
                 std::vector<std::string> members;
                 _redis->smembers("im:presence:typing:" + conv_id,
