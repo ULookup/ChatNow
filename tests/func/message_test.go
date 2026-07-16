@@ -446,12 +446,12 @@ func TestFN_MS_SelectByClientMsgId_NotFound(t *testing.T) {
 // FN-MS (untested) | P0 | UpdateReadAck 更新 last_read_msg_id
 func TestFN_MS_UpdateReadAck_Success(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	_, seqID := fixture.SendTextMessage(t, alice, convID, "ack-test-msg")
+	messageID, seqID := fixture.SendTextMessage(t, alice, convID, "ack-test-msg")
 
 	req := &msg.UpdateReadAckReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		SeqId:          seqID,
+		MessageId:      uint64(messageID),
 	}
 	rsp := &msg.UpdateReadAckRsp{}
 	err := bob.DoAuth("/service/message/update_read_ack", req, rsp)
@@ -467,14 +467,14 @@ func TestFN_MS_UpdateReadAck_Success(t *testing.T) {
 // FN-MS (untested) | P0 | UpdateReadAck 幂等（重复 ACK 不回退）
 func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	_, seq1 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-1")
-	_, seq2 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-2")
+	messageID1, _ := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-1")
+	messageID2, seq2 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-2")
 
 	// ACK 到 seq2
 	ackReq := &msg.UpdateReadAckReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		SeqId:          seq2,
+		MessageId:      uint64(messageID2),
 	}
 	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
 
@@ -482,7 +482,7 @@ func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
 	ackReq2 := &msg.UpdateReadAckReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		SeqId:          seq1,
+		MessageId:      uint64(messageID1),
 	}
 	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq2, &msg.UpdateReadAckRsp{}))
 

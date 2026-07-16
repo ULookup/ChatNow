@@ -589,9 +589,9 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 	a, b, convID := setupConv(t) // MakeFriends
 
 	// Step 1: a 发 3 条消息
-	var lastSeq uint64
+	var lastMessageID int64
 	for i := 0; i < 3; i++ {
-		_, lastSeq = sendMsg(t, a, convID, "sc09-unread-"+string(rune('0'+i)))
+		lastMessageID, _ = sendMsg(t, a, convID, "sc09-unread-"+string(rune('0'+i)))
 	}
 
 	// Step 2: b ListConversations，验证 unread_count=3
@@ -617,7 +617,7 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 	ackReq := &msg.UpdateReadAckReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		SeqId:          lastSeq,
+		MessageId:      uint64(lastMessageID),
 	}
 	require.NoError(t, b.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
 
