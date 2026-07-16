@@ -18,15 +18,15 @@
 | `odb/` | ODB entity definitions and durable relational fields | Affected entity, especially `message.hxx`, `user_timeline.hxx`, `conversation_member.hxx`, and `media_*.hxx` |
 | `conf/` | Local/container flags and JSON configuration | `conf/local/`, `conf/docker/`, `conf/auth.json`, `conf/media.json` |
 | `sql/` | Versioned schema migrations | `sql/V4__media.sql` and any migration matching affected ODB entities |
-| `docker/` | Supplemental MinIO topology and initialization | `docker/docker-compose.yml`, `docker/minio-init/entrypoint.sh` |
-| `docker-compose.yml` | Full application, service, and dependency runtime topology | Root `docker-compose.yml`, then affected `Dockerfile` and `conf/docker` file |
+| `docker/` | Separate MinIO topology and initialization; not wired into the root application network | `docker/docker-compose.yml`, `docker/minio-init/entrypoint.sh` |
+| `docker-compose.yml` | Application stack declaration; Media object-storage wiring is incomplete | Root `docker-compose.yml`, then affected `Dockerfile` and `conf/docker` file |
 | `scripts/` | Operational support and monitoring configuration | `scripts/install_aws_sdk_linux.sh`, `scripts/prometheus/redis_alerts.yml` |
 | `tests/` | Pure-Go L1-L4 framework, clients, fixtures, cleanup, and store verification | `tests/Makefile`, `tests/config.yaml`, affected `tests/bvt`, `tests/func`, `tests/perf`, `tests/pkg` |
 | `docs/` | Secondary architecture/API/operations context | Affected `docs/api/*.yaml`, `docs/operations/`, then relevant architecture documents |
 
 ## Verified ports and infrastructure endpoints
 
-Application ports come from `conf/local`, `conf/docker`, and root `docker-compose.yml`. MinIO ports come from the supplemental `docker/docker-compose.yml`.
+Application ports come from `conf/local`, `conf/docker`, and root `docker-compose.yml`. MinIO ports come from the separate `docker/docker-compose.yml`; this is not an integrated container endpoint map.
 
 | Owner | Local endpoint/port | Container endpoint/port | Evidence |
 |---|---:|---:|---|
@@ -45,10 +45,12 @@ Application ports come from `conf/local`, `conf/docker`, and root `docker-compos
 | Redis cluster | `127.0.0.1:6379`, `:6380`-`:6384` | `redis-node1:6379`, `redis-node2:6380` through `redis-node6:6384` | root Compose; service seed flags |
 | RabbitMQ | `127.0.0.1:5672` | `rabbitmq:5672` | Transmite, Message, Push configs |
 | Elasticsearch | HTTP `127.0.0.1:9200`; transport `:9300` | `elasticsearch:9200`; transport `:9300` | root Compose; service configs |
-| MinIO S3 | `127.0.0.1:9000` | `minio:9000` | `conf/media.json`; Compose |
-| MinIO console | `127.0.0.1:9001` | `minio:9001` | Compose |
+| MinIO S3 | Host `127.0.0.1:9000`, conflicting with Gateway | `minio:9000` only inside the separate MinIO Compose network | `conf/media.json`; supplemental Compose |
+| MinIO console | Host `127.0.0.1:9001`, conflicting with Push WebSocket | `minio:9001` only inside the separate MinIO Compose network | supplemental Compose |
 
 MySQL service configs set `mysql_port=0`, while root Compose exposes MySQL on `3306` and service entrypoints wait on `mysql:3306`; preserve that distinction when diagnosing driver defaults. Gateway's `websocket_listen_port=0` is not the client WebSocket endpoint; Push owns `ws_port=9001`.
+
+Root Compose mounts `conf/media.json` into Media, but `s3.endpoint=http://127.0.0.1:9000` addresses the Media container itself. Root Compose has no MinIO service/dependency, while the supplemental MinIO Compose project has no declared shared external network with the root project. Do not present these declarations as a working integrated Media topology or recommend their current commands as a functional Media runtime. Any repair must explicitly reconcile the network, endpoint, dependency, and `9000`/`9001` host-port conflicts, then be verified from the affected containers.
 
 ## State ownership
 

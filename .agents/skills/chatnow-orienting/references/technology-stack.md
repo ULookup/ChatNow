@@ -41,10 +41,10 @@ Inspect root `CMakeLists.txt`, the affected service's `CMakeLists.txt`, and its 
 - Media S3, buckets, presign, and MIME policy: `conf/media.json` plus Media flags.
 - Example Transmite flags: `conf/transmite_server.conf.example`.
 - Service defaults and flag definitions: each `<service>/source/<service>_server.cc`.
-- Root `docker-compose.yml` is the full application/dependency topology used by CI. Start it with `docker compose up -d --build` when its required environment credentials are configured.
-- `docker/docker-compose.yml` separately defines MinIO and its initialization sidecar. Run it with `docker compose -f docker/docker-compose.yml up -d minio minio-init`; do not infer the application stack from this supplemental file.
+- Root `docker-compose.yml` declares the application stack used by CI, but it is not a complete integrated Media/MinIO topology: it starts Media without a MinIO service or dependency.
+- `docker/docker-compose.yml` separately declares MinIO and its initialization sidecar on a different default Compose network. Media mounts `conf/media.json`, whose `http://127.0.0.1:9000` endpoint resolves to the Media container itself, not to that separate MinIO container.
 
-The local application ports and the MinIO host ports overlap: Gateway HTTP and MinIO S3 both use `9000`; Push WebSocket and the MinIO console both use `9001`. Choose a non-conflicting topology when running both.
+The two Compose declarations also conflict on host ports: Gateway HTTP and MinIO S3 both publish `9000`; Push WebSocket and the MinIO console both publish `9001`. Therefore, neither `docker compose up -d --build` nor running both Compose files as written proves a functional containerized Media flow. Treat the network, Media S3 endpoint, service dependency, and host-port mapping as unresolved executable contradictions that must be fixed and verified before documenting a working container runtime command.
 
 ## Verification entry points
 
