@@ -4,6 +4,7 @@ package func_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -26,6 +27,7 @@ import (
 	common "chatnow-tests/proto/chatnow/common"
 	identity "chatnow-tests/proto/chatnow/identity"
 	msg "chatnow-tests/proto/chatnow/message"
+	push "chatnow-tests/proto/chatnow/push"
 	transmite "chatnow-tests/proto/chatnow/transmite"
 )
 
@@ -340,6 +342,78 @@ func absDuration(value time.Duration) time.Duration {
 	return value
 }
 
+func TestFN_CA_UnackedSameUserSeqLatestPayloadAndAck(t *testing.T) {
+	recipient, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	ws := openCacheTestWebSocket(t)
+	t.Cleanup(func() { _ = ws.Close() })
+	const deviceID = "default_device"
+	writeCacheTestBinary(t, ws, cacheTestAuthNotify(recipient.AccessToken, deviceID))
+
+	deviceKey := fmt.Sprintf("im:dev:{%s}", recipient.UserID)
+	requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+		"Push route must exist before direct PushToUser calls", redisEquals("1"),
+		"EXISTS", deviceKey)
+
+	userSeq := uint64(time.Now().UnixNano())
+	unackedKey := fmt.Sprintf("im:unack:{%s:%s}", recipient.UserID, deviceID)
+	unackedIndexKey := fmt.Sprintf("im:unack:idx:{%s:%s}", recipient.UserID, deviceID)
+	verify.RedisCLI(t, "DEL", unackedKey, unackedIndexKey)
+
+	first := &push.NotifyMessage{
+		NotifyEventId: proto.String("unacked-first-" + client.NewRequestID()),
+		NotifyType:    push.NotifyType_TYPING_NOTIFY,
+		NotifyRemarks: &push.NotifyMessage_Typing{Typing: &push.NotifyTyping{
+			UserId: recipient.UserID, ConversationId: "unacked-contract", IsTyping: false,
+		}},
+	}
+	second := proto.Clone(first).(*push.NotifyMessage)
+	second.NotifyEventId = proto.String("unacked-second-" + client.NewRequestID())
+	second.GetTyping().IsTyping = true
+
+	for _, notify := range []*push.NotifyMessage{first, second} {
+		rsp := &push.PushToUserRsp{}
+		require.NoError(t, HTTP.DoProtobufURL(
+			HTTP.Config().Infra.PushVars+"/chatnow.push.PushService/PushToUser",
+			&push.PushToUserReq{
+				RequestId: client.NewRequestID(), UserId: recipient.UserID,
+				Notify: notify, UserSeq: proto.Uint64(userSeq), TargetDeviceIds: []string{deviceID},
+			}, rsp))
+		require.True(t, rsp.GetHeader().GetSuccess(), rsp.GetHeader().GetErrorMessage())
+		require.Equal(t, int32(1), rsp.GetOnlineDeviceCount())
+	}
+
+	seq := strconv.FormatUint(userSeq, 10)
+	requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+		"same user_seq must retain one stable ZSET identity", redisEquals("1"),
+		"ZCARD", unackedKey)
+	require.Equal(t, seq, verify.RedisCLI(t, "ZRANGE", unackedKey, "0", "-1"))
+	require.Equal(t, "1", verify.RedisCLI(t, "HLEN", unackedIndexKey))
+
+	encodedLatest := verify.RedisCLI(t, "HGET", unackedIndexKey, seq)
+	latestBytes, err := base64.StdEncoding.DecodeString(encodedLatest)
+	require.NoError(t, err)
+	latest := &push.NotifyMessage{}
+	require.NoError(t, proto.Unmarshal(latestBytes, latest))
+	require.True(t, proto.Equal(second, latest),
+		"same user_seq must replace the HASH payload with the second notification")
+
+	ackBytes, err := proto.Marshal(&push.NotifyMessage{
+		NotifyType: push.NotifyType_MSG_PUSH_ACK,
+		NotifyRemarks: &push.NotifyMessage_MsgPushAck{MsgPushAck: &push.NotifyMsgPushAck{
+			UserId: recipient.UserID, DeviceId: deviceID, MessageId: 1,
+			UserSeq: userSeq, ConversationId: "unacked-contract",
+		}},
+	})
+	require.NoError(t, err)
+	writeCacheTestBinary(t, ws, ackBytes)
+	requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+		"WebSocket ACK must remove the ZSET identity", redisEquals("0"),
+		"EXISTS", unackedKey)
+	requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+		"WebSocket ACK must remove the HASH payload index", redisEquals("0"),
+		"EXISTS", unackedIndexKey)
+}
+
 // FN-CA-05 | healthy Redis applies the distributed message rate limit.
 func TestFN_CA_RateLimit(t *testing.T) {
 	user, peer, convID := fixture.MakeFriends(t, HTTP)
@@ -440,22 +514,32 @@ func TestFN_CA_UserInfoInvalidatedAfterProfileUpdate(t *testing.T) {
 	verify.RedisCLI(t, "DEL", key)
 	sendCacheTestMessage(t, user, convID, "warm")
 	require.Equal(t, "1", verify.RedisCLI(t, "EXISTS", key))
+	warmInfo := &common.UserInfo{}
+	require.NoError(t, proto.Unmarshal(redisRaw(t, key), warmInfo))
+	require.NotEmpty(t, warmInfo.GetNickname())
 
 	newNickname := fmt.Sprintf("cache_%d", time.Now().UnixNano()%1_000_000_000)
+	require.NotEqual(t, warmInfo.GetNickname(), newNickname)
 	updateRsp := &identity.UpdateProfileRsp{}
 	require.NoError(t, user.DoAuth("/service/identity/update_profile", &identity.UpdateProfileReq{
 		RequestId: client.NewRequestID(),
 		Nickname:  &newNickname,
 	}, updateRsp))
 	require.True(t, updateRsp.GetHeader().GetSuccess(), updateRsp.GetHeader().GetErrorMessage())
+	require.Equal(t, newNickname, updateRsp.GetUserInfo().GetNickname())
 	require.Equal(t, "0", verify.RedisCLI(t, "EXISTS", key))
 
-	// Identity can invalidate the shared L2 immediately; the process-local L1 is
-	// intentionally bounded by its 45s TTL in the absence of a broadcast channel.
+	// UpdateProfile invalidates shared L2 immediately. A Transmite process may
+	// still publish its bounded stale L1 value until the documented 45s lifetime
+	// expires; this waits at the business boundary instead of forcing an internal
+	// generation/CAS interleaving with a production timing hook.
 	time.Sleep(55 * time.Second)
 	sendCacheTestMessage(t, user, convID, "after-update")
+	// The next Transmite lookup must repopulate Redis from Identity with the
+	// latest profile, proving stale publication cannot survive the L1 bound.
 	serialized := redisRaw(t, key)
 	info := &common.UserInfo{}
 	require.NoError(t, proto.Unmarshal(serialized, info))
 	require.Equal(t, newNickname, info.GetNickname())
+	require.NotEqual(t, warmInfo.GetNickname(), info.GetNickname())
 }

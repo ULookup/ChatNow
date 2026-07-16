@@ -2,15 +2,89 @@ package contracts
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"chatnow-tests/pkg/client"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	"gopkg.in/yaml.v3"
 )
+
+func TestDirectProtobufHTTPClient(t *testing.T) {
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		request := &wrapperspb.StringValue{}
+		if err := proto.Unmarshal(body, request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		received <- fmt.Sprintf("%s|%s|%s", r.URL.Path, r.Header.Get("Content-Type"), request.GetValue())
+		response, err := proto.Marshal(wrapperspb.String("direct-response"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		_, _ = w.Write(response)
+	}))
+	t.Cleanup(server.Close)
+
+	httpClient := client.NewHTTPClient(&client.Config{})
+	response := &wrapperspb.StringValue{}
+	require.NoError(t, httpClient.DoProtobufURL(
+		server.URL+"/chatnow.push.PushService/PushToUser",
+		wrapperspb.String("direct-request"), response))
+	require.Equal(t, "direct-response", response.GetValue())
+	require.Equal(t,
+		"/chatnow.push.PushService/PushToUser|application/x-protobuf|direct-request",
+		<-received)
+}
+
+func TestGoCacheRegressionsReplaceTemporaryCPP(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, relativePath := range []string{
+		"common/test/test_user_info_generation_fence.cc",
+		"common/test/test_unacked_pending_ledger.cc",
+	} {
+		_, err := os.Stat(filepath.Join(root, relativePath))
+		require.ErrorIs(t, err, os.ErrNotExist, "%s must be removed", relativePath)
+	}
+
+	cmake, err := os.ReadFile(filepath.Join(root, "common/test/CMakeLists.txt"))
+	require.NoError(t, err)
+	require.NotContains(t, string(cmake), "test_unacked_pending_ledger",
+		"the temporary C++ Unacked target must be removed")
+
+	cacheTestPath := filepath.Join(root, "tests/func/cache_test.go")
+	parsed, err := parser.ParseFile(token.NewFileSet(), cacheTestPath, nil, 0)
+	require.NoError(t, err)
+	var found bool
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && function.Name.Name == "TestFN_CA_UnackedSameUserSeqLatestPayloadAndAck" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found,
+		"the Go functional suite must own the same-user_seq latest-payload/ACK regression")
+}
 
 type workflowContract struct {
 	On struct {

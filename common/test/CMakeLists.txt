@@ -89,12 +89,6 @@ if(CHATNOW_HAS_REDIS_PLUS_PLUS)
     set_property(TARGET test_redis_mutex_contract PROPERTY CXX_STANDARD_REQUIRED ON)
     INSTALL(TARGETS test_redis_mutex_contract RUNTIME DESTINATION bin)
 
-    add_executable(test_unacked_pending_ledger test_unacked_pending_ledger.cc)
-    set_property(TARGET test_unacked_pending_ledger PROPERTY CXX_STANDARD 17)
-    set_property(TARGET test_unacked_pending_ledger PROPERTY CXX_STANDARD_REQUIRED ON)
-    target_link_libraries(test_unacked_pending_ledger
-        -lredis++ -lhiredis -lbrpc -lspdlog -lfmt -lpthread)
-    INSTALL(TARGETS test_unacked_pending_ledger RUNTIME DESTINATION bin)
 endif()
 
 # FIXME(3.0): common_tests has gflags link order issue with brpc static lib
