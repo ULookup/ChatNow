@@ -28,10 +28,11 @@ type workflowJob struct {
 }
 
 type workflowStep struct {
-	Uses string            `yaml:"uses"`
-	Run  string            `yaml:"run"`
-	If   string            `yaml:"if"`
-	Env  map[string]string `yaml:"env"`
+	Uses            string            `yaml:"uses"`
+	Run             string            `yaml:"run"`
+	If              string            `yaml:"if"`
+	ContinueOnError any               `yaml:"continue-on-error"`
+	Env             map[string]string `yaml:"env"`
 }
 
 type composeContract struct {
@@ -139,13 +140,37 @@ func assertDecoratedCommandsDoNotSatisfyGate(t *testing.T) {
 func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target string) {
 	t.Helper()
 	gate := exactRunStepIndex(valid, target)
+	start := exactRunStepIndex(valid, "docker compose up -d --build")
+	wait := exactRunStepIndex(valid, "./scripts/wait_for_services.sh")
+	proto := exactRunStepIndex(valid, "cd tests && make proto")
 	deps := exactRunStepIndex(valid, "cd tests && go mod download")
 	teardown := exactRunStepIndex(valid, "docker compose down -v")
 	require.NotEqual(t, -1, gate)
+	require.NotEqual(t, -1, start)
+	require.NotEqual(t, -1, wait)
+	require.NotEqual(t, -1, proto)
 	require.NotEqual(t, -1, deps)
 	require.NotEqual(t, -1, teardown)
 
 	for name, mutate := range map[string]func(*workflowJob){
+		"gate disabled by if": func(job *workflowJob) {
+			job.Steps[gate].If = "${{ false }}"
+		},
+		"gate allowed to fail": func(job *workflowJob) {
+			job.Steps[gate].ContinueOnError = true
+		},
+		"startup allowed to fail": func(job *workflowJob) {
+			job.Steps[start].ContinueOnError = true
+		},
+		"wait allowed to fail": func(job *workflowJob) {
+			job.Steps[wait].ContinueOnError = true
+		},
+		"proto allowed to fail": func(job *workflowJob) {
+			job.Steps[proto].ContinueOnError = true
+		},
+		"dependency download allowed to fail": func(job *workflowJob) {
+			job.Steps[deps].ContinueOnError = true
+		},
 		"exit zero after gate": func(job *workflowJob) {
 			job.Steps[gate].Run = target + "\nexit 0"
 		},
@@ -153,7 +178,10 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 			job.Steps[gate].Run = "if false; then " + target + "; fi"
 		},
 		"quoted skip target": func(job *workflowJob) {
-			job.Steps[gate].Run = `cd tests && make "test-perf-cache"`
+			insertWorkflowStep(job, teardown, workflowStep{Run: `cd tests && make "test-perf-cache"`})
+		},
+		"single-quoted skip target": func(job *workflowJob) {
+			insertWorkflowStep(job, teardown, workflowStep{Run: `cd tests && make 'test-perf-cache'`})
 		},
 		"gate before dependencies": func(job *workflowJob) {
 			job.Steps[gate], job.Steps[deps] = job.Steps[deps], job.Steps[gate]
@@ -173,6 +201,12 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	}
 }
 
+func insertWorkflowStep(job *workflowJob, index int, step workflowStep) {
+	job.Steps = append(job.Steps, workflowStep{})
+	copy(job.Steps[index+1:], job.Steps[index:])
+	job.Steps[index] = step
+}
+
 func cloneWorkflowJob(job workflowJob) workflowJob {
 	clone := job
 	clone.Steps = append([]workflowStep(nil), job.Steps...)
@@ -182,13 +216,32 @@ func cloneWorkflowJob(job workflowJob) workflowJob {
 func assertTargetAbsent(t *testing.T, job workflowJob, target string) {
 	t.Helper()
 	for _, step := range job.Steps {
-		require.NotEqual(t, "cd tests && make "+target, strings.TrimSpace(step.Run),
+		require.False(t, isForbiddenMakeTarget(step.Run, target),
 			"PF-09 CI must not execute the skip-capable discovery target")
 	}
 }
 
+func isForbiddenMakeTarget(run, target string) bool {
+	run = strings.TrimSpace(run)
+	for _, command := range []string{
+		"cd tests && make " + target,
+		`cd tests && make "` + target + `"`,
+		"cd tests && make '" + target + "'",
+	} {
+		if run == command {
+			return true
+		}
+	}
+	return false
+}
+
 func validateFullStackGateJob(job workflowJob, target string) error {
 	const install = "sudo apt-get update\nsudo apt-get install -y protobuf-compiler netcat-openbsd"
+	for _, step := range job.Steps {
+		if isForbiddenMakeTarget(step.Run, "test-perf-cache") {
+			return fmt.Errorf("skip-capable performance target is forbidden")
+		}
+	}
 	ordered := []struct {
 		label string
 		index int
@@ -215,6 +268,15 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		previous = step.index
 	}
 	teardown := ordered[len(ordered)-1].index
+	gate := ordered[len(ordered)-2].index
+	if strings.TrimSpace(job.Steps[gate].If) != "" {
+		return fmt.Errorf("gate step must not have a step-level if condition")
+	}
+	for _, required := range ordered[4:9] {
+		if continueOnErrorEnabled(job.Steps[required.index].ContinueOnError) {
+			return fmt.Errorf("%s step must not continue on error", required.label)
+		}
+	}
 	if teardown != len(job.Steps)-1 {
 		return fmt.Errorf("teardown must be the final step")
 	}
@@ -228,6 +290,17 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		return fmt.Errorf("teardown command must appear exactly once")
 	}
 	return nil
+}
+
+func continueOnErrorEnabled(value any) bool {
+	switch value := value.(type) {
+	case nil:
+		return false
+	case bool:
+		return value
+	default:
+		return true
+	}
 }
 
 func countExactRunSteps(job workflowJob, wanted string) int {
