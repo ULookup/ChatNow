@@ -21,6 +21,7 @@
 #include <sw/redis++/redis_cluster.h>
 #include <chrono>
 #include <algorithm>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -1154,10 +1155,33 @@ user_info_l1_publication(GenerationWriteResult result) noexcept {
     return UserInfoL1Publication::Denied;
 }
 
+template <typename Eval>
+GenerationWriteResult execute_generation_write(bool redis_available,
+                                               Eval &&eval) noexcept {
+    if (!redis_available) return GenerationWriteResult::Unavailable;
+    try {
+        return std::forward<Eval>(eval)() == 0
+            ? GenerationWriteResult::Conflict
+            : GenerationWriteResult::Committed;
+    } catch (const RedisCircuitOpen &) {
+        return GenerationWriteResult::Unavailable;
+    } catch (const std::exception &) {
+        return GenerationWriteResult::Unavailable;
+    }
+}
+
+template <typename Publish>
+void publish_user_info_l1(GenerationWriteResult result, Publish &&publish) {
+    const auto publication = user_info_l1_publication(result);
+    if (publication == UserInfoL1Publication::Denied) return;
+    std::forward<Publish>(publish)(publication);
+}
+
 class UserInfoCache
 {
 public:
     using ptr = std::shared_ptr<UserInfoCache>;
+    using GenerationEval = std::function<long long()>;
 
     struct BatchResult {
         std::unordered_map<std::string, std::string> hits;
@@ -1172,7 +1196,9 @@ public:
         uint64_t observed_generation;
     };
 
-    explicit UserInfoCache(const RedisClient::ptr &c) : _c(c) {}
+    explicit UserInfoCache(const RedisClient::ptr &c,
+                           GenerationEval generation_eval = {})
+        : _c(c), _generation_eval(std::move(generation_eval)) {}
 
     std::optional<std::string> get(const std::string &uid) {
         if (!_c) return std::nullopt;
@@ -1256,25 +1282,20 @@ public:
     GenerationWriteResult set_if_generation(const std::string &uid,
                                             const std::string &serialized,
                                             uint64_t expected_generation) {
-        if (!_c) return GenerationWriteResult::Unavailable;
-        const auto ttl = serialized.empty()
-            ? randomized_ttl(std::chrono::seconds(5))
-            : randomized_ttl(kUserInfoTtl);
-        try {
-            std::vector<std::string> keys = {
-                key::user_info_key(uid), key::user_info_generation_key(uid)};
-            std::vector<std::string> args = {
-                std::to_string(expected_generation), serialized,
-                std::to_string(ttl.count())};
-            const auto result = _c->eval<long long>(
-                kSetIfGenerationLua, keys.begin(), keys.end(), args.begin(), args.end());
-            return result == 0 ? GenerationWriteResult::Conflict
-                               : GenerationWriteResult::Committed;
-        } catch (const RedisCircuitOpen &) {
-            return GenerationWriteResult::Unavailable;
-        } catch (const std::exception &) {
-            return GenerationWriteResult::Unavailable;
-        }
+        return execute_generation_write(
+            static_cast<bool>(_c) || static_cast<bool>(_generation_eval), [&] {
+                const auto ttl = serialized.empty()
+                    ? randomized_ttl(std::chrono::seconds(5))
+                    : randomized_ttl(kUserInfoTtl);
+                std::vector<std::string> keys = {
+                    key::user_info_key(uid), key::user_info_generation_key(uid)};
+                std::vector<std::string> args = {
+                    std::to_string(expected_generation), serialized,
+                    std::to_string(ttl.count())};
+                if (_generation_eval) return _generation_eval();
+                return _c->eval<long long>(kSetIfGenerationLua, keys.begin(), keys.end(),
+                                           args.begin(), args.end());
+            });
     }
 
     size_t batch_set(const std::unordered_map<std::string, FencedValue> &values) {
@@ -1386,6 +1407,7 @@ end
 return written
 )lua";
     RedisClient::ptr _c;
+    GenerationEval _generation_eval;
 };
 
 // =============================================================================
