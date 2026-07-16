@@ -1,0 +1,81 @@
+name: Agent Policy
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  issue-policy:
+    if: github.event_name == 'issues'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout trusted policy source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: tests/go.sum
+      - name: Build trusted policy binary
+        run: cd tests && go build -o "$RUNNER_TEMP/agent-policy" ./cmd/agent-policy
+      - name: Validate Issue
+        run: "$RUNNER_TEMP/agent-policy" issue
+
+  pull-request-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout trusted base policy source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: tests/go.sum
+      - name: Build trusted policy binary
+        run: cd tests && go build -o "$RUNNER_TEMP/agent-policy" ./cmd/agent-policy
+      - name: Checkout proposed head as validation data
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Collect changed files and commit subjects
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            echo 'AGENT_POLICY_CHANGED_FILES<<AGENT_POLICY_FILES_EOF'
+            git diff --name-only "$BASE_SHA...$HEAD_SHA"
+            echo 'AGENT_POLICY_FILES_EOF'
+            echo 'AGENT_POLICY_COMMIT_SUBJECTS<<AGENT_POLICY_COMMITS_EOF'
+            git log --format=%s "$BASE_SHA..$HEAD_SHA"
+            echo 'AGENT_POLICY_COMMITS_EOF'
+          } >> "$GITHUB_ENV"
+      - name: Validate branch
+        run: "$RUNNER_TEMP/agent-policy" branch
+      - name: Validate commit subjects
+        run: "$RUNNER_TEMP/agent-policy" commits
+      - name: Validate pull request body
+        run: "$RUNNER_TEMP/agent-policy" pull-request
+      - name: Validate Skill synchronization
+        run: "$RUNNER_TEMP/agent-policy" skill-sync
+      - name: Validate Skill packages
+        env:
+          AGENT_POLICY_REPO_ROOT: ${{ github.workspace }}
+        run: "$RUNNER_TEMP/agent-policy" skills
