@@ -58,7 +58,7 @@ Documentation-only, comment-only, or provably behavior-neutral mechanical work m
 
 ## Output contract
 
-Report the selected layer and case ID, the exact RED command and expected failure, the GREEN and same-layer regression commands with results, broader risk checks, cleanup ownership, and every check not run with its reason. For the sole exemption, report the exemption statement and proof instead.
+Report the selected layer and case ID, the exact RED command, the actual observed RED result/output, and why that observed failure is the expected missing behavior. Report the GREEN and same-layer regression commands with results, broader risk checks, cleanup ownership, and every check not run with its reason. For the sole exemption, report the exemption statement and proof instead.
 
 ## Red flags: stop and restart
 

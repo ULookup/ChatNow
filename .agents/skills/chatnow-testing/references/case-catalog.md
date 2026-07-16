@@ -7,19 +7,19 @@ Case IDs are stable identities, not completion claims. Put the ID in the case co
 | Layer/domain | Namespace |
 |---|---|
 | BVT | `BVT-001` through `BVT-018` |
-| Functional: Identity | `FN-ID-<three digits>` |
-| Functional: Relationship | `FN-RL-<three digits>` |
-| Functional: Conversation | `FN-CV-<three digits>` |
-| Functional: Message | `FN-MS-<three digits>` |
-| Functional: Transmite | `FN-TM-<three digits>` |
-| Functional: Media | `FN-MD-<three digits>` |
-| Functional: Presence | `FN-PR-<three digits>` |
-| Functional: Auth middleware | `FN-AM-<three digits>` |
-| Functional: WebSocket notification | `FN-WS-<three digits>` |
-| Functional: Data consistency | `FN-DC-<three digits>` |
-| Functional: Concurrency | `FN-CC-<three digits>` |
-| Functional: Security | `FN-SEC-<three digits>` |
-| Functional: Quota | `FN-QT-<three digits>` |
+| Functional: Identity | `FN-ID-<two digits>` |
+| Functional: Relationship | `FN-RL-<two digits>` |
+| Functional: Conversation | `FN-CV-<two digits>` |
+| Functional: Message | `FN-MS-<two digits>` |
+| Functional: Transmite | `FN-TM-<two digits>` |
+| Functional: Media | `FN-MD-<two digits>` |
+| Functional: Presence | `FN-PR-<two digits>` |
+| Functional: Auth middleware | `FN-AM-<two digits>` |
+| Functional: WebSocket notification | `FN-WS-<two digits>` |
+| Functional: Data consistency | `FN-DC-<two digits>` |
+| Functional: Concurrency | `FN-CC-<two digits>` |
+| Functional: Security | `FN-SEC-<two digits>` |
+| Functional: Quota | `FN-QT-<two digits>` |
 | Scenario | `SC-01` through `SC-12` |
 | Performance | `PF-01` through `PF-08` |
 | Reliability | `RL-<category>-<number>` |
@@ -30,7 +30,7 @@ Reliability is a distinct reserved namespace and layer. The current tree has no 
 
 1. Inspect the current tree immediately before allocation. Search test source, comments, documentation, and the diff for the exact namespace; do not rely on this catalog to identify availability.
 2. Confirm that the behavior is not already represented under another ID.
-3. For an open-ended Functional or Reliability namespace, choose the lowest unused number after considering concurrent reservations. For bounded BVT, Scenario, and Performance namespaces, use only a free ID within the stated range.
+3. Format Functional numbers as zero-padded two-digit values `01` through `99`, matching the current executable tests (for example, `FN-ID-08`, `FN-MD-20`, and `FN-DC-07`). Choose the lowest unused number after considering concurrent reservations. If a Functional namespace reaches `99`, stop and update this catalog deliberately instead of silently widening the ID. For Reliability, choose the lowest unused category number after considering concurrent reservations. For bounded BVT, Scenario, and Performance namespaces, use only a free ID within the stated range.
 4. Record the reservation in the scoped work before implementation and communicate it to concurrent contributors.
 5. Reinspect before commit. Resolve collisions by keeping the earlier reservation and renumbering the later one.
 
