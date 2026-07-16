@@ -13,3 +13,21 @@ type IssueInput struct {
 	TargetVersion string
 	IsEmergency   bool
 }
+
+// PullRequestInput contains the fields needed to validate a ChatNow pull
+// request without performing event, filesystem, or Git I/O.
+type PullRequestInput struct {
+	Title        string
+	Body         string
+	Head         string
+	Base         string
+	IssueNumber  int
+	ChangedFiles []string
+}
+
+// SkillSyncInput contains the pull request declaration and changed paths used
+// to enforce repository Skill synchronization.
+type SkillSyncInput struct {
+	Body         string
+	ChangedFiles []string
+}
