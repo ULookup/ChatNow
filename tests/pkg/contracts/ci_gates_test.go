@@ -107,6 +107,7 @@ type workflowStep struct {
 	If              string            `yaml:"if"`
 	ContinueOnError any               `yaml:"continue-on-error"`
 	Env             map[string]string `yaml:"env"`
+	With            map[string]any    `yaml:"with"`
 }
 
 type composeContract struct {
@@ -129,15 +130,19 @@ func TestCIGates(t *testing.T) {
 	assertDecoratedCommandsDoNotSatisfyGate(t)
 	assertContractsRunInBuild(t, workflow.Jobs["build"])
 
+	producer, ok := workflow.Jobs["service-artifacts"]
+	require.True(t, ok, "CI must build the Compose service artifacts once")
+	assertServiceArtifactProducer(t, producer)
+
 	reliability, ok := workflow.Jobs["reliability"]
 	require.True(t, ok, "RL-05 must have a dedicated reliability job")
-	require.Nil(t, reliability.Needs, "reliability must own its setup instead of depending on another job")
+	require.Equal(t, "service-artifacts", reliability.Needs)
 	require.Equal(t, "github.event_name == 'pull_request' || github.event_name == 'schedule'", reliability.If)
 	assertFullStackGateJob(t, reliability, "cd tests && make test-reliability")
 
 	perfCache, ok := workflow.Jobs["perf-cache"]
 	require.True(t, ok, "PF-09 must have a dedicated perf-cache job")
-	require.Nil(t, perfCache.Needs, "perf-cache must own its setup instead of depending on another job")
+	require.Equal(t, "service-artifacts", perfCache.Needs)
 	require.Equal(t, "github.event_name == 'schedule'", perfCache.If)
 	assertFullStackGateJob(t, perfCache, "cd tests && make test-perf-cache-gate")
 	assertTargetAbsent(t, perfCache, "test-perf-cache")
@@ -152,6 +157,91 @@ func TestCIGates(t *testing.T) {
 	require.True(t, ok)
 	require.Contains(t, transmite.Entrypoint, "-rate_limit_user_max=${TRANSMITE_RATE_LIMIT_USER_MAX:-600}")
 	require.Contains(t, transmite.Entrypoint, "-rate_limit_session_max=${TRANSMITE_RATE_LIMIT_SESSION_MAX:-3000}")
+}
+
+const (
+	artifactName       = "compose-service-artifacts"
+	artifactPath       = "compose-artifacts"
+	builderImage       = "chatnow-ci-builder:ci"
+	nativeBuildCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
+'`
+	packageCommand  = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts`
+	validateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/validate_compose_artifacts.sh compose-artifacts`
+	restoreCommand  = `for service in conversation gateway identity media message presence push relationship transmite; do
+  rm -rf "$service/build" "$service/depends"
+  cp -a "compose-artifacts/$service/build" "$service/build"
+  cp -a "compose-artifacts/$service/depends" "$service/depends"
+done`
+)
+
+func assertServiceArtifactProducer(t *testing.T, job workflowJob) {
+	t.Helper()
+	require.NoError(t, validateServiceArtifactProducer(job))
+
+	valid := cloneWorkflowJob(job)
+	build := exactUsesStepIndex(valid, "docker/build-push-action@v6")
+	native := exactRunStepIndex(valid, nativeBuildCommand)
+	pack := exactRunStepIndex(valid, packageCommand)
+	validate := exactRunStepIndex(valid, validateCommand)
+	upload := exactUsesStepIndex(valid, "actions/upload-artifact@v4")
+	for name, mutate := range map[string]func(*workflowJob){
+		"builder allowed to fail":      func(job *workflowJob) { job.Steps[build].ContinueOnError = true },
+		"native build allowed to fail": func(job *workflowJob) { job.Steps[native].ContinueOnError = true },
+		"package allowed to fail":      func(job *workflowJob) { job.Steps[pack].ContinueOnError = true },
+		"validation allowed to fail":   func(job *workflowJob) { job.Steps[validate].ContinueOnError = true },
+		"upload allowed to fail":       func(job *workflowJob) { job.Steps[upload].ContinueOnError = true },
+		"validation after upload": func(job *workflowJob) {
+			job.Steps[validate], job.Steps[upload] = job.Steps[upload], job.Steps[validate]
+		},
+		"native build bypassed":   func(job *workflowJob) { job.Steps[native].If = "${{ false }}" },
+		"native build duplicated": func(job *workflowJob) { job.Steps = append(job.Steps, job.Steps[native]) },
+	} {
+		t.Run("producer rejects "+name, func(t *testing.T) {
+			invalid := cloneWorkflowJob(valid)
+			mutate(&invalid)
+			require.Error(t, validateServiceArtifactProducer(invalid))
+		})
+	}
+}
+
+func validateServiceArtifactProducer(job workflowJob) error {
+	if countExactUsesSteps(job, "docker/build-push-action@v6") != 1 || countExactRunSteps(job, nativeBuildCommand) != 1 {
+		return fmt.Errorf("services must be built exactly once")
+	}
+	ordered := []struct {
+		label string
+		index int
+	}{
+		{"checkout", exactUsesStepIndex(job, "actions/checkout@v4")},
+		{"Buildx setup", exactUsesStepIndex(job, "docker/setup-buildx-action@v3")},
+		{"builder image build", exactUsesStepIndex(job, "docker/build-push-action@v6")},
+		{"native service build", exactRunStepIndex(job, nativeBuildCommand)},
+		{"artifact package", exactRunStepIndex(job, packageCommand)},
+		{"artifact validation", exactRunStepIndex(job, validateCommand)},
+		{"artifact upload", exactUsesStepIndex(job, "actions/upload-artifact@v4")},
+	}
+	previous := -1
+	for _, required := range ordered {
+		if required.index < 0 || required.index <= previous {
+			return fmt.Errorf("missing or out-of-order %s step", required.label)
+		}
+		step := job.Steps[required.index]
+		if strings.TrimSpace(step.If) != "" || continueOnErrorEnabled(step.ContinueOnError) {
+			return fmt.Errorf("%s step must fail closed", required.label)
+		}
+		previous = required.index
+	}
+	build := job.Steps[ordered[2].index]
+	if build.With["context"] != "." || build.With["file"] != "docker/ci/Dockerfile" || build.With["load"] != true || build.With["tags"] != builderImage || build.With["cache-from"] != "type=gha" || build.With["cache-to"] != "type=gha,mode=max" {
+		return fmt.Errorf("builder image must use the Dockerfile, local load, and BuildKit GHA cache")
+	}
+	upload := job.Steps[ordered[len(ordered)-1].index]
+	if upload.With["name"] != artifactName || upload.With["path"] != artifactPath || upload.With["if-no-files-found"] != "error" {
+		return fmt.Errorf("artifact upload contract is incomplete")
+	}
+	return nil
 }
 
 func assertFullStackGateJob(t *testing.T, job workflowJob, target string) {
@@ -173,7 +263,7 @@ func assertContractsRunInBuild(t *testing.T, build workflowJob) {
 
 func exactRunStepIndex(job workflowJob, wanted string) int {
 	for index, step := range job.Steps {
-		if strings.TrimSpace(step.Run) == wanted {
+		if strings.TrimSpace(step.Run) == strings.TrimSpace(wanted) {
 			return index
 		}
 	}
@@ -187,6 +277,16 @@ func exactUsesStepIndex(job workflowJob, wanted string) int {
 		}
 	}
 	return -1
+}
+
+func countExactUsesSteps(job workflowJob, wanted string) int {
+	count := 0
+	for _, step := range job.Steps {
+		if step.Uses == wanted {
+			count++
+		}
+	}
+	return count
 }
 
 func assertDecoratedCommandsDoNotSatisfyGate(t *testing.T) {
@@ -215,6 +315,9 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	t.Helper()
 	gate := exactRunStepIndex(valid, target)
 	setupGo := exactUsesStepIndex(valid, "actions/setup-go@v5")
+	download := exactUsesStepIndex(valid, "actions/download-artifact@v4")
+	restore := exactRunStepIndex(valid, restoreCommand)
+	validate := exactRunStepIndex(valid, "./scripts/validate_compose_artifacts.sh compose-artifacts")
 	start := exactRunStepIndex(valid, "docker compose up -d --build")
 	wait := exactRunStepIndex(valid, "./scripts/wait_for_services.sh")
 	proto := exactRunStepIndex(valid, "cd tests && make proto")
@@ -222,6 +325,9 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	teardown := exactRunStepIndex(valid, "docker compose down -v")
 	require.NotEqual(t, -1, gate)
 	require.NotEqual(t, -1, setupGo)
+	require.NotEqual(t, -1, download)
+	require.NotEqual(t, -1, restore)
+	require.NotEqual(t, -1, validate)
 	require.NotEqual(t, -1, start)
 	require.NotEqual(t, -1, wait)
 	require.NotEqual(t, -1, proto)
@@ -231,6 +337,15 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	for name, mutate := range map[string]func(*workflowJob){
 		"Go setup allowed to fail": func(job *workflowJob) {
 			job.Steps[setupGo].ContinueOnError = true
+		},
+		"download allowed to fail": func(job *workflowJob) {
+			job.Steps[download].ContinueOnError = true
+		},
+		"restore allowed to fail": func(job *workflowJob) {
+			job.Steps[restore].ContinueOnError = true
+		},
+		"artifact validation allowed to fail": func(job *workflowJob) {
+			job.Steps[validate].ContinueOnError = true
 		},
 		"gate disabled by if": func(job *workflowJob) {
 			job.Steps[gate].If = "${{ false }}"
@@ -264,6 +379,9 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 		},
 		"gate before dependencies": func(job *workflowJob) {
 			job.Steps[gate], job.Steps[deps] = job.Steps[deps], job.Steps[gate]
+		},
+		"Compose before artifact validation": func(job *workflowJob) {
+			job.Steps[start], job.Steps[validate] = job.Steps[validate], job.Steps[start]
 		},
 		"teardown before gate": func(job *workflowJob) {
 			job.Steps[gate], job.Steps[teardown] = job.Steps[teardown], job.Steps[gate]
@@ -316,6 +434,9 @@ func isForbiddenMakeTarget(run, target string) bool {
 
 func validateFullStackGateJob(job workflowJob, target string) error {
 	const install = "sudo apt-get update\nsudo apt-get install -y protobuf-compiler netcat-openbsd"
+	if job.Needs != "service-artifacts" {
+		return fmt.Errorf("gate job must depend on service-artifacts")
+	}
 	for _, step := range job.Steps {
 		if isForbiddenMakeTarget(step.Run, "test-perf-cache") {
 			return fmt.Errorf("skip-capable performance target is forbidden")
@@ -329,6 +450,9 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		{"Go setup", exactUsesStepIndex(job, "actions/setup-go@v5")},
 		{"system dependency install", exactRunStepIndex(job, install)},
 		{"protoc generator install", exactRunStepIndex(job, "go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11")},
+		{"artifact download", exactUsesStepIndex(job, "actions/download-artifact@v4")},
+		{"artifact restore", exactRunStepIndex(job, restoreCommand)},
+		{"artifact validation", exactRunStepIndex(job, "./scripts/validate_compose_artifacts.sh compose-artifacts")},
 		{"full-stack startup", exactRunStepIndex(job, "docker compose up -d --build")},
 		{"service wait", exactRunStepIndex(job, "./scripts/wait_for_services.sh")},
 		{"protobuf generation", exactRunStepIndex(job, "cd tests && make proto")},
@@ -355,6 +479,13 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		if continueOnErrorEnabled(job.Steps[required.index].ContinueOnError) {
 			return fmt.Errorf("%s step must not continue on error", required.label)
 		}
+		if strings.TrimSpace(job.Steps[required.index].If) != "" {
+			return fmt.Errorf("%s step must not have a step-level if condition", required.label)
+		}
+	}
+	download := ordered[4].index
+	if job.Steps[download].With["name"] != artifactName || job.Steps[download].With["path"] != artifactPath {
+		return fmt.Errorf("gate job must download the shared Compose artifact")
 	}
 	if teardown != len(job.Steps)-1 {
 		return fmt.Errorf("teardown must be the final step")
