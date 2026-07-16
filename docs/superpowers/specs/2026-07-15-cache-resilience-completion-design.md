@@ -283,13 +283,16 @@ C++ gtest 或 Python 合约测试。
 - 200 个并发请求访问同一冷 key 时，只允许一次进程内 RPC 回源。
 - nightly 基线吞吐下降超过 10% 时失败。
 - 性能门禁仅在 `PF09_RUN_FULLSTACK=1` 的 Linux 完整服务环境启用；普通编译发现
-  明确 Skip，不把缺少业务栈伪装成性能通过。L2 阶段由测试向真实 Redis Cluster
-  原子写入从 Identity 读取的 UserInfo，确保 fresh sender 的 L1 未预热；L1 阶段再
-  通过真实发送路径预热。
+  明确 Skip，不把缺少业务栈伪装成性能通过。cold、L2 各使用 20 个 fresh sender，
+  每个 sender 在计时区间只请求一次；L2 在计时前向真实 Redis Cluster 原子写入从
+  Identity 读取的 UserInfo。L1 使用另外 20 个 sender，通过真实发送路径预热后固定
+  压测 10 秒；预热按声明的 Transmite 实例数连续发送，利用 Gateway 的 round-robin
+  为每个实例填充 L1，保证三个计时区间不会因 key 复用或跨实例路由相互转化。
 - 多 Transmite 实例压测通过 `PF09_TRANSMITE_VARS_URLS` 提供所有 bvar 地址并求和，
-  防止遗漏实例导致 RPC 降幅虚高。门禁使用代码库内 5000 msg/s 基线，基线可向上
-  调整但不可降低；5 秒以内的 Go benchmark 校准轮次只报告、不判定，10 秒正式轮次
-  执行吞吐、RPC 降幅和 10% 回退门禁。
+  并用 `PF09_EXPECTED_TRANSMITE_INSTANCES` 校验实例数。前后快照同时记录 pid、uptime、
+  启动时刻估值和 L1/L2/RPC counter，拒绝实例重启、counter 回绕、遗漏和求和溢出；
+  每阶段 counter 必须精确符合对应缓存路径。门禁固定 `-benchtime=1x`，内部 10 秒时长
+  不可由环境变量修改；使用代码库内 5000 msg/s 基线，基线可向上调整但不可降低。
 
 ### 10.4 测试辅助设施
 
