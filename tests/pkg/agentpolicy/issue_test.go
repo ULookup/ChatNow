@@ -21,6 +21,19 @@ func TestParseSections(t *testing.T) {
 	}
 }
 
+func TestParseSectionsAcceptsIssueFormHeadings(t *testing.T) {
+	body := "### Target Version\n3.0-dev\n\n### Evidence\n表单生成的证据。\n"
+
+	sections := ParseSections(body)
+
+	if got := sections["Target Version"]; got != "3.0-dev" {
+		t.Fatalf("Target Version = %q, want 3.0-dev", got)
+	}
+	if got := sections["Evidence"]; got != "表单生成的证据。" {
+		t.Fatalf("Evidence = %q, want form content", got)
+	}
+}
+
 func TestParseSectionsIgnoresFencedCode(t *testing.T) {
 	body := "## Scope\n真实范围。\n```markdown\n## Evidence\n伪造证据。\n```\n## Acceptance Criteria\n```text\n伪造验收。\n```\n"
 

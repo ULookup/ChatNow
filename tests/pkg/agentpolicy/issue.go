@@ -60,9 +60,9 @@ func ParseSections(body string) map[string]string {
 			fenceWidth = width
 			continue
 		}
-		if strings.HasPrefix(line, "## ") {
+		if parsedHeading, ok := policySectionHeading(line); ok {
 			flush()
-			heading = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+			heading = parsedHeading
 			content = nil
 			continue
 		}
@@ -72,6 +72,15 @@ func ParseSections(body string) map[string]string {
 	}
 	flush()
 	return sections
+}
+
+func policySectionHeading(line string) (string, bool) {
+	for _, prefix := range []string{"## ", "### "} {
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimSpace(strings.TrimPrefix(line, prefix)), true
+		}
+	}
+	return "", false
 }
 
 // ValidateIssue validates the machine-checkable ChatNow Issue contract.
