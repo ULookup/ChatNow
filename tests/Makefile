@@ -1,4 +1,4 @@
-.PHONY: proto test-bvt test-func test-scenario test-perf clean deps
+.PHONY: proto test-bvt test-func test-scenario test-perf test-agent-policy clean deps
 
 # Generate Go protobuf from proto/ definitions
 # NOTE: protoc-gen-go >= v1.35 requires go_package option or M flags to derive
@@ -42,6 +42,10 @@ test-scenario:
 # Run performance benchmarks (L4)
 test-perf:
 	go test -tags=perf ./perf/... -bench=. -benchmem -count=3 -benchtime=10s
+
+# Run repository Agent policy validator tests
+test-agent-policy:
+	go test ./pkg/agentpolicy ./cmd/agent-policy -count=1
 
 # Download dependencies
 deps:
