@@ -3,6 +3,7 @@ package agentpolicy
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type issueSectionRule struct {
@@ -36,6 +37,8 @@ func ParseSections(body string) map[string]string {
 	sections := make(map[string]string)
 	var heading string
 	var content []string
+	var fence byte
+	var fenceWidth int
 
 	flush := func() {
 		if heading != "" {
@@ -44,6 +47,19 @@ func ParseSections(body string) map[string]string {
 	}
 
 	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		marker, width, isFence := markdownFence(line)
+		if fence != 0 {
+			if isFence && marker == fence && width >= fenceWidth && fenceCloses(line, marker, width) {
+				fence = 0
+				fenceWidth = 0
+			}
+			continue
+		}
+		if isFence {
+			fence = marker
+			fenceWidth = width
+			continue
+		}
 		if strings.HasPrefix(line, "## ") {
 			flush()
 			heading = strings.TrimSpace(strings.TrimPrefix(line, "## "))
@@ -106,7 +122,8 @@ func ValidateIssue(input IssueInput) []Violation {
 		}
 	}
 
-	if input.IsEmergency && nonSpaceRuneCount(sections["Emergency Reason"]) < 8 {
+	emergencyReason := stripMarkdownNonProse(sections["Emergency Reason"])
+	if input.IsEmergency && (nonSpaceRuneCount(emergencyReason) < 8 || !containsLetter(emergencyReason)) {
 		violations = append(violations, Violation{
 			Rule:    "ISSUE_EMERGENCY_REASON_REQUIRED",
 			Message: "Emergency Issue must record why delaying containment increases harm",
@@ -130,34 +147,14 @@ func isEnglishIssueTitle(title string) bool {
 }
 
 func containsHanProse(body string) bool {
-	inComment := false
+	body = stripMarkdownNonProse(stripFencedMarkdown(body))
 	for _, line := range strings.Split(body, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "## ") {
 			continue
 		}
-		for len(line) > 0 {
-			if inComment {
-				end := strings.Index(line, "-->")
-				if end < 0 {
-					line = ""
-					continue
-				}
-				line = line[end+3:]
-				inComment = false
-			}
-			start := strings.Index(line, "<!--")
-			prose := line
-			if start >= 0 {
-				prose = line[:start]
-				line = line[start+4:]
-				inComment = true
-			} else {
-				line = ""
-			}
-			for _, r := range prose {
-				if unicode.Is(unicode.Han, r) {
-					return true
-				}
+		for _, r := range line {
+			if unicode.Is(unicode.Han, r) {
+				return true
 			}
 		}
 	}
@@ -181,8 +178,14 @@ func naExplanation(value string) (bool, string) {
 	if len(value) < 3 || !strings.EqualFold(value[:3], "N/A") {
 		return false, ""
 	}
+	if len(value) > 3 {
+		next, _ := utf8.DecodeRuneInString(value[3:])
+		if !unicode.IsSpace(next) && !strings.ContainsRune(":：,，-—", next) {
+			return false, ""
+		}
+	}
 	explanation := strings.TrimLeftFunc(value[3:], func(r rune) bool {
-		return unicode.IsSpace(r) || strings.ContainsRune(":：-—", r)
+		return unicode.IsSpace(r) || strings.ContainsRune(":：,，-—", r)
 	})
 	return true, explanation
 }
@@ -193,10 +196,116 @@ func hasImpactDeclaration(value string) bool {
 		if len(value) < len(declaration) || !strings.EqualFold(value[:len(declaration)], declaration) {
 			continue
 		}
-		reason := strings.TrimLeftFunc(value[len(declaration):], func(r rune) bool {
+		remainder := value[len(declaration):]
+		if remainder == "" {
+			return false
+		}
+		next, _ := utf8.DecodeRuneInString(remainder)
+		if !unicode.IsSpace(next) && !strings.ContainsRune(":：,，-—", next) {
+			return false
+		}
+		reason := strings.TrimLeftFunc(remainder, func(r rune) bool {
 			return unicode.IsSpace(r) || strings.ContainsRune(":：,，-—", r)
 		})
-		return reason != ""
+		return containsLetter(stripMarkdownNonProse(reason))
+	}
+	return false
+}
+
+func stripFencedMarkdown(body string) string {
+	var kept []string
+	var fence byte
+	var fenceWidth int
+	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		marker, width, isFence := markdownFence(line)
+		if fence != 0 {
+			if isFence && marker == fence && width >= fenceWidth && fenceCloses(line, marker, width) {
+				fence = 0
+				fenceWidth = 0
+			}
+			continue
+		}
+		if isFence {
+			fence = marker
+			fenceWidth = width
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
+func markdownFence(line string) (byte, int, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if trimmed == "" || trimmed[0] != '`' && trimmed[0] != '~' {
+		return 0, 0, false
+	}
+	marker := trimmed[0]
+	width := 0
+	for width < len(trimmed) && trimmed[width] == marker {
+		width++
+	}
+	return marker, width, width >= 3
+}
+
+func fenceCloses(line string, marker byte, width int) bool {
+	trimmed := strings.TrimSpace(line)
+	if len(trimmed) < width {
+		return false
+	}
+	for i := 0; i < width; i++ {
+		if trimmed[i] != marker {
+			return false
+		}
+	}
+	return strings.TrimSpace(trimmed[width:]) == ""
+}
+
+func stripMarkdownNonProse(value string) string {
+	var output strings.Builder
+	inComment := false
+	codeDelimiter := 0
+	for i := 0; i < len(value); {
+		if inComment {
+			end := strings.Index(value[i:], "-->")
+			if end < 0 {
+				break
+			}
+			i += end + len("-->")
+			inComment = false
+			continue
+		}
+		if codeDelimiter == 0 && strings.HasPrefix(value[i:], "<!--") {
+			inComment = true
+			i += len("<!--")
+			continue
+		}
+		if value[i] == '`' {
+			width := 1
+			for i+width < len(value) && value[i+width] == '`' {
+				width++
+			}
+			if codeDelimiter == 0 {
+				codeDelimiter = width
+			} else if width == codeDelimiter {
+				codeDelimiter = 0
+			}
+			i += width
+			continue
+		}
+		if codeDelimiter == 0 {
+			output.WriteByte(value[i])
+		}
+		i++
+	}
+	return output.String()
+}
+
+func containsLetter(value string) bool {
+	for _, r := range value {
+		if unicode.IsLetter(r) {
+			return true
+		}
 	}
 	return false
 }

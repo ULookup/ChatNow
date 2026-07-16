@@ -21,6 +21,19 @@ func TestParseSections(t *testing.T) {
 	}
 }
 
+func TestParseSectionsIgnoresFencedCode(t *testing.T) {
+	body := "## Scope\n真实范围。\n```markdown\n## Evidence\n伪造证据。\n```\n## Acceptance Criteria\n```text\n伪造验收。\n```\n"
+
+	sections := ParseSections(body)
+
+	if _, ok := sections["Evidence"]; ok {
+		t.Fatal("fenced heading created an Evidence section")
+	}
+	if got := sections["Acceptance Criteria"]; got != "" {
+		t.Fatalf("fenced value = %q, want empty", got)
+	}
+}
+
 func TestValidateIssue(t *testing.T) {
 	valid := IssueInput{
 		Title:         "Validate Issue contracts",
@@ -86,18 +99,7 @@ func TestValidateIssue(t *testing.T) {
 		{
 			name: "English only body",
 			mutate: func(input *IssueInput) {
-				input.Body = strings.NewReplacer(
-					"校验器必须拒绝不完整的 Issue。", "The validator must reject incomplete issues.",
-					"实现 Issue 合同校验。", "Implement issue contract validation.",
-					"只修改策略包。", "Only change the policy package.",
-					"不修改运行时服务。", "Do not change runtime services.",
-					"缺失字段时返回稳定规则编号。", "Return stable rule IDs for missing fields.",
-					"先运行聚焦测试并观察失败。", "Run the focused test and observe RED first.",
-					"无安全风险，因为只解析文本。", "No security risk because this only parses text.",
-					"No，因为不改变服务边界。", "No, because service boundaries do not change.",
-					"No，因为不改变核心消息流程。", "No, because the core message flow does not change.",
-					"N/A：现有技能说明已经覆盖此规则。", "N/A: existing skills already cover this rule.",
-				).Replace(input.Body)
+				input.Body = englishOnlyIssueBody()
 			},
 			wantRules: []string{"ISSUE_BODY_CHINESE_REQUIRED"},
 		},
@@ -161,6 +163,92 @@ func TestValidateIssue(t *testing.T) {
 	}
 }
 
+func TestValidateIssueRejectsNonProseBypasses(t *testing.T) {
+	tests := []struct {
+		name      string
+		body      string
+		emergency bool
+		wantRules []string
+	}{
+		{
+			name:      "fenced heading cannot supply a section",
+			body:      removeSection(validIssueBody(), "Evidence") + "\n```markdown\n## Evidence\n伪造证据。\n```\n",
+			wantRules: []string{"ISSUE_EVIDENCE_REQUIRED"},
+		},
+		{
+			name:      "fenced value cannot supply a section",
+			body:      replaceSection(validIssueBody(), "Evidence", "```text\n伪造证据。\n```"),
+			wantRules: []string{"ISSUE_EVIDENCE_REQUIRED"},
+		},
+		{
+			name:      "Han only in fenced code is not prose",
+			body:      englishOnlyIssueBody() + "\n```text\n中文代码值\n```\n",
+			wantRules: []string{"ISSUE_BODY_CHINESE_REQUIRED"},
+		},
+		{
+			name:      "Han only in inline code is not prose",
+			body:      replaceSection(englishOnlyIssueBody(), "Evidence", "`中文代码值`"),
+			wantRules: []string{"ISSUE_BODY_CHINESE_REQUIRED"},
+		},
+		{
+			name:      "Han only in multi backtick inline code is not prose",
+			body:      replaceSection(englishOnlyIssueBody(), "Evidence", "``中文`代码值``"),
+			wantRules: []string{"ISSUE_BODY_CHINESE_REQUIRED"},
+		},
+		{
+			name:      "emergency comment and punctuation are not a reason",
+			body:      validIssueBody() + "\n## Emergency Reason\n\n<!-- 延迟会扩大风险 --> !!!——\n",
+			emergency: true,
+			wantRules: []string{"ISSUE_EMERGENCY_REASON_REQUIRED"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateIssue(IssueInput{
+				Title:         "Validate Issue contracts",
+				Body:          tt.body,
+				TargetVersion: "3.1-dev",
+				IsEmergency:   tt.emergency,
+			})
+			assertExactRules(t, got, tt.wantRules)
+		})
+	}
+}
+
+func TestValidateIssueRequiresExactImpactDeclaration(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "Nobody is not No", value: "Nobody 会评审这个变更。"},
+		{name: "Yesterday is not Yes", value: "Yesterday 已完成评审。"},
+		{name: "No period has no explanation", value: "No."},
+		{name: "punctuation is not meaningful", value: "No: !!!——"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateIssue(IssueInput{
+				Title:         "Validate Issue contracts",
+				Body:          replaceSection(validIssueBody(), "Architecture Impact", tt.value),
+				TargetVersion: "3.1-dev",
+			})
+			assertExactRules(t, got, []string{"ISSUE_ARCHITECTURE_IMPACT_REQUIRED"})
+		})
+	}
+}
+
+func TestValidateIssueTreatsNAOnlyAsDelimitedMarker(t *testing.T) {
+	got := ValidateIssue(IssueInput{
+		Title:         "Validate Issue contracts",
+		Body:          replaceSection(validIssueBody(), "Evidence", "N/Able 记录了有效中文证据。"),
+		TargetVersion: "3.1-dev",
+	})
+
+	assertExactRules(t, got, nil)
+}
+
 func validIssueBody() string {
 	return `## Target Version
 
@@ -206,6 +294,21 @@ No，因为不改变核心消息流程。
 
 N/A：现有技能说明已经覆盖此规则。
 `
+}
+
+func englishOnlyIssueBody() string {
+	return strings.NewReplacer(
+		"校验器必须拒绝不完整的 Issue。", "The validator must reject incomplete issues.",
+		"实现 Issue 合同校验。", "Implement issue contract validation.",
+		"只修改策略包。", "Only change the policy package.",
+		"不修改运行时服务。", "Do not change runtime services.",
+		"缺失字段时返回稳定规则编号。", "Return stable rule IDs for missing fields.",
+		"先运行聚焦测试并观察失败。", "Run the focused test and observe RED first.",
+		"无安全风险，因为只解析文本。", "No security risk because this only parses text.",
+		"No，因为不改变服务边界。", "No, because service boundaries do not change.",
+		"No，因为不改变核心消息流程。", "No, because the core message flow does not change.",
+		"N/A：现有技能说明已经覆盖此规则。", "N/A: existing skills already cover this rule.",
+	).Replace(validIssueBody())
 }
 
 func removeSection(body, heading string) string {
@@ -254,4 +357,12 @@ func violationRules(violations []Violation) []string {
 		rules = append(rules, violation.Rule)
 	}
 	return rules
+}
+
+func assertExactRules(t *testing.T, violations []Violation, want []string) {
+	t.Helper()
+	got := violationRules(violations)
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("violation rules = %v, want exactly %v", got, want)
+	}
 }
