@@ -13,12 +13,22 @@ import (
 
 func RedisCLI(t testing.TB, args ...string) string {
 	t.Helper()
+	out, err := RedisCLIResult(args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// RedisCLIResult runs redis-cli without invoking testing APIs, so callers may
+// safely use it from polling callbacks and report failures on the test goroutine.
+func RedisCLIResult(args ...string) (string, error) {
 	base := []string{"exec", "redis-node1", "redis-cli", "-c"}
 	out, err := exec.Command("docker", append(base, args...)...).CombinedOutput()
 	if err != nil {
-		t.Fatalf("redis-cli %v: %v: %s", args, err, out)
+		return "", fmt.Errorf("redis-cli %v: %w: %s", args, err, strings.TrimSpace(string(out)))
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(string(out)), nil
 }
 
 func RedisTTL(t testing.TB, key string) time.Duration {

@@ -14,12 +14,16 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -179,6 +183,182 @@ func requireJitteredRedisTTL(t testing.TB, key string, base time.Duration) time.
 	return ttl
 }
 
+var _ func(...string) (string, error) = verify.RedisCLIResult
+
+func readRepoSource(t testing.TB, relativePath string) string {
+	t.Helper()
+	_, currentFile, _, ok := runtime.Caller(0)
+	require.True(t, ok, "locate cache_test.go")
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(currentFile), "..", ".."))
+	content, err := os.ReadFile(filepath.Join(repoRoot, filepath.FromSlash(relativePath)))
+	require.NoError(t, err, relativePath)
+	return string(content)
+}
+
+func normalizedSourceSection(source, start, end string) (string, error) {
+	startAt := strings.Index(source, start)
+	if startAt < 0 {
+		return "", fmt.Errorf("missing source section %q", start)
+	}
+	endAt := strings.Index(source[startAt+len(start):], end)
+	if endAt < 0 {
+		return "", fmt.Errorf("missing end marker %q for %q", end, start)
+	}
+	section := source[startAt : startAt+len(start)+endAt]
+	return strings.Join(strings.Fields(section), " "), nil
+}
+
+func requireSourceFragments(sectionName, section string, fragments ...string) error {
+	for _, fragment := range fragments {
+		normalized := strings.Join(strings.Fields(fragment), " ")
+		if !strings.Contains(section, normalized) {
+			return fmt.Errorf("%s missing contract fragment %q", sectionName, normalized)
+		}
+	}
+	return nil
+}
+
+func checkCacheTTLSourceContracts(source string) error {
+	sections := make(map[string]string)
+	markers := [][3]string{
+		{"Session", "class Session", "class Status"},
+		{"Status", "class Status", "class Codes"},
+		{"Codes", "class Codes", "class Seq"},
+		{"DeviceSet", "class DeviceSet", "class ReadAck"},
+		{"OnlineRoute", "class OnlineRoute", "class RateLimiter"},
+		{"UnackedPush", "class UnackedPush", "class PresenceRedis"},
+	}
+	for _, marker := range markers {
+		section, err := normalizedSourceSection(source, marker[1], marker[2])
+		if err != nil {
+			return err
+		}
+		sections[marker[0]] = section
+	}
+
+	rules := []struct {
+		name      string
+		fragments []string
+	}{
+		{"Session", []string{
+			"_c->set(key::kSession + ssid, uid, randomized_ttl(ttl))",
+			"_c->expire(key::kSession + ssid, randomized_ttl(ttl))",
+		}},
+		{"Status", []string{
+			"_c->set(key::kStatus + uid, \"1\", randomized_ttl(ttl))",
+			"_c->expire(key::kStatus + uid, randomized_ttl(ttl))",
+		}},
+		{"Codes", []string{
+			"_c->set(key::kVerifyCode + cid, code, randomized_ttl(ttl))",
+		}},
+		{"DeviceSet", []string{
+			"randomized_ttl(kSessionTtl)",
+			"key::device_set_key(uid)",
+			"_c->eval<long long>(kAddLua",
+			"redis.call('SADD', KEYS[1], ARGV[1])",
+			"redis.call('EXPIRE', KEYS[1], ttl)",
+		}},
+		{"OnlineRoute", []string{
+			"key::online_key(uid), key::device_set_key(uid)",
+			"_c->eval<long long>(kBindLua",
+			"_c->eval<long long>(kTouchLua",
+			"_c->eval<long long>(kUnbindLua",
+			"redis.call('EXPIRE', KEYS[1], route_ttl)",
+			"redis.call('EXPIRE', KEYS[2], device_ttl)",
+		}},
+		{"UnackedPush", []string{
+			"_c->eval<long long>(kPushLua",
+			"_c->eval<long long>(kBumpScoreLua",
+			"redis.call('ZADD', KEYS[1]",
+			"redis.call('HSET', KEYS[2]",
+			"redis.call('EXPIRE', KEYS[1], ttl)",
+			"redis.call('EXPIRE', KEYS[2], ttl)",
+		}},
+	}
+	for _, rule := range rules {
+		if err := requireSourceFragments(rule.name, sections[rule.name], rule.fragments...); err != nil {
+			return err
+		}
+	}
+
+	fixedTTL := regexp.MustCompile(`_c->(?:set|expire)\([^;]*, ttl\)`)
+	for _, name := range []string{"Session", "Status", "Codes"} {
+		if fixedTTL.MatchString(sections[name]) {
+			return fmt.Errorf("%s contains a direct fixed TTL cache write", name)
+		}
+	}
+	if strings.Contains(sections["DeviceSet"], "_c->sadd(") {
+		return fmt.Errorf("DeviceSet bypasses its atomic add script")
+	}
+	if strings.Count(sections["UnackedPush"], "randomized_ttl(ttl)") != 2 {
+		return fmt.Errorf("UnackedPush push and bump_score must each sample one randomized TTL")
+	}
+	if strings.Contains(sections["UnackedPush"], "_c->zadd(") ||
+		strings.Contains(sections["UnackedPush"], "_c->hset(") {
+		return fmt.Errorf("UnackedPush bypasses its atomic scripts")
+	}
+	return nil
+}
+
+func requireCacheTTLSourceContracts(t testing.TB, source string) {
+	t.Helper()
+	require.NoError(t, checkCacheTTLSourceContracts(source))
+}
+
+func TestFN_CA_TTLJitterSourceContract(t *testing.T) {
+	daoSource := readRepoSource(t, "common/dao/data_redis.hpp")
+	requireCacheTTLSourceContracts(t, daoSource)
+
+	t.Run("rejects fixed Session TTL", func(t *testing.T) {
+		mutant := strings.Replace(daoSource, "randomized_ttl(ttl)", "ttl", 1)
+		require.Error(t, checkCacheTTLSourceContracts(mutant))
+	})
+	t.Run("rejects non-atomic DeviceSet add", func(t *testing.T) {
+		mutant := strings.Replace(daoSource, "_c->eval<long long>(kAddLua", "_c->sadd", 1)
+		require.Error(t, checkCacheTTLSourceContracts(mutant))
+	})
+	t.Run("rejects non-atomic UnackedPush write", func(t *testing.T) {
+		mutant := strings.Replace(daoSource, "_c->eval<long long>(kPushLua", "_c->zadd", 1)
+		require.Error(t, checkCacheTTLSourceContracts(mutant))
+	})
+}
+
+type redisResultPredicate func(string) (bool, error)
+
+func requireEventuallyRedis(t testing.TB, timeout, interval time.Duration, message string,
+	predicate redisResultPredicate, args ...string) string {
+	t.Helper()
+	var mu sync.Mutex
+	var lastResult string
+	var lastErr error
+	matched := assert.Eventually(t, func() bool {
+		result, err := verify.RedisCLIResult(args...)
+		if err == nil {
+			var predicateMatch bool
+			predicateMatch, err = predicate(result)
+			mu.Lock()
+			lastResult, lastErr = result, err
+			mu.Unlock()
+			return predicateMatch && err == nil
+		}
+		mu.Lock()
+		lastResult, lastErr = result, err
+		mu.Unlock()
+		return false
+	}, timeout, interval, message)
+
+	mu.Lock()
+	result, err := lastResult, lastErr
+	mu.Unlock()
+	require.NoError(t, err, "%s (last result %q)", message, result)
+	require.True(t, matched, "%s (last result %q)", message, result)
+	return result
+}
+
+func redisEquals(expected string) redisResultPredicate {
+	return func(result string) (bool, error) { return result == expected, nil }
+}
+
 // FN-CA-04 | cache expirations are bounded, varied, and paired unacked keys
 // share one randomized sample per push operation.
 func TestFN_CA_TTLJitter(t *testing.T) {
@@ -219,17 +399,17 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 			ws.writeBinary(t, cacheTestAuthNotify(user.AccessToken, "default_device"))
 
 			deviceKey := fmt.Sprintf("im:dev:{%s}", user.UserID)
-			require.Eventually(t, func() bool {
-				return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
-			}, 5*time.Second, 50*time.Millisecond, deviceKey)
+			requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+				"DeviceSet key must exist", redisEquals("1"), "EXISTS", deviceKey)
 			if i == 0 {
 				verify.RedisCLI(t, "EXPIRE", deviceKey, "60")
 				heartbeatBefore = verify.RedisTTL(t, deviceKey)
 				ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
-				require.Eventually(t, func() bool {
-					seconds, err := strconv.ParseInt(verify.RedisCLI(t, "TTL", deviceKey), 10, 64)
-					return err == nil && time.Duration(seconds)*time.Second > heartbeatBefore+24*time.Hour
-				}, 5*time.Second, 50*time.Millisecond, "heartbeat must renew DeviceSet TTL")
+				requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+					"heartbeat must renew DeviceSet TTL", func(result string) (bool, error) {
+						seconds, err := strconv.ParseInt(result, 10, 64)
+						return time.Duration(seconds)*time.Second > heartbeatBefore+24*time.Hour, err
+					}, "TTL", deviceKey)
 			} else {
 				ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
 			}
@@ -245,9 +425,8 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 		connections = append(connections, recipientWS)
 		recipientWS.writeBinary(t, cacheTestAuthNotify(recipient.AccessToken, "default_device"))
 		deviceKey := fmt.Sprintf("im:dev:{%s}", recipient.UserID)
-		require.Eventually(t, func() bool {
-			return verify.RedisCLI(t, "EXISTS", deviceKey) == "1"
-		}, 5*time.Second, 50*time.Millisecond, deviceKey)
+		requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
+			"recipient DeviceSet key must exist", redisEquals("1"), "EXISTS", deviceKey)
 
 		unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
 		unackedIndexKey := fmt.Sprintf("im:unack:idx:{%s:default_device}", recipient.UserID)
@@ -256,10 +435,11 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 		unackedTTLs := make(map[time.Duration]struct{})
 		for i := 0; i < 12; i++ {
 			sendCacheTestMessage(t, sender, convID, fmt.Sprintf("ttl-jitter-%d", i))
-			require.Eventually(t, func() bool {
-				count, parseErr := strconv.Atoi(verify.RedisCLI(t, "ZCARD", unackedKey))
-				return parseErr == nil && count >= initial+i+1
-			}, 10*time.Second, 100*time.Millisecond, unackedKey)
+			requireEventuallyRedis(t, 10*time.Second, 100*time.Millisecond,
+				"UnackedPush ZSET must receive the message", func(result string) (bool, error) {
+					count, err := strconv.Atoi(result)
+					return count >= initial+i+1, err
+				}, "ZCARD", unackedKey)
 			unackedTTL := requireJitteredRedisTTL(t, unackedKey, sessionTTL)
 			indexTTL := requireJitteredRedisTTL(t, unackedIndexKey, sessionTTL)
 			require.LessOrEqual(t, absDuration(unackedTTL-indexTTL), time.Second,
