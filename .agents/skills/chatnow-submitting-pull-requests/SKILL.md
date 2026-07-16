@@ -117,7 +117,9 @@ For a stack, declare every predecessor in every affected PR, the final version-l
 
 ## Stop conditions
 
-Stop before PR creation or readiness when the primary Issue is absent or ambiguous, the target base conflicts with it, a routine PR targets `main`, body language or required sections are invalid, evidence gaps are hidden, architecture/core-flow Skill updates are missing, the stack order is unresolved, the full diff has not been reviewed, or any required check is not freshly passed. A Draft may be created only when every known gap is explicit and the base and Issue are valid.
+Stop before Draft creation only when the primary Issue is absent or ambiguous, the target base conflicts with it, a routine PR targets `main`, the required body contract or language is invalid, or known gaps are hidden. A Draft may be created with explicitly disclosed failed, blocked, pending, stale, or not-run checks and other unresolved work when the Issue and base are valid.
+
+Stop before any ready-for-review claim or transition out of Draft while an applicable required check is not freshly passed, architecture/core-flow Skill updates are missing, the stack order is unresolved, the full diff has not been reviewed, or any other disclosed gap remains unresolved.
 
 ## Common rationalizations
 
