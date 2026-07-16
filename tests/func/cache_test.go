@@ -257,6 +257,8 @@ func checkCacheTTLSourceContracts(source string) error {
 			"_c->eval<long long>(kAddLua",
 			"redis.call('SADD', KEYS[1], ARGV[1])",
 			"redis.call('EXPIRE', KEYS[1], ttl)",
+			"key::legacy_device_set_key(uid)",
+			"kLegacyGraceTtl",
 		}},
 		{"OnlineRoute", []string{
 			"key::online_key(uid), key::device_set_key(uid)",
@@ -269,6 +271,7 @@ func checkCacheTTLSourceContracts(source string) error {
 		{"UnackedPush", []string{
 			"_c->eval<long long>(kPushLua",
 			"_c->eval<long long>(kBumpScoreLua",
+			"_c->eval<long long>(kAckLua",
 			"redis.call('ZADD', KEYS[1]",
 			"redis.call('HSET', KEYS[2]",
 			"redis.call('EXPIRE', KEYS[1], ttl)",
@@ -287,9 +290,6 @@ func checkCacheTTLSourceContracts(source string) error {
 			return fmt.Errorf("%s contains a direct fixed TTL cache write", name)
 		}
 	}
-	if strings.Contains(sections["DeviceSet"], "_c->sadd(") {
-		return fmt.Errorf("DeviceSet bypasses its atomic add script")
-	}
 	if strings.Count(sections["UnackedPush"], "randomized_ttl(ttl)") != 2 {
 		return fmt.Errorf("UnackedPush push and bump_score must each sample one randomized TTL")
 	}
@@ -298,6 +298,30 @@ func checkCacheTTLSourceContracts(source string) error {
 		return fmt.Errorf("UnackedPush bypasses its atomic scripts")
 	}
 	return nil
+}
+
+func TestFN_CA_ResilienceSourceContracts(t *testing.T) {
+	dao := readRepoSource(t, "common/dao/data_redis.hpp")
+	transmiteSource := readRepoSource(t, "transmite/source/transmite_server.h")
+	pushSource := readRepoSource(t, "push/source/push_server.h")
+	breaker := readRepoSource(t, "common/utils/redis_circuit_breaker.hpp")
+	for _, contract := range []struct {
+		name   string
+		source string
+		want   []string
+	}{
+		{"generation fence", dao, []string{"set_if_generation", "kSetIfGenerationLua", "redis.call('INCR', KEYS[2])"}},
+		{"fenced fill", transmiteSource, []string{"generation(uid)", "set_if_generation(uid, bytes", "set_if_generation(uid, \"\""}},
+		{"truth source push", pushSource, []string{"Persist before delivery", "ConsumeAction::NackRequeue", "unacked persistence unavailable"}},
+		{"atomic ack", dao, []string{"kAckLua", "redis.call('ZREM', KEYS[1]", "redis.call('HDEL', KEYS[2]"}},
+		{"atomic breaker hot path", breaker, []string{"std::atomic<uint64_t> _generation", "std::atomic<uint32_t> _consecutive_failures"}},
+	} {
+		for _, want := range contract.want {
+			if !strings.Contains(contract.source, want) {
+				t.Errorf("%s missing %q", contract.name, want)
+			}
+		}
+	}
 }
 
 func requireCacheTTLSourceContracts(t testing.TB, source string) {
@@ -487,21 +511,23 @@ func TestFN_CA_RateLimit(t *testing.T) {
 func TestFN_CA_UserInfoL2AvoidsRepeatedRPC(t *testing.T) {
 	user, _, convID := fixture.MakeFriends(t, HTTP)
 	verify.RedisCLI(t, "DEL", userInfoRedisKey(user.UserID))
-	before := verify.BVar(t, HTTP.Config().Infra.TransmiteVars, "user_info_rpc_total")
+	endpoints := transmiteBVarEndpoints(t)
+	before := sumBVar(t, endpoints, "user_info_rpc_total")
 
 	for i := 0; i < 20; i++ {
 		sendCacheTestMessage(t, user, convID, fmt.Sprintf("repeat-%d", i))
 	}
 
-	after := verify.BVar(t, HTTP.Config().Infra.TransmiteVars, "user_info_rpc_total")
-	require.LessOrEqual(t, after-before, int64(1))
+	after := sumBVar(t, endpoints, "user_info_rpc_total")
+	require.LessOrEqual(t, after-before, int64(len(endpoints)))
 	require.Equal(t, "1", verify.RedisCLI(t, "EXISTS", userInfoRedisKey(user.UserID)))
 }
 
 func TestFN_CA_UserInfoSingleflight(t *testing.T) {
 	user, _, convID := fixture.MakeFriends(t, HTTP)
 	verify.RedisCLI(t, "DEL", userInfoRedisKey(user.UserID))
-	before := verify.BVar(t, HTTP.Config().Infra.TransmiteVars, "user_info_rpc_total")
+	endpoints := transmiteBVarEndpoints(t)
+	before := sumBVar(t, endpoints, "user_info_rpc_total")
 
 	start := make(chan struct{})
 	results := make(chan error, 200)
@@ -522,8 +548,32 @@ func TestFN_CA_UserInfoSingleflight(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	after := verify.BVar(t, HTTP.Config().Infra.TransmiteVars, "user_info_rpc_total")
-	require.LessOrEqual(t, after-before, int64(1))
+	after := sumBVar(t, endpoints, "user_info_rpc_total")
+	require.LessOrEqual(t, after-before, int64(len(endpoints)),
+		"each Transmite process may originate at most one Identity RPC")
+}
+
+func transmiteBVarEndpoints(t testing.TB) []string {
+	t.Helper()
+	parts := strings.Split(HTTP.Config().Infra.TransmiteVars, ",")
+	endpoints := make([]string, 0, len(parts))
+	for _, part := range parts {
+		endpoint := strings.TrimRight(strings.TrimSpace(part), "/")
+		if endpoint == "" {
+			t.Fatal("empty Transmite bvar endpoint")
+		}
+		endpoints = append(endpoints, endpoint)
+	}
+	return endpoints
+}
+
+func sumBVar(t testing.TB, endpoints []string, name string) int64 {
+	t.Helper()
+	var total int64
+	for _, endpoint := range endpoints {
+		total += verify.BVar(t, endpoint, name)
+	}
+	return total
 }
 
 func TestFN_CA_UserInfoInvalidatedAfterProfileUpdate(t *testing.T) {

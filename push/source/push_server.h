@@ -125,14 +125,14 @@ public:
                 payload = notify.SerializeAsString();
             }
 
-            int delivered = 0;
             auto route = resolve_route(request->user_id());
-            for (const auto &did : route.device_ids) {
-                if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
-                if (_local_send(request->user_id(), did, payload) > 0) ++delivered;
+            // Persist before delivery. On failure the RPC is retryable and no
+            // client has observed a payload without durable retransmit state.
+            if (request->has_user_seq() && !_unacked) {
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
+                                              "unacked persistence unavailable");
             }
-
-            if (request->has_user_seq() && _unacked) {
+            if (request->has_user_seq()) {
                 std::string payload_b64 = _utils_base64_encode(payload);
                 long long now_ts = static_cast<long long>(time(nullptr));
                 for (const auto &did : route.device_ids) {
@@ -142,7 +142,23 @@ public:
                 }
             }
 
+            int delivered = 0;
+            for (const auto &did : route.device_ids) {
+                if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
+                if (_local_send(request->user_id(), did, payload) > 0) ++delivered;
+            }
+
             response->set_online_device_count(delivered);
+        } catch (const RedisCircuitOpen& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
+        } catch (const sw::redis::Error& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
         } catch (const ::chatnow::ServiceError& e) {
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(e.code());
@@ -193,14 +209,28 @@ public:
                 }
 
                 for (const auto &did : route.device_ids) {
-                    if (_local_send(uid, did, payload) > 0) ++total;
-                    if (it != uid2seq.end() && _unacked) {
+                    if (it != uid2seq.end() && !_unacked) {
+                        throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
+                                                      "unacked persistence unavailable");
+                    }
+                    if (it != uid2seq.end()) {
                         _unacked->push(uid, did, it->second,
                                        _utils_base64_encode(payload), now_ts);
                     }
+                    if (_local_send(uid, did, payload) > 0) ++total;
                 }
             }
             response->set_online_count(total);
+        } catch (const RedisCircuitOpen& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
+        } catch (const sw::redis::Error& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
         } catch (const ::chatnow::ServiceError& e) {
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(e.code());
@@ -240,7 +270,16 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for (const auto &uid : internal_msg.member_id_list()) {
-            auto route = resolve_route(uid);
+            RouteEntry route;
+            try {
+                route = resolve_route(uid);
+            } catch (const RedisCircuitOpen &e) {
+                LOG_WARN("Push-Consumer: route circuit unavailable: {}", e.what());
+                return ConsumeAction::NackRequeue;
+            } catch (const sw::redis::Error &e) {
+                LOG_WARN("Push-Consumer: route Redis unavailable: {}", e.what());
+                return ConsumeAction::NackRequeue;
+            }
             if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
 
             auto itu = uid2seq.find(uid);
@@ -260,11 +299,18 @@ public:
                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                 if (inst == _instance_id) {
                     if (itu != uid2seq.end()) {
-                        if (_local_send(uid, did, user_payload) > 0) any_local = true;
-                        if (_unacked) {
+                        if (!_unacked) return ConsumeAction::NackRequeue;
+                        try {
                             _unacked->push(uid, did, itu->second,
                                            _utils_base64_encode(user_payload), now_ts);
+                        } catch (const RedisCircuitOpen &e) {
+                            LOG_WARN("Push-Consumer: unacked circuit unavailable: {}", e.what());
+                            return ConsumeAction::NackRequeue;
+                        } catch (const sw::redis::Error &e) {
+                            LOG_WARN("Push-Consumer: unacked Redis unavailable: {}", e.what());
+                            return ConsumeAction::NackRequeue;
                         }
+                        if (_local_send(uid, did, user_payload) > 0) any_local = true;
                     } else {
                         // 大群读扩散：无 user_seq，仅下发
                         _local_send(uid, did, notify_template.SerializeAsString());
@@ -280,7 +326,14 @@ public:
         // 2) 跨实例：按 Push 实例 ID 分组
         std::unordered_map<std::string, std::unordered_set<std::string>> peer_to_uids;
         for (const auto &uid : remote_uids) {
-            auto route = resolve_route(uid);
+            RouteEntry route;
+            try {
+                route = resolve_route(uid);
+            } catch (const RedisCircuitOpen &) {
+                return ConsumeAction::NackRequeue;
+            } catch (const sw::redis::Error &) {
+                return ConsumeAction::NackRequeue;
+            }
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string peer = (it != route.device_to_instance.end()) ? it->second : "";
@@ -289,45 +342,37 @@ public:
             }
         }
 
-        // 3) 每个对端一次 PushBatch（异步 brpc::DoNothing）
-        std::string internal_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
+        // 3) 每个对端一次 PushBatch。等待持久化结果后才能 ACK MQ；若后续
+        // peer 失败，MQ 重投可能重复前面的下发，但 Unacked ZADD/HSET 以 seq
+        // 幂等覆盖，提供明确的 at-least-once 语义。
         for (auto &kv : peer_to_uids) {
             const std::string &peer = kv.first;
             std::vector<std::string> uids(kv.second.begin(), kv.second.end());
             auto channel = _mm_channels->choose(peer);
             if (!channel) {
                 LOG_WARN("Push-Consumer: 对端 {} 不可达", peer);
-                for (const auto &u : uids)
-                    if (_online_route) _online_route->unbind(u, "", peer);
-                if (_cross_outbox) {
-                    _cross_outbox->enqueue(internal_b64, uids, peer, now_ts);
-                }
-                continue;
+                return ConsumeAction::NackRequeue;
             }
             PushService_Stub stub(channel.get());
-            auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
-            closure->req.set_request_id(msg_info.client_msg_id());
-            for (const auto &u : uids) closure->req.add_user_id_list(u);
-            closure->req.mutable_notify()->CopyFrom(notify_template);
+            PushBatchReq req;
+            PushBatchRsp rsp;
+            brpc::Controller cntl;
+            req.set_request_id(msg_info.client_msg_id());
+            for (const auto &u : uids) req.add_user_id_list(u);
+            req.mutable_notify()->CopyFrom(notify_template);
             for (const auto &u : uids) {
                 auto it = uid2seq.find(u);
                 if (it == uid2seq.end()) continue;
-                auto *p = closure->req.add_user_seqs();
+                auto *p = req.add_user_seqs();
                 p->set_user_id(u);
                 p->set_user_seq(it->second);
             }
-            std::string peer_id = peer;
-            closure->on_done = [peer_id, uids, outbox = _cross_outbox,
-                                online = _online_route, internal_b64, now_ts]
-                (brpc::Controller *c, const PushBatchRsp &) {
-                if (c->Failed()) {
-                    LOG_WARN("PushBatch 跨实例失败 peer={}: {}", peer_id, c->ErrorText());
-                    for (const auto &u : uids)
-                        if (online) online->unbind(u, "", peer_id);
-                    if (outbox) outbox->enqueue(internal_b64, uids, peer_id, now_ts);
-                }
-            };
-            stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
+            stub.PushBatch(&cntl, &req, &rsp, nullptr);
+            if (cntl.Failed() || !rsp.header().success()) {
+                LOG_WARN("PushBatch persistence failed peer={}: {} {}", peer,
+                         cntl.ErrorText(), rsp.header().error_message());
+                return ConsumeAction::NackRequeue;
+            }
         }
         return ConsumeAction::Ack;
     }
@@ -628,7 +673,7 @@ private:
 
         //  L2 Redis: hgetall + build RouteEntry
         RouteEntry route;
-        auto dmap = _online_route->device_instances_map(uid);
+        auto dmap = _online_route->device_instances_map_strict(uid);
         route.device_ids.reserve(dmap.size());
         for (const auto &[did, inst] : dmap) {
             route.device_ids.push_back(did);

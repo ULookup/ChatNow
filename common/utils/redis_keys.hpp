@@ -84,6 +84,11 @@ inline std::string user_info_key(const std::string &uid) {
     return "im:user:{" + bucket + "}:" + uid;
 }
 
+inline std::string user_info_generation_key(const std::string &uid) {
+    auto bucket = std::to_string(user_info_bucket(uid));
+    return "im:user-gen:{" + bucket + "}:" + uid;
+}
+
 inline std::string local_route_cache_key(const std::string &uid) {
     return std::string("local:route:") + hash_tag(uid);
 }
@@ -94,6 +99,11 @@ inline std::string online_key(const std::string &uid) {
 
 inline std::string device_set_key(const std::string &uid) {
     return std::string(kDeviceSet) + hash_tag(uid);
+}
+
+// Pre-3.0 key retained only for bounded lazy migration during rolling upgrades.
+inline std::string legacy_device_set_key(const std::string &uid) {
+    return std::string(kDeviceSet) + uid;
 }
 
 inline std::string online_scan_pattern() {

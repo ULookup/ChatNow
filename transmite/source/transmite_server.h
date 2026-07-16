@@ -594,11 +594,21 @@ public:
                 }
             }
 
-            auto info = fetch_user_info_from_identity_(uid, rid, caller);
-            if (!info) return std::nullopt;
+            const auto generation = _user_info_cache
+                ? _user_info_cache->generation(uid) : std::optional<uint64_t>{};
+            bool confirmed_not_found = false;
+            auto info = fetch_user_info_from_identity_(uid, rid, caller, &confirmed_not_found);
+            if (!info) {
+                if (confirmed_not_found && generation && _user_info_cache) {
+                    _user_info_cache->set_if_generation(uid, "", *generation);
+                }
+                return std::nullopt;
+            }
             auto bytes = info->SerializeAsString();
-            if (_user_info_cache) _user_info_cache->set(uid, bytes);
-            if (_local_user_cache) {
+            if (generation && _user_info_cache) {
+                _user_info_cache->set_if_generation(uid, bytes, *generation);
+            }
+            if (generation && _local_user_cache) {
                 _local_user_cache->set(
                     lkey, bytes, randomized_ttl(std::chrono::seconds(45)));
             }
@@ -612,7 +622,8 @@ public:
     }
 
     std::optional<chatnow::common::UserInfo> fetch_user_info_from_identity_(
-        const std::string &uid, const std::string &rid, brpc::Controller *caller) {
+        const std::string &uid, const std::string &rid, brpc::Controller *caller,
+        bool *confirmed_not_found) {
         auto identity_channel = _mm_channels->choose(_identity_service_name);
         if (!identity_channel) {
             LOG_ERROR("identity_service 节点缺失 (user info {})", uid);
@@ -628,10 +639,9 @@ public:
         stub.GetProfile(&cntl, &req, &rsp, nullptr);
         metrics::g_user_info_rpc_total << 1;
         if (cntl.Failed() || !rsp.header().success()) {
-            if (!cntl.Failed() &&
-                rsp.header().error_code() == chatnow::error::kAuthUserNotFound &&
-                _user_info_cache) {
-                _user_info_cache->set(uid, "");
+            if (confirmed_not_found && !cntl.Failed() &&
+                rsp.header().error_code() == chatnow::error::kAuthUserNotFound) {
+                *confirmed_not_found = true;
             }
             LOG_ERROR("获取用户信息失败 uid={}: {} {}", uid, cntl.ErrorText(),
                       rsp.header().error_message());

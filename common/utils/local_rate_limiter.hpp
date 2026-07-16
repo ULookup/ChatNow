@@ -27,7 +27,7 @@ public:
 
         const size_t shard_index = std::hash<std::string>{}(key) % kShardCount;
         Shard &shard = _shards[shard_index];
-        std::lock_guard<std::mutex> lock(shard.mu);
+        std::unique_lock<std::mutex> lock(shard.mu);
 
         const uint64_t operation = _operations.fetch_add(1, std::memory_order_relaxed) + 1;
         if (operation % 1024 == 0) {
@@ -38,7 +38,14 @@ public:
         if (found == shard.buckets.end()) {
             if (!reserve_bucket_()) {
                 cleanup_(shard, now_ms, window_sec);
-                if (!reserve_bucket_()) return false;
+                if (!reserve_bucket_()) {
+                    lock.unlock();
+                    reclaim_idle_bounded_(shard_index, now_ms, window_sec);
+                    lock.lock();
+                    found = shard.buckets.find(key);
+                    if (found != shard.buckets.end()) return consume_(found->second, capacity, window_sec, now_ms);
+                    if (!reserve_bucket_()) return false;
+                }
             }
             try {
                 found = shard.buckets.emplace(
@@ -50,16 +57,7 @@ public:
             return true;
         }
 
-        Bucket &bucket = found->second;
-        const int64_t elapsed_ms = now_ms > bucket.refill_ms ? now_ms - bucket.refill_ms : 0;
-        const double refill = static_cast<double>(elapsed_ms) * capacity /
-                              (static_cast<double>(window_sec) * 1000.0);
-        bucket.tokens = std::min(static_cast<double>(capacity), bucket.tokens + refill);
-        bucket.refill_ms = now_ms;
-        bucket.seen_ms = now_ms;
-        if (bucket.tokens < 1.0) return false;
-        bucket.tokens -= 1.0;
-        return true;
+        return consume_(found->second, capacity, window_sec, now_ms);
     }
 
 private:
@@ -73,8 +71,21 @@ private:
         std::unordered_map<std::string, Bucket> buckets;
     };
 
+    bool consume_(Bucket &bucket, int capacity, int window_sec, int64_t now_ms) {
+        const int64_t elapsed_ms = now_ms > bucket.refill_ms ? now_ms - bucket.refill_ms : 0;
+        const double refill = static_cast<double>(elapsed_ms) * capacity /
+                              (static_cast<double>(window_sec) * 1000.0);
+        bucket.tokens = std::min(static_cast<double>(capacity), bucket.tokens + refill);
+        bucket.refill_ms = now_ms;
+        bucket.seen_ms = now_ms;
+        if (bucket.tokens < 1.0) return false;
+        bucket.tokens -= 1.0;
+        return true;
+    }
+
     static constexpr size_t kShardCount = 64;
     static constexpr size_t kMaxBuckets = 65536;
+    static constexpr size_t kReclaimScan = 8;
 
     bool reserve_bucket_() {
         size_t count = _bucket_count.load(std::memory_order_relaxed);
@@ -104,9 +115,22 @@ private:
         }
     }
 
+    void reclaim_idle_bounded_(size_t target, int64_t now_ms, int window_sec) {
+        const size_t start = _reclaim_cursor.fetch_add(kReclaimScan, std::memory_order_relaxed);
+        for (size_t offset = 0; offset < kReclaimScan; ++offset) {
+            const size_t index = (start + offset) % kShardCount;
+            if (index == target) continue;
+            Shard &candidate = _shards[index];
+            std::lock_guard<std::mutex> lock(candidate.mu);
+            cleanup_(candidate, now_ms, window_sec);
+            if (_bucket_count.load(std::memory_order_relaxed) < kMaxBuckets) return;
+        }
+    }
+
     std::array<Shard, kShardCount> _shards;
     std::atomic<size_t> _bucket_count{0};
     std::atomic<uint64_t> _operations{0};
+    std::atomic<size_t> _reclaim_cursor{0};
 };
 
 }  // namespace chatnow

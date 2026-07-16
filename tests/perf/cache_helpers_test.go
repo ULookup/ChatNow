@@ -121,14 +121,16 @@ func TestPF09SnapshotRequiresProcessIdentityFields(t *testing.T) {
 func TestPF09PhaseCountersProveStableCacheState(t *testing.T) {
 	valid := []struct {
 		state  pf09CacheState
+		count  uint64
 		deltas map[string]int64
 	}{
-		{pf09Cold, map[string]int64{pf09RPCMetric: 20, pf09L1Metric: 0, pf09L2Metric: 0}},
-		{pf09L2, map[string]int64{pf09RPCMetric: 0, pf09L1Metric: 0, pf09L2Metric: 20}},
-		{pf09L1, map[string]int64{pf09RPCMetric: 0, pf09L1Metric: 20, pf09L2Metric: 0}},
+		{pf09Cold, 20, map[string]int64{pf09RPCMetric: 20, pf09L1Metric: 0, pf09L2Metric: 0}},
+		{pf09L2, 20, map[string]int64{pf09RPCMetric: 0, pf09L1Metric: 0, pf09L2Metric: 20}},
+		{pf09L1, 20, map[string]int64{pf09RPCMetric: 0, pf09L1Metric: 20, pf09L2Metric: 0}},
+		{pf09Stampede, 200, map[string]int64{pf09RPCMetric: 2, pf09L1Metric: 198, pf09L2Metric: 0}},
 	}
 	for _, test := range valid {
-		if err := validatePF09PhaseCounters(test.state, 20, test.deltas); err != nil {
+		if err := validatePF09PhaseCounters(test.state, test.count, 2, test.deltas); err != nil {
 			t.Errorf("valid %s counters rejected: %v", pf09StateName(test.state), err)
 		}
 		contaminated := make(map[string]int64, len(test.deltas))
@@ -136,7 +138,7 @@ func TestPF09PhaseCountersProveStableCacheState(t *testing.T) {
 			contaminated[metric] = value
 		}
 		contaminated[pf09RPCMetric]++
-		if err := validatePF09PhaseCounters(test.state, 20, contaminated); err == nil {
+		if err := validatePF09PhaseCounters(test.state, test.count, 2, contaminated); err == nil {
 			t.Errorf("contaminated %s counters accepted", pf09StateName(test.state))
 		}
 	}

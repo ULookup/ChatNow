@@ -164,8 +164,10 @@ private:
     void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
         if (transition == RedisCircuitBreaker::Transition::Opened) {
             metrics::g_redis_circuit_open_total << 1;
+            LOG_WARN("Redis circuit transition Closed->Open");
         } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
             metrics::g_redis_circuit_recovered_total << 1;
+            LOG_INFO("Redis circuit transition HalfOpen->Closed");
         }
     }
 
@@ -384,7 +386,9 @@ public:
 private:
     RedisCircuitBreaker::Permit before_call_() {
         try {
-            return _breaker->before_call();
+            auto permit = _breaker->before_call();
+            if (permit.probe) LOG_INFO("Redis circuit transition Open->HalfOpen");
+            return permit;
         } catch (const RedisCircuitOpen &) {
             metrics::g_redis_circuit_rejected_total << 1;
             throw;
@@ -394,8 +398,10 @@ private:
     static void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
         if (transition == RedisCircuitBreaker::Transition::Opened) {
             metrics::g_redis_circuit_open_total << 1;
+            LOG_WARN("Redis circuit transition Closed->Open");
         } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
             metrics::g_redis_circuit_recovered_total << 1;
+            LOG_INFO("Redis circuit transition HalfOpen->Closed");
         }
     }
 
@@ -790,25 +796,45 @@ public:
     void touch(const std::string &uid, std::chrono::seconds ttl = kSessionTtl) {
         try { _c->expire(key::device_set_key(uid), randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.touch 失败 {}: {}", uid, e.what()); }
+        // Rolling-upgrade compatibility only: legacy keys get a bounded grace TTL.
+        try { _c->expire(key::legacy_device_set_key(uid), kLegacyGraceTtl); }
+        catch(std::exception &) {}
     }
     /* brief: 用户某设备下线 */
     void remove(const std::string &uid, const std::string &device_id) {
         try { _c->srem(key::device_set_key(uid), device_id); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.rem 失败 {}-{}: {}", uid, device_id, e.what()); }
+        try { _c->srem(key::legacy_device_set_key(uid), device_id); }
+        catch(std::exception &) {}
     }
     /* brief: 取用户当前所有在线设备 */
     std::vector<std::string> list(const std::string &uid) {
         std::vector<std::string> res;
-        try { _c->smembers(key::device_set_key(uid), std::inserter(res, res.end())); }
+        try { _c->smembers(key::device_set_key(uid), std::back_inserter(res)); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.list 失败 {}: {}", uid, e.what()); }
+        std::vector<std::string> legacy;
+        try { _c->smembers(key::legacy_device_set_key(uid), std::back_inserter(legacy)); }
+        catch(std::exception &) { return res; }
+        if (!legacy.empty()) {
+            std::unordered_set<std::string> merged(res.begin(), res.end());
+            merged.insert(legacy.begin(), legacy.end());
+            res.assign(merged.begin(), merged.end());
+            // Cross-slot migration is intentionally best-effort. New writes use only
+            // the tagged key; the old key expires after the rolling-upgrade window.
+            try {
+                _c->sadd(key::device_set_key(uid), legacy.begin(), legacy.end());
+                _c->expire(key::device_set_key(uid), randomized_ttl(kSessionTtl));
+                _c->expire(key::legacy_device_set_key(uid), kLegacyGraceTtl);
+            } catch (std::exception &) {}
+        }
         return res;
     }
     /* brief: 用户是否有任意在线设备 */
     bool any(const std::string &uid) {
-        try { return _c->scard(key::device_set_key(uid)) > 0; }
-        catch(std::exception &e) { LOG_ERROR("DeviceSet.any 失败 {}: {}", uid, e.what()); return false; }
+        return !list(uid).empty();
     }
 private:
+    static constexpr std::chrono::seconds kLegacyGraceTtl{24 * 3600};
     static constexpr const char *kAddLua = R"lua(
 local function key_type(k)
     local t = redis.call('TYPE', k)
@@ -1171,6 +1197,37 @@ public:
         }
     }
 
+    std::optional<uint64_t> generation(const std::string &uid) {
+        if (!_c) return uint64_t{0};
+        try {
+            auto value = _c->get(key::user_info_generation_key(uid));
+            return value ? std::stoull(*value) : uint64_t{0};
+        } catch (const std::exception &e) {
+            LOG_WARN("UserInfoCache.generation unavailable: {}", e.what());
+            return std::nullopt;
+        }
+    }
+
+    bool set_if_generation(const std::string &uid, const std::string &serialized,
+                           uint64_t expected_generation) {
+        if (!_c) return false;
+        const auto ttl = serialized.empty()
+            ? randomized_ttl(std::chrono::seconds(5))
+            : randomized_ttl(kUserInfoTtl);
+        try {
+            std::vector<std::string> keys = {
+                key::user_info_key(uid), key::user_info_generation_key(uid)};
+            std::vector<std::string> args = {
+                std::to_string(expected_generation), serialized,
+                std::to_string(ttl.count())};
+            return _c->eval<long long>(kSetIfGenerationLua, keys.begin(), keys.end(),
+                                       args.begin(), args.end()) == 1;
+        } catch (const std::exception &e) {
+            LOG_WARN("UserInfoCache fenced fill unavailable: {}", e.what());
+            return false;
+        }
+    }
+
     void batch_set(const std::unordered_map<std::string, std::string> &values) {
         if (!_c) return;
         std::unordered_map<uint32_t, std::vector<std::pair<std::string, std::string>>> groups;
@@ -1198,7 +1255,11 @@ public:
     bool invalidate(const std::string &uid) noexcept {
         if (!_c) return true;
         try {
-            _c->del(key::user_info_key(uid));
+            std::vector<std::string> keys = {
+                key::user_info_key(uid), key::user_info_generation_key(uid)};
+            std::vector<std::string> args;
+            _c->eval<long long>(kInvalidateLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
             return true;
         } catch (const std::exception &e) {
             LOG_ERROR("UserInfoCache.invalidate 失败 {}: {}", uid, e.what());
@@ -1208,6 +1269,19 @@ public:
     }
 
 private:
+    static constexpr const char *kSetIfGenerationLua = R"lua(
+local generation = tonumber(redis.call('GET', KEYS[2]) or '0')
+if generation ~= tonumber(ARGV[1]) then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+redis.call('EXPIRE', KEYS[2], 604800)
+return 1
+)lua";
+    static constexpr const char *kInvalidateLua = R"lua(
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], 604800)
+redis.call('DEL', KEYS[1])
+return 1
+)lua";
     RedisClient::ptr _c;
 };
 
@@ -1282,6 +1356,14 @@ public:
         } catch (std::exception &e) {
             LOG_ERROR("OnlineRoute.device_instances_map 失败 {}: {}", uid, e.what());
         }
+        return res;
+    }
+    // Push delivery is a truth-source path: callers must distinguish an empty
+    // route from an unavailable Redis route table.
+    std::unordered_map<std::string, std::string> device_instances_map_strict(
+            const std::string &uid) {
+        std::unordered_map<std::string, std::string> res;
+        _c->hgetall(key::online_key(uid), std::inserter(res, res.end()));
         return res;
     }
     /* brief: 取设备所在 Push 实例 */
@@ -1392,11 +1474,12 @@ public:
             long long cur = _c->eval<long long>(kRateLimitScript, keys.begin(), keys.end(),
                                                 args.begin(), args.end());
             return cur == 1;
-        } catch (const RedisCircuitOpen &e) {
-            LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
+        } catch (const RedisCircuitOpen &) {
             return allow_local_(key_full, max_count, window_sec);
         } catch (const sw::redis::Error &e) {
-            LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
+            if (should_log_redis_error_()) {
+                LOG_WARN("RateLimiter Redis unavailable; using local fallback: {}", e.what());
+            }
             return allow_local_(key_full, max_count, window_sec);
         }
     }
@@ -1407,6 +1490,13 @@ public:
         return allow(key::kRateSsid + ssid, max_count, window_sec);
     }
 private:
+    bool should_log_redis_error_() noexcept {
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto previous = _last_redis_error_log_sec.load(std::memory_order_relaxed);
+        return now > previous && _last_redis_error_log_sec.compare_exchange_strong(
+            previous, now, std::memory_order_relaxed, std::memory_order_relaxed);
+    }
     bool allow_local_(const std::string &key_full, int max_count, int window_sec) {
         metrics::g_rate_limit_local_fallback_total << 1;
         const bool allowed = _local.allow(key_full, max_count, window_sec);
@@ -1416,6 +1506,7 @@ private:
 
     RedisClient::ptr _c;
     LocalRateLimiter _local;
+    std::atomic<int64_t> _last_redis_error_log_sec{0};
     static const std::string kRateLimitScript;
 };
 
@@ -1588,20 +1679,16 @@ public:
     void push(const std::string &uid, const std::string &device_id,
               unsigned long user_seq, const std::string &payload_b64,
               long long score_ts, std::chrono::seconds ttl = kUnackedTtl) {
-        try {
-            std::string k = key_for(uid, device_id);
-            std::string ik = idx_key_for(uid, device_id);
-            std::string member = std::to_string(user_seq) + ":" + payload_b64;
-            const auto effective_ttl = randomized_ttl(ttl);
-            std::vector<std::string> keys = {k, ik};
-            std::vector<std::string> args = {
-                std::to_string(score_ts), member, std::to_string(user_seq), payload_b64,
-                std::to_string(effective_ttl.count())};
-            _c->eval<long long>(kPushLua, keys.begin(), keys.end(),
-                                args.begin(), args.end());
-        } catch(std::exception &e) {
-            LOG_ERROR("UnackedPush.push 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
-        }
+        std::string k = key_for(uid, device_id);
+        std::string ik = idx_key_for(uid, device_id);
+        std::string member = std::to_string(user_seq) + ":" + payload_b64;
+        const auto effective_ttl = randomized_ttl(ttl);
+        std::vector<std::string> keys = {k, ik};
+        std::vector<std::string> args = {
+            std::to_string(score_ts), member, std::to_string(user_seq), payload_b64,
+            std::to_string(effective_ttl.count())};
+        _c->eval<long long>(kPushLua, keys.begin(), keys.end(),
+                            args.begin(), args.end());
     }
     /* brief: 客户端 ACK 后移除（per-device，O(1) via HASH index） */
     void ack(const std::string &uid, const std::string &device_id,
@@ -1609,12 +1696,10 @@ public:
         try {
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
-            auto payload = _c->hget(ik, std::to_string(user_seq));
-            if (payload) {
-                std::string member = std::to_string(user_seq) + ":" + *payload;
-                _c->zrem(k, member);
-                _c->hdel(ik, std::to_string(user_seq));
-            }
+            std::vector<std::string> keys = {k, ik};
+            std::vector<std::string> args = {std::to_string(user_seq)};
+            _c->eval<long long>(kAckLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.ack 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
         }
@@ -1715,6 +1800,14 @@ end
 redis.call('EXPIRE', KEYS[1], ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
 return updated
+)lua";
+
+    static constexpr const char *kAckLua = R"lua(
+local payload = redis.call('HGET', KEYS[2], ARGV[1])
+if not payload then return 0 end
+redis.call('ZREM', KEYS[1], ARGV[1] .. ':' .. payload)
+redis.call('HDEL', KEYS[2], ARGV[1])
+return 1
 )lua";
 
     RedisClient::ptr _c;

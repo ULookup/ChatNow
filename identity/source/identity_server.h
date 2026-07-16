@@ -476,12 +476,16 @@ public:
             if (request->has_phone()) {
                 user->phone(request->phone());
             }
+            // Advance the shared cache generation before committing the profile.
+            // If Redis is unavailable, fail closed so a successful update can
+            // never leave a one-hour stale L2 value visible to readers.
+            if (_user_info_cache && !_user_info_cache->invalidate(auth.user_id)) {
+                throw ServiceError(::chatnow::error::kSystemUnavailable,
+                                   "profile cache invalidation unavailable");
+            }
             if (!_mysql_user->update(user)) {
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "db update failed");
-            }
-            if (_user_info_cache) {
-                (void)_user_info_cache->invalidate(auth.user_id);
             }
             std::string ob_payload = outbox_payload_upsert_(
                 user->user_id(), user->mail(), user->phone(),

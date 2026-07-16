@@ -202,6 +202,12 @@ Identity 修改昵称、头像、签名或其他 Profile 字段成功后删除 L
 DeviceSet 不使用短在线 TTL。它的生命周期与登录设备接近；7 天 TTL 防止永久
 常驻，同时避免正常在线设备被几分钟级 TTL 误删。
 
+滚动升级期间，带 hash tag 的 `im:dev:{uid}` 是新权威 key。读取会额外读取旧版
+`im:dev:uid`，合并成员并懒迁移到新 key；删除同时清理两边。旧 key 不再接收新写，
+每次被观察时只续一个最长 24 小时的迁移 grace TTL，因此不会形成无限双写或永久
+兼容负担。跨 slot 的迁移分步执行是有意选择：迁移可重试，在线路由正确性仍由同
+slot 的新 key 与 `im:online:{uid}` 原子脚本保证。
+
 ## 7. RedisMutex 退避
 
 `try_lock` 保持现有 `SET key token NX PX ttl` 和 Lua CAS 解锁协议，仅调整竞争等待：
@@ -259,6 +265,11 @@ C++ gtest 或 Python 合约测试。
 - `FN-CA-04`：Session、Status、Codes、DeviceSet、UnackedPush TTL 位于抖动范围，
   多个样本不过期于同一秒。
 - `FN-CA-05`：Redis 正常时大量消息请求触发分布式限流。
+
+Session 与 Status DAO 在当前 3.0-dev 没有生产调用点，不为测试增加无业务意义的
+endpoint。它们的 TTL 源码契约由独立 contract test 覆盖；Codes、DeviceSet、
+UnackedPush 等可达路径继续由新框架做黑盒验证。待业务重新接入前两者时，再把对应
+断言提升为黑盒测试。
 
 ### 10.2 可靠性测试
 

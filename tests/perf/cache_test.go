@@ -29,6 +29,7 @@ import (
 
 const (
 	pf09ConversationCount      = 20
+	pf09StampedeConcurrency    = 200
 	pf09MaxLatencySamples      = 65_536
 	pf09MinThroughput          = 5_000.0
 	pf09CheckedInBaseline      = 5_000.0
@@ -51,6 +52,7 @@ const (
 	pf09Cold pf09CacheState = iota
 	pf09L2
 	pf09L1
+	pf09Stampede
 )
 
 type pf09Conversation struct {
@@ -98,6 +100,7 @@ func BenchmarkPF09_UserInfoCache(b *testing.B) {
 		{name: "cold", state: pf09Cold},
 		{name: "L2", state: pf09L2},
 		{name: "L1", state: pf09L1},
+		{name: "stampede", state: pf09Stampede},
 	} {
 		phase := phase
 		b.Run(phase.name, func(b *testing.B) {
@@ -123,6 +126,16 @@ func validatePF09IterationCount(n int) error {
 func preparePF09Conversations(b *testing.B, state pf09CacheState, instanceCount int) []pf09Conversation {
 	b.Helper()
 	b.StopTimer()
+	if state == pf09Stampede {
+		sender, peer, conversationID := fixture.MakeFriends(b, HTTP)
+		_ = peer
+		verifyPF09DeleteL2(b, sender.UserID)
+		conversations := make([]pf09Conversation, pf09StampedeConcurrency)
+		for i := range conversations {
+			conversations[i] = pf09Conversation{sender: sender, id: conversationID}
+		}
+		return conversations
+	}
 	conversations := make([]pf09Conversation, pf09ConversationCount)
 	for i := range conversations {
 		sender, peer, conversationID := fixture.MakeFriends(b, HTTP)
@@ -148,6 +161,15 @@ func preparePF09Conversations(b *testing.B, state pf09CacheState, instanceCount 
 }
 
 func validatePF09Conversations(conversations []pf09Conversation) error {
+	if len(conversations) == pf09StampedeConcurrency {
+		first := conversations[0]
+		for _, conversation := range conversations {
+			if conversation.sender == nil || conversation.sender.UserID != first.sender.UserID || conversation.id != first.id {
+				return fmt.Errorf("stampede phase must target one cold key")
+			}
+		}
+		return nil
+	}
 	if len(conversations) != pf09ConversationCount {
 		return fmt.Errorf("want %d conversations, got %d", pf09ConversationCount, len(conversations))
 	}
@@ -168,6 +190,15 @@ func validatePF09Conversations(conversations []pf09Conversation) error {
 		conversationIDs[conversation.id] = struct{}{}
 	}
 	return nil
+}
+
+func verifyPF09DeleteL2(b *testing.B, uid string) {
+	b.Helper()
+	cmd := exec.Command("docker", "exec", HTTP.Config().Infra.RedisContainer,
+		"redis-cli", "-c", "DEL", pf09UserInfoKey(uid))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		b.Fatalf("clear PF-09 L2: %v: %s", err, strings.TrimSpace(string(out)))
+	}
 }
 
 func seedPF09L2(b *testing.B, sender *client.HTTPClient) {
@@ -210,6 +241,8 @@ func runPF09Phase(
 		b.Fatalf("PF-09 before snapshot: %v", err)
 	}
 
+	var memoryBefore runtime.MemStats
+	runtime.ReadMemStats(&memoryBefore)
 	b.ResetTimer()
 	var result pf09PhaseResult
 	if state == pf09L1 {
@@ -218,6 +251,8 @@ func runPF09Phase(
 		result = runPF09SingleUse(conversations)
 	}
 	b.StopTimer()
+	var memoryAfter runtime.MemStats
+	runtime.ReadMemStats(&memoryAfter)
 	if result.err != nil {
 		b.Fatalf("PF-09 %s send failed: %v", pf09StateName(state), result.err)
 	}
@@ -233,7 +268,7 @@ func runPF09Phase(
 	if err != nil {
 		b.Fatalf("PF-09 snapshot integrity: %v", err)
 	}
-	if err := validatePF09PhaseCounters(state, result.successes, deltas); err != nil {
+	if err := validatePF09PhaseCounters(state, result.successes, len(endpoints), deltas); err != nil {
 		b.Error(err)
 	}
 
@@ -247,6 +282,8 @@ func runPF09Phase(
 	b.ReportMetric(p95Micros, "p95-us")
 	b.ReportMetric(rpcReduction, "rpc-reduction-%")
 	b.ReportMetric(baselineRegression, "baseline-regression-%")
+	b.ReportMetric(float64(memoryAfter.Mallocs-memoryBefore.Mallocs)/float64(result.successes), "allocs/req")
+	b.ReportMetric(float64(memoryAfter.TotalAlloc-memoryBefore.TotalAlloc)/float64(result.successes), "bytes/req")
 
 	if state == pf09L1 {
 		if result.elapsed < pf09SteadyDuration {
@@ -375,7 +412,7 @@ func pf09ReservoirAdd(samples []int64, capacity int, seen, state uint64, value i
 	return samples, state
 }
 
-func validatePF09PhaseCounters(state pf09CacheState, successes uint64, deltas map[string]int64) error {
+func validatePF09PhaseCounters(state pf09CacheState, successes uint64, instanceCount int, deltas map[string]int64) error {
 	if successes > math.MaxInt64 {
 		return fmt.Errorf("PF-09 success count overflows int64")
 	}
@@ -395,6 +432,13 @@ func validatePF09PhaseCounters(state pf09CacheState, successes uint64, deltas ma
 		}
 		if 100*(1-float64(deltas[pf09RPCMetric])/float64(want)) < pf09MinRPCReduction {
 			return fmt.Errorf("PF-09 L1 RPC reduction below %.0f%%", pf09MinRPCReduction)
+		}
+	case pf09Stampede:
+		rpc := deltas[pf09RPCMetric]
+		if rpc < 1 || rpc > int64(instanceCount) ||
+			rpc+deltas[pf09L1Metric]+deltas[pf09L2Metric] != want {
+			return fmt.Errorf("PF-09 stampede invariant failed: success=%d instances=%d rpc=%d l1=%d l2=%d",
+				want, instanceCount, rpc, deltas[pf09L1Metric], deltas[pf09L2Metric])
 		}
 	default:
 		return fmt.Errorf("unknown PF-09 state %d", state)
@@ -605,6 +649,8 @@ func pf09StateName(state pf09CacheState) string {
 		return "L2"
 	case pf09L1:
 		return "L1"
+	case pf09Stampede:
+		return "stampede"
 	default:
 		return "unknown"
 	}
