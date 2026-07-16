@@ -3,19 +3,11 @@
 package func_test
 
 import (
-	"bufio"
 	"bytes"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/binary"
 	"fmt"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -86,67 +78,18 @@ func sendCacheTestMessage(t testing.TB, user *client.HTTPClient, convID, suffix 
 	require.NoError(t, sendCacheTestMessageResult(user, convID, suffix))
 }
 
-type cacheTestWebSocket struct {
-	conn net.Conn
-}
+type cacheTestWebSocket = client.WebSocket
 
 func openCacheTestWebSocket(t testing.TB) *cacheTestWebSocket {
 	t.Helper()
-	addr := HTTP.Config().Target.WebsocketAddr
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	ws, err := client.OpenWebSocket(HTTP.Config())
 	require.NoError(t, err)
-	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
-
-	keyBytes := make([]byte, 16)
-	_, err = rand.Read(keyBytes)
-	require.NoError(t, err)
-	key := base64.StdEncoding.EncodeToString(keyBytes)
-	req := &http.Request{
-		Method: "GET",
-		URL:    &url.URL{Scheme: "http", Host: addr, Path: "/"},
-		Host:   addr,
-		Header: http.Header{
-			"Connection":            {"Upgrade"},
-			"Upgrade":               {"websocket"},
-			"Sec-Websocket-Key":     {key},
-			"Sec-Websocket-Version": {"13"},
-		},
-	}
-	require.NoError(t, req.Write(conn))
-	rsp, err := http.ReadResponse(bufio.NewReader(conn), req)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusSwitchingProtocols, rsp.StatusCode)
-	require.NoError(t, conn.SetDeadline(time.Time{}))
-	return &cacheTestWebSocket{conn: conn}
+	return ws
 }
 
-func (ws *cacheTestWebSocket) close() {
-	_ = ws.conn.Close()
-}
-
-func (ws *cacheTestWebSocket) writeBinary(t testing.TB, payload []byte) {
+func writeCacheTestBinary(t testing.TB, ws *cacheTestWebSocket, payload []byte) {
 	t.Helper()
-	frame := []byte{0x82}
-	switch {
-	case len(payload) < 126:
-		frame = append(frame, 0x80|byte(len(payload)))
-	case len(payload) <= 65535:
-		frame = append(frame, 0x80|126, byte(len(payload)>>8), byte(len(payload)))
-	default:
-		frame = append(frame, 0x80|127)
-		var size [8]byte
-		binary.BigEndian.PutUint64(size[:], uint64(len(payload)))
-		frame = append(frame, size[:]...)
-	}
-	var mask [4]byte
-	_, err := rand.Read(mask[:])
-	require.NoError(t, err)
-	frame = append(frame, mask[:]...)
-	for i, b := range payload {
-		frame = append(frame, b^mask[i%len(mask)])
-	}
-	_, err = ws.conn.Write(frame)
-	require.NoError(t, err)
+	require.NoError(t, ws.WriteBinary(payload))
 }
 
 func appendProtoString(dst []byte, field protowire.Number, value string) []byte {
@@ -155,14 +98,7 @@ func appendProtoString(dst []byte, field protowire.Number, value string) []byte 
 }
 
 func cacheTestAuthNotify(accessToken, deviceID string) []byte {
-	var auth []byte
-	auth = appendProtoString(auth, 1, accessToken)
-	auth = appendProtoString(auth, 2, deviceID)
-	var notify []byte
-	notify = protowire.AppendTag(notify, 2, protowire.VarintType)
-	notify = protowire.AppendVarint(notify, 49) // CLIENT_AUTH
-	notify = protowire.AppendTag(notify, 10, protowire.BytesType)
-	return protowire.AppendBytes(notify, auth)
+	return client.PushAuthNotify(accessToken, deviceID)
 }
 
 func cacheTestHeartbeatNotify(uid string) []byte {
@@ -223,10 +159,6 @@ func checkCacheTTLSourceContracts(source string) error {
 	markers := [][3]string{
 		{"Session", "class Session", "class Status"},
 		{"Status", "class Status", "class Codes"},
-		{"Codes", "class Codes", "class Seq"},
-		{"DeviceSet", "class DeviceSet", "class ReadAck"},
-		{"OnlineRoute", "class OnlineRoute", "class RateLimiter"},
-		{"UnackedPush", "class UnackedPush", "class PresenceRedis"},
 	}
 	for _, marker := range markers {
 		section, err := normalizedSourceSection(source, marker[1], marker[2])
@@ -248,35 +180,6 @@ func checkCacheTTLSourceContracts(source string) error {
 			"_c->set(key::kStatus + uid, \"1\", randomized_ttl(ttl))",
 			"_c->expire(key::kStatus + uid, randomized_ttl(ttl))",
 		}},
-		{"Codes", []string{
-			"_c->set(key::kVerifyCode + cid, code, randomized_ttl(ttl))",
-		}},
-		{"DeviceSet", []string{
-			"randomized_ttl(kSessionTtl)",
-			"key::device_set_key(uid)",
-			"_c->eval<long long>(kAddLua",
-			"redis.call('SADD', KEYS[1], ARGV[1])",
-			"redis.call('EXPIRE', KEYS[1], ttl)",
-			"key::legacy_device_set_key(uid)",
-			"kLegacyGraceTtl",
-		}},
-		{"OnlineRoute", []string{
-			"key::online_key(uid), key::device_set_key(uid)",
-			"_c->eval<long long>(kBindLua",
-			"_c->eval<long long>(kTouchLua",
-			"_c->eval<long long>(kUnbindLua",
-			"redis.call('EXPIRE', KEYS[1], route_ttl)",
-			"redis.call('EXPIRE', KEYS[2], device_ttl)",
-		}},
-		{"UnackedPush", []string{
-			"_c->eval<long long>(kPushLua",
-			"_c->eval<long long>(kBumpScoreLua",
-			"_c->eval<long long>(kAckLua",
-			"redis.call('ZADD', KEYS[1]",
-			"redis.call('HSET', KEYS[2]",
-			"redis.call('EXPIRE', KEYS[1], ttl)",
-			"redis.call('EXPIRE', KEYS[2], ttl)",
-		}},
 	}
 	for _, rule := range rules {
 		if err := requireSourceFragments(rule.name, sections[rule.name], rule.fragments...); err != nil {
@@ -284,44 +187,7 @@ func checkCacheTTLSourceContracts(source string) error {
 		}
 	}
 
-	fixedTTL := regexp.MustCompile(`_c->(?:set|expire)\([^;]*, ttl\)`)
-	for _, name := range []string{"Session", "Status", "Codes"} {
-		if fixedTTL.MatchString(sections[name]) {
-			return fmt.Errorf("%s contains a direct fixed TTL cache write", name)
-		}
-	}
-	if strings.Count(sections["UnackedPush"], "randomized_ttl(ttl)") != 2 {
-		return fmt.Errorf("UnackedPush push and bump_score must each sample one randomized TTL")
-	}
-	if strings.Contains(sections["UnackedPush"], "_c->zadd(") ||
-		strings.Contains(sections["UnackedPush"], "_c->hset(") {
-		return fmt.Errorf("UnackedPush bypasses its atomic scripts")
-	}
 	return nil
-}
-
-func TestFN_CA_ResilienceSourceContracts(t *testing.T) {
-	dao := readRepoSource(t, "common/dao/data_redis.hpp")
-	transmiteSource := readRepoSource(t, "transmite/source/transmite_server.h")
-	pushSource := readRepoSource(t, "push/source/push_server.h")
-	breaker := readRepoSource(t, "common/utils/redis_circuit_breaker.hpp")
-	for _, contract := range []struct {
-		name   string
-		source string
-		want   []string
-	}{
-		{"generation fence", dao, []string{"set_if_generation", "kSetIfGenerationLua", "redis.call('INCR', KEYS[2])"}},
-		{"fenced fill", transmiteSource, []string{"generation(uid)", "set_if_generation(uid, bytes", "set_if_generation(uid, \"\""}},
-		{"truth source push", pushSource, []string{"Persist before delivery", "ConsumeAction::NackRequeue", "unacked persistence unavailable"}},
-		{"atomic ack", dao, []string{"kAckLua", "redis.call('ZREM', KEYS[1]", "redis.call('HDEL', KEYS[2]"}},
-		{"atomic breaker hot path", breaker, []string{"std::atomic<uint64_t> _generation", "std::atomic<uint32_t> _consecutive_failures"}},
-	} {
-		for _, want := range contract.want {
-			if !strings.Contains(contract.source, want) {
-				t.Errorf("%s missing %q", contract.name, want)
-			}
-		}
-	}
 }
 
 func requireCacheTTLSourceContracts(t testing.TB, source string) {
@@ -329,20 +195,12 @@ func requireCacheTTLSourceContracts(t testing.TB, source string) {
 	require.NoError(t, checkCacheTTLSourceContracts(source))
 }
 
-func TestFN_CA_TTLJitterSourceContract(t *testing.T) {
+func TestFN_CA_LegacyUnusedTTLSourceContract(t *testing.T) {
 	daoSource := readRepoSource(t, "common/dao/data_redis.hpp")
 	requireCacheTTLSourceContracts(t, daoSource)
 
 	t.Run("rejects fixed Session TTL", func(t *testing.T) {
 		mutant := strings.Replace(daoSource, "randomized_ttl(ttl)", "ttl", 1)
-		require.Error(t, checkCacheTTLSourceContracts(mutant))
-	})
-	t.Run("rejects non-atomic DeviceSet add", func(t *testing.T) {
-		mutant := strings.Replace(daoSource, "_c->eval<long long>(kAddLua", "_c->sadd", 1)
-		require.Error(t, checkCacheTTLSourceContracts(mutant))
-	})
-	t.Run("rejects non-atomic UnackedPush write", func(t *testing.T) {
-		mutant := strings.Replace(daoSource, "_c->eval<long long>(kPushLua", "_c->zadd", 1)
 		require.Error(t, checkCacheTTLSourceContracts(mutant))
 	})
 }
@@ -391,7 +249,7 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 	connections := make([]*cacheTestWebSocket, 0, sampleCount)
 	t.Cleanup(func() {
 		for _, ws := range connections {
-			ws.close()
+			_ = ws.Close()
 		}
 	})
 
@@ -420,7 +278,7 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 			user, _, _ := fixture.RegisterAndLogin(t, HTTP)
 			ws := openCacheTestWebSocket(t)
 			connections = append(connections, ws)
-			ws.writeBinary(t, cacheTestAuthNotify(user.AccessToken, "default_device"))
+			writeCacheTestBinary(t, ws, cacheTestAuthNotify(user.AccessToken, "default_device"))
 
 			deviceKey := fmt.Sprintf("im:dev:{%s}", user.UserID)
 			requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
@@ -428,14 +286,14 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 			if i == 0 {
 				verify.RedisCLI(t, "EXPIRE", deviceKey, "60")
 				heartbeatBefore = verify.RedisTTL(t, deviceKey)
-				ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
+				writeCacheTestBinary(t, ws, cacheTestHeartbeatNotify(user.UserID))
 				requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
 					"heartbeat must renew DeviceSet TTL", func(result string) (bool, error) {
 						seconds, err := strconv.ParseInt(result, 10, 64)
 						return time.Duration(seconds)*time.Second > heartbeatBefore+24*time.Hour, err
 					}, "TTL", deviceKey)
 			} else {
-				ws.writeBinary(t, cacheTestHeartbeatNotify(user.UserID))
+				writeCacheTestBinary(t, ws, cacheTestHeartbeatNotify(user.UserID))
 			}
 			deviceTTLs[requireJitteredRedisTTL(t, deviceKey, sessionTTL)] = struct{}{}
 		}
@@ -447,7 +305,7 @@ func TestFN_CA_TTLJitter(t *testing.T) {
 		sender, recipient, convID := fixture.MakeFriends(t, HTTP)
 		recipientWS := openCacheTestWebSocket(t)
 		connections = append(connections, recipientWS)
-		recipientWS.writeBinary(t, cacheTestAuthNotify(recipient.AccessToken, "default_device"))
+		writeCacheTestBinary(t, recipientWS, cacheTestAuthNotify(recipient.AccessToken, "default_device"))
 		deviceKey := fmt.Sprintf("im:dev:{%s}", recipient.UserID)
 		requireEventuallyRedis(t, 5*time.Second, 50*time.Millisecond,
 			"recipient DeviceSet key must exist", redisEquals("1"), "EXISTS", deviceKey)

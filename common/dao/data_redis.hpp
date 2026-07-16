@@ -164,7 +164,7 @@ private:
     void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
         if (transition == RedisCircuitBreaker::Transition::Opened) {
             metrics::g_redis_circuit_open_total << 1;
-            LOG_WARN("Redis circuit transition Closed->Open");
+            LOG_WARN("Redis circuit transition ->Open");
         } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
             metrics::g_redis_circuit_recovered_total << 1;
             LOG_INFO("Redis circuit transition HalfOpen->Closed");
@@ -398,7 +398,7 @@ private:
     static void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
         if (transition == RedisCircuitBreaker::Transition::Opened) {
             metrics::g_redis_circuit_open_total << 1;
-            LOG_WARN("Redis circuit transition Closed->Open");
+            LOG_WARN("Redis circuit transition ->Open");
         } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
             metrics::g_redis_circuit_recovered_total << 1;
             LOG_INFO("Redis circuit transition HalfOpen->Closed");
@@ -1147,8 +1147,9 @@ public:
             auto value = _c->get(key::user_info_key(uid));
             if (!value) return std::nullopt;
             return *value;
-        } catch (const std::exception &e) {
-            LOG_ERROR("UserInfoCache.get 失败 {}: {}", uid, e.what());
+        } catch (const RedisCircuitOpen &) {
+            return std::nullopt;
+        } catch (const std::exception &) {
             return std::nullopt;
         }
     }
@@ -1165,7 +1166,8 @@ public:
             groups[key::user_info_bucket(uids[i])].push_back(
                 {uids[i], key::user_info_key(uids[i])});
         }
-        for (const auto &[bucket, entries] : groups) {
+        for (const auto &group : groups) {
+            const auto &entries = group.second;
             std::vector<std::string> keys;
             keys.reserve(entries.size());
             for (const auto &entry : entries) keys.push_back(entry.second);
@@ -1177,8 +1179,9 @@ public:
                     if (i < values.size() && values[i]) result.hits[entries[i].first] = *values[i];
                     else result.misses.push_back(entries[i].first);
                 }
-            } catch (const std::exception &e) {
-                LOG_ERROR("UserInfoCache.batch_get bucket={} 失败: {}", bucket, e.what());
+            } catch (const RedisCircuitOpen &) {
+                for (const auto &entry : entries) result.misses.push_back(entry.first);
+            } catch (const std::exception &) {
                 for (const auto &entry : entries) result.misses.push_back(entry.first);
             }
         }
@@ -1187,14 +1190,8 @@ public:
 
     void set(const std::string &uid, const std::string &serialized) {
         if (!_c) return;
-        const auto ttl = serialized.empty()
-            ? randomized_ttl(std::chrono::seconds(5))
-            : randomized_ttl(kUserInfoTtl);
-        try {
-            _c->set(key::user_info_key(uid), serialized, ttl);
-        } catch (const std::exception &e) {
-            LOG_ERROR("UserInfoCache.set 失败 {}: {}", uid, e.what());
-        }
+        const auto observed = generation(uid);
+        if (observed) (void)set_if_generation(uid, serialized, *observed);
     }
 
     std::optional<uint64_t> generation(const std::string &uid) {
@@ -1202,8 +1199,9 @@ public:
         try {
             auto value = _c->get(key::user_info_generation_key(uid));
             return value ? std::stoull(*value) : uint64_t{0};
-        } catch (const std::exception &e) {
-            LOG_WARN("UserInfoCache.generation unavailable: {}", e.what());
+        } catch (const RedisCircuitOpen &) {
+            return std::nullopt;
+        } catch (const std::exception &) {
             return std::nullopt;
         }
     }
@@ -1222,33 +1220,19 @@ public:
                 std::to_string(ttl.count())};
             return _c->eval<long long>(kSetIfGenerationLua, keys.begin(), keys.end(),
                                        args.begin(), args.end()) == 1;
-        } catch (const std::exception &e) {
-            LOG_WARN("UserInfoCache fenced fill unavailable: {}", e.what());
+        } catch (const RedisCircuitOpen &) {
+            return false;
+        } catch (const std::exception &) {
             return false;
         }
     }
 
     void batch_set(const std::unordered_map<std::string, std::string> &values) {
         if (!_c) return;
-        std::unordered_map<uint32_t, std::vector<std::pair<std::string, std::string>>> groups;
         size_t count = 0;
         for (const auto &entry : values) {
             if (count++ >= 2000) break;
-            groups[key::user_info_bucket(entry.first)].push_back(entry);
-        }
-        for (const auto &[bucket, entries] : groups) {
-            try {
-                auto pipe = _c->pipeline(std::to_string(bucket));
-                for (const auto &[uid, serialized] : entries) {
-                    const auto ttl = serialized.empty()
-                        ? randomized_ttl(std::chrono::seconds(5))
-                        : randomized_ttl(kUserInfoTtl);
-                    pipe.set(key::user_info_key(uid), serialized, ttl);
-                }
-                pipe.exec();
-            } catch (const std::exception &e) {
-                LOG_ERROR("UserInfoCache.batch_set bucket={} 失败: {}", bucket, e.what());
-            }
+            set(entry.first, entry.second);
         }
     }
 
@@ -1261,8 +1245,10 @@ public:
             _c->eval<long long>(kInvalidateLua, keys.begin(), keys.end(),
                                 args.begin(), args.end());
             return true;
-        } catch (const std::exception &e) {
-            LOG_ERROR("UserInfoCache.invalidate 失败 {}: {}", uid, e.what());
+        } catch (const RedisCircuitOpen &) {
+            metrics::g_user_info_invalidation_failure_total << 1;
+            return false;
+        } catch (const std::exception &) {
             metrics::g_user_info_invalidation_failure_total << 1;
             return false;
         }
@@ -1327,10 +1313,24 @@ public:
                                 args.begin(), args.end());
         }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
+        try { _c->expire(key::legacy_device_set_key(uid), kLegacyDeviceGraceTtl); }
+        catch (const std::exception &) {}
     }
     /* brief: 设备下线 — HDEL uid did */
     void unbind(const std::string &uid, const std::string &device_id,
                 const std::string &push_instance) {
+        std::vector<std::string> legacy_devices;
+        if (device_id.empty()) {
+            try {
+                std::unordered_map<std::string, std::string> routes;
+                _c->hgetall(key::online_key(uid), std::inserter(routes, routes.end()));
+                for (const auto &[did, instance] : routes) {
+                    if (instance == push_instance) legacy_devices.push_back(did);
+                }
+            } catch (const std::exception &) {}
+        } else {
+            legacy_devices.push_back(device_id);
+        }
         try {
             std::vector<std::string> keys = {
                 key::online_key(uid), key::device_set_key(uid)};
@@ -1339,6 +1339,10 @@ public:
                                 args.begin(), args.end());
         }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what()); }
+        for (const auto &did : legacy_devices) {
+            try { _c->srem(key::legacy_device_set_key(uid), did); }
+            catch (const std::exception &) {}
+        }
     }
     /* brief: 取用户所有在线设备 → device_id 列表 */
     std::vector<std::string> devices(const std::string &uid) {
@@ -1382,6 +1386,7 @@ public:
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.online 失败 {}: {}", uid, e.what()); return false; }
     }
 private:
+    static constexpr std::chrono::seconds kLegacyDeviceGraceTtl{24 * 3600};
     static constexpr const char *kBindLua = R"lua(
 local function key_type(k)
     local t = redis.call('TYPE', k)

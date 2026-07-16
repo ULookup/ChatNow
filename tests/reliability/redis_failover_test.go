@@ -3,7 +3,10 @@
 package reliability_test
 
 import (
+	"bytes"
 	"fmt"
+	"net"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -111,6 +114,95 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 	require.True(t, recoveredSend.GetHeader().GetSuccess(), recoveredSend.GetHeader().GetErrorMessage())
 	require.Greater(t, reliabilitySumBVar(t, endpoints, "redis_circuit_recovered_total"), recoveredBefore,
 		"an Open->HalfOpen probe must recover the Transmite Redis circuit")
+}
+
+// RL-05 Push truth source: Rabbit accepts while Push is paused; after Redis is
+// stopped, resuming Push must requeue before websocket delivery. Recovery then
+// permits the half-open probe, durable Unacked write, and at-least-once delivery.
+func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
+	sender, recipient, convID := fixture.MakeFriends(t, HTTP)
+	ws, err := client.OpenWebSocket(HTTP.Config())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ws.Close() })
+	require.NoError(t, ws.WriteBinary(client.PushAuthNotify(recipient.AccessToken, "default_device")))
+
+	deviceKey := fmt.Sprintf("im:dev:{%s}", recipient.UserID)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && verify.RedisCLI(t, "EXISTS", deviceKey) != "1" {
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, "1", verify.RedisCLI(t, "EXISTS", deviceKey))
+	drainDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(drainDeadline) {
+		_, readErr := ws.ReadFrame(100 * time.Millisecond)
+		if timeout, ok := readErr.(net.Error); ok && timeout.Timeout() {
+			break
+		}
+		require.NoError(t, readErr)
+	}
+
+	pushContainer := HTTP.Config().Infra.PushContainer
+	require.NotEmpty(t, pushContainer)
+	requireDocker(t, "pause", pushContainer)
+	paused := true
+	redisStopped := false
+	t.Cleanup(func() {
+		if paused {
+			_, _ = exec.Command("docker", "unpause", pushContainer).CombinedOutput()
+		}
+		if redisStopped {
+			chaos.StartRedisCluster(t, HTTP.Config())
+			chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
+		}
+	})
+
+	marker := "rl-unacked-" + client.NewRequestID()
+	sendRsp := &transmite.SendMessageRsp{}
+	require.NoError(t, sender.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
+		RequestId: client.NewRequestID(), ConversationId: convID,
+		Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
+			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: marker}}},
+		ClientMsgId: client.NewRequestID(),
+	}, sendRsp))
+	require.True(t, sendRsp.GetHeader().GetSuccess(), sendRsp.GetHeader().GetErrorMessage())
+
+	chaos.StopRedisCluster(t, HTTP.Config())
+	redisStopped = true
+	requireDocker(t, "unpause", pushContainer)
+	paused = false
+	if payload, readErr := ws.ReadFrame(2 * time.Second); readErr == nil {
+		t.Fatalf("Push delivered before durable Unacked persistence: %x", payload)
+	} else if timeout, ok := readErr.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatalf("websocket failed while awaiting Redis outage: %v", readErr)
+	}
+
+	chaos.StartRedisCluster(t, HTTP.Config())
+	chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
+	redisStopped = false
+
+	delivered := false
+	deadline = time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		payload, readErr := ws.ReadFrame(time.Until(deadline))
+		if readErr != nil {
+			break
+		}
+		if bytes.Contains(payload, []byte(marker)) {
+			delivered = true
+			break
+		}
+	}
+	require.True(t, delivered, "requeued Push was not delivered after Redis recovery")
+	unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
+	require.Equal(t, "1", verify.RedisCLI(t, "EXISTS", unackedKey),
+		"delivery must follow durable Unacked persistence")
+}
+
+func requireDocker(t testing.TB, args ...string) {
+	t.Helper()
+	if out, err := exec.Command("docker", args...).CombinedOutput(); err != nil {
+		t.Fatalf("docker %v: %v: %s", args, err, out)
+	}
 }
 
 func reliabilityTransmiteEndpoints(t testing.TB) []string {

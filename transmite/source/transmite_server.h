@@ -608,7 +608,10 @@ public:
             if (generation && _user_info_cache) {
                 _user_info_cache->set_if_generation(uid, bytes, *generation);
             }
-            if (generation && _local_user_cache) {
+            // L1 is deliberately short-lived and remains available even when the
+            // Redis generation read failed. This lets singleflight followers share
+            // a successful Identity result without allowing an unfenced L2 write.
+            if (_local_user_cache) {
                 _local_user_cache->set(
                     lkey, bytes, randomized_ttl(std::chrono::seconds(45)));
             }

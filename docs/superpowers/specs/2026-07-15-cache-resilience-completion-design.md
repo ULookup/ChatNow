@@ -171,7 +171,8 @@ Transmite 当前热路径只读取发送者一个 uid，不额外引入没有消
 `UserInfoCache` 提供 `batch_get` 和 `batch_set`，满足 Message、Conversation 后续
 批量读取场景：
 
-- standalone Redis 使用 MGET 和 pipeline。
+- 读取使用 MGET；写入逐 uid 读取 generation 后以同槽 Lua CAS 回填，避免公开
+  `set`/`batch_set` 绕过失效 fence。这里不额外引入复杂的批量 Lua 协议。
 - Redis Cluster 按 64 个虚拟 bucket 分组；每组 key 共享 hash tag，可安全使用
   MGET/pipeline，避免 CROSSSLOT，也不依赖 redis-plus-plus 的内部连接池。
 - 返回命中 map 和 miss uid 列表，调用方可用现有批量 RPC 一次回源。
@@ -181,9 +182,13 @@ Transmite 当前热路径只读取发送者一个 uid，不额外引入没有消
 
 ### 5.4 失效
 
-Identity 修改昵称、头像、签名或其他 Profile 字段成功后删除 L2 key。删除失败只
-记录指标。各实例 L1 可能继续返回最多约 54 秒旧资料，符合资料展示的最终一致性
-要求。
+Identity 在 DB 提交前 best-effort 推进 generation 并删除 L2，DB 成功后再次执行
+同一原子失效。夹在 pre-invalidate 与 commit 之间读取旧 DB 的回填会被 post
+generation 删除或拒绝；任一 Redis 失效都只记录指标，不拒绝或回滚已经请求的资料
+更新。若 Redis 在整个更新期间都不可用，只能依赖 L1 最多约 54 秒、L2 一小时 TTL、
+告警和恢复后的后续失效收敛，这是 cache-aside 可用性优先的明确边界，不引入 DB
+outbox。Transmite 无法读取 generation 时仍把成功 RPC 结果放入短 TTL L1，供本机
+singleflight followers 共享，但不写 L2；not-found 仍必须拿到 generation 才写 sentinel。
 
 ## 6. TTL 抖动补全
 
@@ -283,6 +288,9 @@ UnackedPush 等可达路径继续由新框架做黑盒验证。待业务重新�
 4. 验证突发请求出现本地限流拒绝。
 5. 验证依赖 SeqGen 的路径明确返回不可用。
 6. 恢复 Redis，验证 half-open 成功并自动恢复正常路径。
+7. Push 专项通过真实 WS、Rabbit 和容器 pause 编排验证：Redis 故障时 Unacked 写入
+   失败必须 NackRequeue 且不得先向 WS 投递；恢复后重投、持久化并按 at-least-once
+   语义最终送达。
 
 ### 10.3 L4 性能测试
 

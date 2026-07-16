@@ -22,5 +22,6 @@ log:
 
 infra:
   redis_container: "redis-node1"
+  push_container: "push_server-service"
   compose_dir: ".."
   transmite_vars: "http://localhost:10004"

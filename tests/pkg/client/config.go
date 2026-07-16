@@ -36,6 +36,7 @@ type LogConfig struct {
 
 type InfraConfig struct {
 	RedisContainer string `yaml:"redis_container"`
+	PushContainer  string `yaml:"push_container"`
 	ComposeDir     string `yaml:"compose_dir"`
 	TransmiteVars  string `yaml:"transmite_vars"`
 }
@@ -67,6 +68,9 @@ func LoadConfig(path string) *Config {
 	}
 	if v := os.Getenv("REDIS_CONTAINER"); v != "" {
 		cfg.Infra.RedisContainer = v
+	}
+	if v := os.Getenv("PUSH_CONTAINER"); v != "" {
+		cfg.Infra.PushContainer = v
 	}
 	if v := os.Getenv("COMPOSE_DIR"); v != "" {
 		cfg.Infra.ComposeDir = v
