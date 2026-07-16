@@ -1,9 +1,30 @@
 package agentpolicy
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPullRequestTemplateContract(t *testing.T) {
+	content := readRepositoryFile(t, filepath.Join(repositoryRoot(t), ".github", "pull_request_template.md"))
+	for _, required := range []string{
+		"<!-- agent-policy:status=draft -->",
+		"Closes #N",
+		"<!-- architecture-impact: yes|no -->",
+		"<!-- core-flow-impact: yes|no -->",
+		"human merge",
+	} {
+		if !strings.Contains(content, required) {
+			t.Errorf("pull request template missing %q", required)
+		}
+	}
+	for _, section := range pullRequestSectionRules {
+		if !strings.Contains(content, "## "+section.heading) {
+			t.Errorf("pull request template missing heading %q", section.heading)
+		}
+	}
+}
 
 func TestValidatePullRequest(t *testing.T) {
 	valid := PullRequestInput{
