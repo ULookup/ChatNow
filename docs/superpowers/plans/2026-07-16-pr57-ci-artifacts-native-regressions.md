@@ -1,12 +1,12 @@
-# PR #57 CI Artifacts and Native Regressions Implementation Plan
+# PR #57 CI Artifacts and Go Regressions Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Produce runnable service artifacts once per workflow and automatically execute the two cache native regressions without weakening the Go full-stack gates.
+**Goal:** Produce runnable service artifacts once per workflow and automatically execute cache regressions through the existing Go full-stack framework.
 
-**Architecture:** A repository-owned, cached native builder feeds one artifact producer job. Consumer jobs download a validated Compose layout. CTest is enabled only for two explicitly scoped cache component regressions.
+**Architecture:** A repository-owned, cached native builder feeds one artifact producer job. Consumer jobs download a validated Compose layout. Regression coverage uses real service boundaries and existing Go test targets; temporary C++ tests are removed.
 
-**Tech Stack:** GitHub Actions, Docker BuildKit, Ubuntu 24.04, CMake/CTest, Bash, Go workflow contract tests, Docker Compose, Redis Cluster.
+**Tech Stack:** GitHub Actions, Docker BuildKit, Ubuntu 24.04, CMake, Bash, Go testing, Docker Compose, Redis Cluster.
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - Do not depend on an unpublished or mutable external builder image.
 - Missing native dependencies, binaries, shared libraries, or tests must fail closed; required work may not skip.
 - `reliability` and `perf-cache` must depend on and download the same immutable artifact before Compose startup.
-- Keep the native-test exception limited to `test_user_info_generation_fence` and `test_unacked_pending_ledger`; do not enable the legacy C++ suite or add gtest.
+- All automated regression tests use the existing Go framework; do not add CTest, gtest, or production-only timing hooks.
 - RL-05 and PF-09 remain Go full-stack gates using their existing Make targets.
 - Every full-stack job ends with one `docker compose down -v` step guarded by `if: always()`.
 
@@ -42,27 +42,28 @@
 - [ ] Build the builder image and run CMake plus packaging in it; expect nine binaries and a valid manifest.
 - [ ] Commit with message `build(ci): package reproducible service artifacts`.
 
-### Task 2: Register and execute the two native regressions
+### Task 2: Move the two regressions into the Go test framework
 
 **Files:**
-- Modify: `CMakeLists.txt`
 - Modify: `common/test/CMakeLists.txt`
-- Modify: `common/test/test_user_info_generation_fence.cc`
-- Modify: `common/test/test_unacked_pending_ledger.cc`
-- Create: `tests/pkg/contracts/native_regressions_test.go`
+- Delete: `common/test/test_user_info_generation_fence.cc`
+- Delete: `common/test/test_unacked_pending_ledger.cc`
+- Modify: `tests/func/cache_test.go`
+- Modify: `tests/pkg/client/http.go`
+- Modify: `tests/pkg/contracts/ci_gates_test.go`
 
 **Interfaces:**
-- Produces CMake option `CHATNOW_BUILD_CACHE_REGRESSION_TESTS`.
-- Produces CTest labels `cache-unit` and `redis-cluster`.
-- Consumes environment variable `CHATNOW_REDIS_CLUSTER_SEEDS` for the ledger test.
+- Produces a direct protobuf HTTP client for the Push service test boundary.
+- Produces Go cache tests executed by `make test-func`.
+- Consumes the existing Redis Cluster and WebSocket helpers.
 
-- [ ] Write contract tests that require both exact targets, both `add_test` registrations, labels, timeouts, the opt-in option, and fail-closed dependency resolution when the option is enabled.
-- [ ] Run `cd tests && go test ./pkg/contracts -run 'TestNativeCacheRegression' -count=1`; confirm it fails on missing registrations.
-- [ ] Enable CTest at the root and add an OFF-by-default `CHATNOW_BUILD_CACHE_REGRESSION_TESTS` option.
-- [ ] Replace the current Redis-header conditional with required target/link discovery inside the enabled option. Register generation as `cache-unit`; register ledger as `redis-cluster`, serial, with an explicit timeout and seed environment.
-- [ ] Build with `-DCHATNOW_BUILD_CACHE_REGRESSION_TESTS=ON`, run the generation CTest, and confirm it passes.
-- [ ] Start a real Redis Cluster, run the ledger CTest with explicit seeds, and confirm it passes; stop the cluster.
-- [ ] Re-run the focused contract tests and commit with message `test(cache): register native atomicity regressions`.
+- [ ] Write a failing Go contract test proving the temporary C++ files/target are still present and the Go Unacked business regression is absent.
+- [ ] Add a failing Go functional test that establishes a Push route, invokes PushToUser twice with one `user_seq` and different payloads, verifies one ZSET identity/latest HASH payload, sends WebSocket ACK, and verifies both indexes are removed.
+- [ ] Add the smallest direct protobuf HTTP helper needed to call the Push service without bypassing production serialization.
+- [ ] Strengthen the existing UserInfo invalidation Go scenario so its comments and assertions explicitly cover bounded stale-data publication and latest Redis repopulation without a timing-only production hook.
+- [ ] Remove both temporary C++ regression files and remove the Unacked CMake executable block.
+- [ ] Run the focused Go contract/helper tests and Go compile/vet checks; expect zero failures.
+- [ ] Commit with message `test(cache): move regressions into Go framework`.
 
 ### Task 3: Wire the artifact producer and consumers into CI
 
@@ -75,10 +76,10 @@
 - Artifact name: `compose-service-artifacts`.
 - Consumers: `reliability`, `perf-cache`.
 
-- [ ] Extend workflow contract tests to require one producer; BuildKit GHA caching; builder build, CMake build, generation CTest, package, validate, and upload in order; consumer `needs`, download, validate, Compose start, gate, and teardown in order; and execution of the Redis ledger CTest against the stack.
+- [ ] Extend workflow contract tests to require one producer; BuildKit GHA caching; builder build, package, validate, and upload in order; consumer `needs`, download, validate, Compose start, Go gate, and teardown in order.
 - [ ] Run `cd tests && go test ./pkg/contracts -count=1`; confirm the new assertions fail against the old workflow.
 - [ ] Add `service-artifacts` to the workflow using `docker/build-push-action` cache-to/cache-from `type=gha`, then execute the native build and packaging inside that image and upload `compose-artifacts` with `actions/upload-artifact`.
-- [ ] Make both consumers depend on the producer, download with `actions/download-artifact`, restore service-context directories, validate before Compose, and run the Redis ledger CTest after Redis Cluster readiness and before the Go gate.
+- [ ] Make both consumers depend on the producer, download with `actions/download-artifact`, restore service-context directories, validate before Compose, and run the existing Go gates after stack readiness.
 - [ ] Preserve PF-09 rate-limit overrides and strict final teardown behavior.
 - [ ] Run the full contract suite, YAML parse, and `docker compose config --quiet`; expect zero failures.
 - [ ] Commit with message `ci: distribute service artifacts to cache gates`.
@@ -90,7 +91,7 @@
 
 - [ ] Run `git diff --check` and inspect the complete branch diff.
 - [ ] Run `cd tests && PATH="$(go env GOPATH)/bin:$PATH" make proto` followed by `go test ./...`, tagged vet commands, and the PF-09 race helper command.
-- [ ] Build the builder from a clean Docker cache or pull-free context, build all services, package, validate, and run the generation test.
-- [ ] Start the downloaded-equivalent artifact layout with Compose, wait for services, run the ledger CTest, RL-05, and then tear down.
+- [ ] Run static builder checks, package/validator behavior tests, and all Go contract/helper suites; do not require a local nine-service native build.
+- [ ] Verify workflow ordering and that the Go functional/reliability/performance targets are the only regression entry points.
 - [ ] Push the branch and inspect the new GitHub Actions run. Do not claim green if an external failure remains.
 - [ ] Fetch review threads again and report which new threads are addressed. Do not reply to or resolve GitHub threads without explicit user authorization.

@@ -1,4 +1,4 @@
-# PR #57 CI Artifacts and Native Regressions Design
+# PR #57 CI Artifacts and Go Regressions Design
 
 ## Scope
 
@@ -6,7 +6,8 @@ Address the two review threads added after commit `f633006`:
 
 1. make the RL-05 and PF-09 jobs start a runnable service stack from a clean
    GitHub runner;
-2. execute the generation-fence and Unacked-ledger regressions automatically.
+2. execute generation-fence and Unacked-ledger business regressions through the
+   repository's Go test framework.
 
 The change must not hide a missing native toolchain, silently skip a test, or
 duplicate a full service build in every gate job.
@@ -38,27 +39,27 @@ download it before `docker compose up`, validate its manifest, and then run the
 existing Go gates. A failed producer blocks consumers instead of producing a
 misleading integration-test failure.
 
-## Native regression exception
+## Go regression coverage
 
-The unified test architecture remains Go black-box by default. Two narrow L0
-native component regressions are an explicit exception because the public
-service boundary cannot deterministically create their internal atomicity
-conditions without production test hooks:
+The unified test architecture is authoritative: tests are Go, exercise
+HTTP/protobuf or WebSocket service boundaries, and run through targets in
+`tests/Makefile`. This PR does not introduce CTest or retain temporary C++
+regression executables.
 
-- UserInfo generation CAS conflict must not publish stale bytes into L1;
-- retrying one Unacked `user_seq` with a different payload must keep one
-  identity and ACK must remove both indexes.
+The Unacked regression calls the real Push service twice with the same
+`user_seq` and different notification payloads after establishing an online
+device route. It verifies through Redis Cluster that the ZSET retains one
+stable identity and the HASH contains the second payload, then sends a real
+WebSocket ACK and verifies both indexes are removed.
 
-The exception does not introduce gtest or a general C++ test suite. CMake
-exposes `CHATNOW_BUILD_CACHE_REGRESSION_TESTS`, disabled by default and enabled
-by CI. When enabled, dependencies are required rather than detected with a
-skip-capable probe. Both executables are registered with CTest labels. The
-generation test runs in the producer. The ledger test runs against the real
-Redis Cluster in a Compose network with an explicit seed and a timeout.
+The UserInfo regression remains a full-stack cache-consistency scenario. It
+invalidates shared cache state through UpdateProfile, drives the Transmite
+lookup path, and verifies that the repopulated Redis value contains the latest
+profile after the documented bounded process-local L1 lifetime. The test
+asserts externally observable freshness; it does not add a production timing
+hook solely to force an internal CAS interleaving.
 
-The Go RL-05 and PF-09 suites remain the authoritative business and system
-gates; native tests only cover atomicity that cannot be made deterministic at
-the external API.
+RL-05 and PF-09 remain the authoritative system gates.
 
 ## Contract enforcement
 
@@ -68,8 +69,8 @@ The existing Go workflow contract tests will require:
 - build, package, validate, and upload steps in order;
 - both gate jobs to depend on the producer and download/validate before
   Compose startup;
-- the producer to enable and execute the generation native regression;
-- the Redis-backed ledger regression to execute against the stack;
+- the Go cache and Unacked regressions to execute through an existing Make
+  target against the stack;
 - no `continue-on-error`, conditional bypass, or skip-capable dependency
   detection on required steps;
 - teardown to remain the unique final step with `if: always()`.
@@ -81,13 +82,13 @@ The existing Go workflow contract tests will require:
 - Missing binary: packaging fails before upload.
 - Unresolved shared library: artifact validation fails before upload and again
   after download.
-- Redis Cluster unavailable: ledger CTest fails; it is never reported as
-  skipped.
+- Redis Cluster unavailable: the Go Unacked regression fails; it is never
+  reported as skipped.
 - Gate failure: job fails and teardown still runs.
 
 ## Non-goals
 
 - no refactor of all nine runtime Dockerfiles into multi-stage builds;
 - no externally managed or mutable CI image dependency;
-- no general revival of the old C++ gtest suite;
+- no CTest or revival of the old C++ test suite;
 - no change to cache, ACK, or message-watermark business semantics.
