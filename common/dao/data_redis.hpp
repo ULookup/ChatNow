@@ -1818,6 +1818,11 @@ public:
     static std::string idx_key_for(const std::string &uid, const std::string &device_id) {
         return std::string(key::kUnacked) + "idx:{" + uid + ":" + device_id + "}";
     }
+    // HSCAN continuation for bounded HASH-only orphan repair. All normal ledger
+    // mutations delete it, so the cursor is resumed only across stable read-heal passes.
+    static std::string repair_key_for(const std::string &uid, const std::string &device_id) {
+        return std::string(key::kUnacked) + "repair:{" + uid + ":" + device_id + "}";
+    }
 
     /* brief: 入待重传队列（per-device，存 payload_b64 直接用） */
     void push(const std::string &uid, const std::string &device_id,
@@ -1825,8 +1830,9 @@ public:
               long long score_ts, std::chrono::seconds ttl = kUnackedTtl) {
         std::string k = key_for(uid, device_id);
         std::string ik = idx_key_for(uid, device_id);
+        std::string rk = repair_key_for(uid, device_id);
         const auto effective_ttl = randomized_ttl(ttl);
-        std::vector<std::string> keys = {k, ik};
+        std::vector<std::string> keys = {k, ik, rk};
         std::vector<std::string> args = {
             std::to_string(score_ts), std::to_string(user_seq), payload_b64,
             std::to_string(effective_ttl.count())};
@@ -1839,7 +1845,8 @@ public:
         try {
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
-            std::vector<std::string> keys = {k, ik};
+            std::string rk = repair_key_for(uid, device_id);
+            std::vector<std::string> keys = {k, ik, rk};
             std::vector<std::string> args = {std::to_string(user_seq)};
             _c->eval<long long>(kAckLua, keys.begin(), keys.end(),
                                 args.begin(), args.end());
@@ -1856,9 +1863,10 @@ public:
         try {
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
+            std::string rk = repair_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
             std::vector<std::string> raw;
-            std::vector<std::string> keys = {k, ik};
+            std::vector<std::string> keys = {k, ik, rk};
             std::vector<std::string> args = {
                 std::to_string(now - max_age_sec), std::to_string(limit)};
             _c->eval(kPeekDueLua, keys.begin(), keys.end(),
@@ -1879,9 +1887,10 @@ public:
         try {
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
+            std::string rk = repair_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
             const auto effective_ttl = randomized_ttl(ttl);
-            std::vector<std::string> keys = {k, ik};
+            std::vector<std::string> keys = {k, ik, rk};
             std::vector<std::string> args = {
                 std::to_string(effective_ttl.count()), std::to_string(now)};
             args.reserve(2 + user_seqs.size());
@@ -1913,6 +1922,7 @@ redis.call('ZADD', KEYS[1], score, ARGV[2])
 redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
 redis.call('EXPIRE', KEYS[1], ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('DEL', KEYS[3])
 return 1
 )lua";
 
@@ -1927,8 +1937,10 @@ local limit = tonumber(ARGV[2])
 if not cutoff or not limit or limit <= 0 then return redis.error_reply('invalid arguments') end
 local zt = key_type(KEYS[1])
 local ht = key_type(KEYS[2])
+local rt = key_type(KEYS[3])
 if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
 if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+if rt ~= 'none' and rt ~= 'string' then return redis.error_reply('unacked repair key wrong type') end
 local result = {}
 local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, limit)
 for _, seq in ipairs(due) do
@@ -1940,12 +1952,28 @@ for _, seq in ipairs(due) do
         redis.call('ZREM', KEYS[1], seq)
     end
 end
-local scan = redis.call('HSCAN', KEYS[2], 0, 'COUNT', limit)
+local cursor = redis.call('GET', KEYS[3]) or '0'
+local scan = redis.call('HSCAN', KEYS[2], cursor, 'COUNT', limit)
 local fields = scan[2]
 for i = 1, #fields, 2 do
     local seq = fields[i]
     if not redis.call('ZSCORE', KEYS[1], seq) then
         redis.call('HDEL', KEYS[2], seq)
+    end
+end
+local next_cursor = scan[1]
+if next_cursor == '0' then
+    redis.call('DEL', KEYS[3])
+else
+    -- The cursor describes the HASH iteration, so it may never outlive that HASH.
+    local httl = redis.call('PTTL', KEYS[2])
+    if httl > 0 then
+        redis.call('SET', KEYS[3], next_cursor, 'PX', httl)
+    elseif httl == -1 then
+        -- Corrupt persistent ledgers still make progress without leaking metadata forever.
+        redis.call('SET', KEYS[3], next_cursor, 'PX', 300000)
+    else
+        redis.call('DEL', KEYS[3])
     end
 end
 return result
@@ -1978,12 +2006,25 @@ for i = 3, #ARGV do
 end
 redis.call('EXPIRE', KEYS[1], ttl)
 redis.call('EXPIRE', KEYS[2], ttl)
+-- Score/member mutation invalidates an in-progress HSCAN continuation.
+redis.call('DEL', KEYS[3])
 return updated
 )lua";
 
     static constexpr const char *kAckLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 removed = removed + redis.call('HDEL', KEYS[2], ARGV[1])
+-- HASH mutation invalidates an in-progress HSCAN continuation.
+redis.call('DEL', KEYS[3])
 return removed
 )lua";
 
