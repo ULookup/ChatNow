@@ -2,6 +2,11 @@
 cmake_minimum_required(VERSION 3.1.3)
 # 2. 声明工程名称
 project(chatnow)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # 3. 添加子目录
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/message)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/identity)
@@ -13,5 +18,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/relationship)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/conversation)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/gateway)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/push)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/common/test)
 # 4.
 set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})

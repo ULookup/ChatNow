@@ -35,6 +35,7 @@
 #include "error/handle_rpc.hpp"
 #include "error/service_error.hpp"
 #include "log/log_context.hpp"
+#include "utils/cache_version.hpp"
 
 namespace chatnow {
 
@@ -665,9 +666,11 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
-            // 1. 优先走 Redis 缓存（list 返回 vector<string>）
-            auto cached = _members_cache->list(req->conversation_id());
-            if (!cached.empty()) {
+            // 1. 优先走 Redis 缓存；snapshot 前后版本一致才可信
+            auto snap = _members_cache->list_snapshot(req->conversation_id());
+            if (!snap.stable) metrics::g_members_cache_snapshot_race_total << 1;
+            if (snap.stable && !snap.members.empty()) {
+                auto &cached = snap.members;
                 if (auth.user_id != "__system__"
                     && std::find(cached.begin(), cached.end(), auth.user_id) == cached.end())
                     throw ServiceError(::chatnow::error::kConversationNotMember,
@@ -675,9 +678,24 @@ public:
                 for (auto &uid : cached) rsp->add_member_ids(uid);
                 return;
             }
-            // 2. 缓存未命中：查 DB + warm
+            if (chatnow::cache_sentinel_confirms_empty(
+                    snap.stable && snap.members.empty(),
+                    _members_cache->is_sentinel(req->conversation_id()))) {
+                if (auth.user_id != "__system__")
+                    throw ServiceError(::chatnow::error::kConversationNotMember,
+                                       "not a member");
+                return;
+            }
+            // 2. 缓存未命中：记录版本 → 查 DB → CAS warm，避免旧快照回写
+            auto observed_version = _members_cache->version(req->conversation_id());
             auto uids = _mysql_member->members(req->conversation_id());
-            _members_cache->warm(req->conversation_id(), uids);
+            if (uids.empty()) {
+                if (!_members_cache->set_sentinel_if_version(req->conversation_id(), observed_version))
+                    metrics::g_members_cache_version_conflict_total << 1;
+            } else {
+                if (!_members_cache->warm_if_version(req->conversation_id(), uids, observed_version))
+                    metrics::g_members_cache_version_conflict_total << 1;
+            }
 
             if (auth.user_id != "__system__"
                 && std::find(uids.begin(), uids.end(), auth.user_id) == uids.end())
@@ -876,8 +894,8 @@ private:
         return m->role();
     }
 
-    /* brief: 失效成员缓存（DAO 写后调用，确保下次 GetMemberIds 重建）
-     *  - Members 缓存 API 是 invalidate(ssid)，不是 del() */
+    /* brief: 失效成员缓存（DAO 写后调用，推进 version 并删除 data/sentinel，
+     *        确保并发旧 warm 无法回写） */
     void invalidate_members_cache_(const std::string& cid) {
         _members_cache->invalidate(cid);
     }
@@ -1117,7 +1135,7 @@ public:
         }
         _members_cache = std::make_shared<Members>(_redis_client);
         _last_msg_cache = std::make_shared<LastMessage>(_redis_client);
-        _es_outbox = std::make_shared<ESOutbox>(_redis_client, "im:es:outbox:conversation");
+        _es_outbox = std::make_shared<ESOutbox>(_redis_client, key::es_outbox_key("conversation"));
     }
     void make_mysql_object(const std::string &user, const std::string &password,
                            const std::string &host, const std::string &dbname,

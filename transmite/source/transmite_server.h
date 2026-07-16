@@ -3,6 +3,7 @@
 #include <brpc/server.h>
 #include "infra/etcd.hpp"     // 服务注册模块封装
 #include "infra/logger.hpp"   // 日志模块封装
+#include "infra/metrics.hpp"
 #include "auth/auth_context.hpp"
 #include "auth/forward_auth.hpp"
 #include "error/error_codes.hpp"
@@ -11,13 +12,16 @@
 #include "mq/channel.hpp"
 #include "mq/trace_headers.hpp"
 #include "utils/utils.hpp"
+#include "utils/cache_version.hpp"
 #include "infra/snowflake.hpp"
 #include "dao/data_redis.hpp"
 #include "utils/worker_id.hpp"
 #include "utils/local_cache.hpp"
 #include "utils/inflight.hpp"
 #include "utils/redis_mutex.hpp"
+#include "utils/redis_keys.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/reliability_state.hpp"
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
 #include "identity/identity_service.pb.h"
@@ -46,6 +50,13 @@ inline constexpr size_t LARGE_GROUP_THRESHOLD = 200;
 struct MembersResult {
     std::vector<std::string> members;
     bool confirmed_empty = false;  // 哨兵确认会话不存在，调用方不应重试
+    uint64_t version = 0;
+};
+
+struct MembersCacheEntry {
+    std::vector<std::string> members;
+    uint64_t version = 0;
+    bool sentinel = false;
 };
 
 class TransmiteServiceImpl : public chatnow::transmite::MsgTransmitService
@@ -63,7 +74,7 @@ public:
                         const Members::ptr &members_cache,
                         const RateLimiter::ptr &rate_limiter,
                         const RedisClient::ptr &redis,
-                        LocalCache<std::vector<std::string>>::ptr local_members_cache = nullptr,
+                        LocalCache<MembersCacheEntry>::ptr local_members_cache = nullptr,
                         LocalCache<std::string>::ptr local_user_cache = nullptr,
                         InflightRegistry::ptr inflight_registry = nullptr,
                         int rate_limit_user_max = 600,
@@ -149,49 +160,69 @@ public:
 
         // ③ 客户端幂等去重：Redis SET NX，命中直接返回（零 RPC）
         if (!client_msg_id.empty() && _redis) {
-            idem_key = "im:msg:idem:" + uid + ":" + client_msg_id;
+            idem_key = idempotency_key_for(uid, client_msg_id);
             try {
-                auto result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
+                auto result = _redis->set(
+                    idem_key,
+                    serialize_idempotency_state({IdempotencyStatus::Pending, 0}),
+                    std::chrono::seconds(86400),
+                    sw::redis::UpdateType::NOT_EXIST);
                 if (!result) {
                     auto cached = _redis->get(idem_key);
-                    if (cached && cached.value() != "pending") {
-                        uint64_t old_msg_id = 0;
-                        bool parse_ok = false;
-                        try {
-                            old_msg_id = std::stoull(cached.value());
-                            parse_ok = true;
-                        } catch (const std::exception&) {
-                            LOG_WARN("请求ID: {} - 幂等缓存值异常，删除后降级: {}", rid, cached.value());
-                            try { _redis->del(idem_key); } catch (...) {}
-                            idem_key_set = false;
+                    auto state = cached ? parse_idempotency_state(cached.value())
+                                        : IdempotencyState{IdempotencyStatus::Empty, 0};
+                    if (state.status == IdempotencyStatus::Accepted ||
+                        state.status == IdempotencyStatus::Persisted) {
+                        auto persisted_msg = select_existing_message_by_client_msg_(
+                            uid, client_msg_id, rid, static_cast<brpc::Controller*>(controller));
+                        LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息",
+                                 rid, client_msg_id);
+                        response->mutable_header()->set_request_id(rid);
+                        response->mutable_header()->set_success(true);
+                        if (persisted_msg.has_value()) {
+                            response->mutable_message()->CopyFrom(*persisted_msg);
+                        } else {
+                            response->mutable_message()->set_message_id(state.message_id);
                         }
-                        if (parse_ok) {
-                            LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息", rid, client_msg_id);
-                            response->mutable_header()->set_request_id(rid);
-                            response->mutable_header()->set_success(true);
-                            response->mutable_message()->set_message_id(old_msg_id);
-                            return;
-                        }
-                        // parse failed: deleted corrupt key, fall through — need to re-acquire idem lock
+                        return;
+                    }
+                    if (state.status == IdempotencyStatus::Corrupt) {
+                        LOG_WARN("请求ID: {} - 幂等缓存值异常，删除后降级: {}", rid, cached.value());
+                        try { _redis->del(idem_key); } catch (...) {}
                         try {
-                            auto retry_result = _redis->set(idem_key, "pending", std::chrono::seconds(86400), sw::redis::UpdateType::NOT_EXIST);
+                            auto retry_result = _redis->set(
+                                idem_key,
+                                serialize_idempotency_state({IdempotencyStatus::Pending, 0}),
+                                std::chrono::seconds(86400),
+                                sw::redis::UpdateType::NOT_EXIST);
                             if (!retry_result) {
                                 LOG_WARN("请求ID: {} - client_msg_id={} 幂等降级失败", rid, client_msg_id);
                                 return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                             }
+                            idem_key_set = true;
                         } catch (std::exception &e2) {
                             LOG_WARN("请求ID: {} - Redis 幂等降级异常: {}（fail-open）", rid, e2.what());
                         }
-                        idem_key_set = true;
                     } else {
+                        auto persisted_msg = select_existing_message_by_client_msg_(
+                            uid, client_msg_id, rid, static_cast<brpc::Controller*>(controller));
+                        if (persisted_msg.has_value()) {
+                            LOG_INFO("请求ID: {} - pending 幂等命中 DB client_msg_id={}",
+                                     rid, client_msg_id);
+                            response->mutable_header()->set_request_id(rid);
+                            response->mutable_header()->set_success(true);
+                            response->mutable_message()->CopyFrom(*persisted_msg);
+                            return;
+                        }
                         LOG_WARN("请求ID: {} - client_msg_id={} 幂等冲突（前一条未完成）", rid, client_msg_id);
                         return err_response(rid, chatnow::error::kSystemUnavailable, "duplicate request in flight");
                     }
+                } else {
+                    idem_key_set = true;
                 }
             } catch (std::exception &e) {
                 LOG_WARN("请求ID: {} - Redis 幂等检查异常: {}（fail-open）", rid, e.what());
             }
-            idem_key_set = true;  // SET NX 成功，后续任何错误路径需清理
         }
 
         // ④ 限流检查（用户级 + 会话级）
@@ -304,15 +335,9 @@ public:
         response->mutable_header()->set_success(true);
         response->mutable_message()->CopyFrom(*msg);
 
-        // ⑩ 将幂等 key 从 "pending" 更新为真实 msg_id（在 MQ publish 之前）。
-        //    如果此后进程崩溃，客户端重试时会命中缓存直接返回 msg_id，
-        //    而非被 "pending" 卡死 24 小时。
+        // ⑩ 幂等 key 在 MQ broker ACK 后再从 "pending" 更新为 accepted:<msg_id>。
+        //    在 publish 前提前写 msg_id 会造成进程崩溃后的"幽灵成功"。
         auto msg_id = msg->message_id();
-        if (idem_key_set && !idem_key.empty() && _redis) {
-            try { _redis->set(idem_key, std::to_string(msg_id), std::chrono::seconds(86400)); }
-            catch (...) {}
-            idem_key_set = false;  // 已更新为真实 msg_id，不再需要清理
-        }
 
         // ⑪ MQ publish_confirm（异步回调完成后 Run done）
         google::protobuf::Closure *async_done = rpc_guard.release();
@@ -325,9 +350,16 @@ public:
             ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
-                [async_done, response, rid, done_called, redis, idem_key](PublishStatus status, const std::string &mq_msg) {
+                [async_done, response, rid, done_called, redis, idem_key, msg_id](PublishStatus status, const std::string &mq_msg) {
                     if (done_called->exchange(true)) return;
                     if (status == PublishStatus::Acked) {
+                        if (!idem_key.empty() && redis) {
+                            try {
+                                redis->set(idem_key,
+                                           serialize_idempotency_state({IdempotencyStatus::Accepted, msg_id}),
+                                           std::chrono::seconds(86400));
+                            } catch (...) {}
+                        }
                         LOG_DEBUG("请求ID: {} - 消息成功投递到 Broker", rid);
                     } else {
                         LOG_ERROR("请求ID: {} - 消息投递到 Broker 失败: {}", rid, mq_msg);
@@ -360,18 +392,38 @@ public:
 
     MembersResult resolve_members(const std::string &chat_session_id, const std::string &rid,
                               brpc::Controller *caller_cntl = nullptr) {
-    std::string mkey = "members:" + chat_session_id;
+    std::string mkey = key::local_members_cache_key(chat_session_id);
+    auto current_version = [&]() -> uint64_t {
+        return _members_cache ? _members_cache->version(chat_session_id) : 0;
+    };
+    auto try_local = [&]() -> std::optional<MembersResult> {
+        if (!_local_members_cache) return std::nullopt;
+        auto local = _local_members_cache->get(mkey);
+        if (!local.has_value()) return std::nullopt;
+        auto now_version = current_version();
+        if (!cache_l1_version_matches(local->version, now_version)) {
+            _local_members_cache->invalidate(mkey);
+            metrics::g_members_cache_stale_l1_total << 1;
+            return std::nullopt;
+        }
+        if (local->sentinel) return MembersResult{{}, true, local->version};
+        return MembersResult{local->members, false, local->version};
+    };
+    auto set_local_members = [&](const std::vector<std::string> &members, uint64_t version) {
+        if (!cache_version_is_known(version)) return;
+        if (_local_members_cache)
+            _local_members_cache->set(mkey, MembersCacheEntry{members, version, false},
+                                      randomized_ttl(std::chrono::seconds(8)));
+    };
+    auto set_local_sentinel = [&](uint64_t version) {
+        if (!cache_version_is_known(version)) return;
+        if (_local_members_cache)
+            _local_members_cache->set(mkey, MembersCacheEntry{{}, version, true},
+                                      randomized_ttl(std::chrono::seconds(60)));
+    };
 
     // ① L1 hit → fast path
-    if (_local_members_cache) {
-        auto local = _local_members_cache->get(mkey);
-        if (local.has_value()) {
-            auto &members = *local;
-            if (members.size() == 1 && members[0] == "__sentinel__")
-                return {{}, true};
-            return {members, false};
-        }
-    }
+    if (auto local = try_local()) return *local;
 
     if (_inflight_registry) {
         // ===== 有 InflightRegistry：per-key 进程内互斥 =====
@@ -384,41 +436,43 @@ public:
         };
 
         // Double-check L1
-        if (_local_members_cache) {
-            auto local = _local_members_cache->get(mkey);
-            if (local.has_value()) {
-                release_guard();
-                auto &members = *local;
-                if (members.size() == 1 && members[0] == "__sentinel__")
-                    return {{}, true};
-                return {members, false};
-            }
+        if (auto local = try_local()) {
+            release_guard();
+            return *local;
         }
 
         // Double-check L2 Redis
-        auto members = _members_cache->list(chat_session_id);
+        auto snap = _members_cache->list_snapshot(chat_session_id);
+        if (!snap.stable) {
+            metrics::g_members_cache_snapshot_race_total << 1;
+            release_guard();
+            return {};
+        }
+        auto members = std::move(snap.members);
         if (!members.empty()) {
             release_guard();
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
-            return {members, false};
+            set_local_members(members, snap.version);
+            return {members, false, snap.version};
         }
 
+        const bool stable_empty_snapshot = snap.stable && members.empty();
         // L2 空但哨兵存在 → 确认不存在
-        if (_members_cache->is_sentinel(chat_session_id)) {
+        if (chatnow::cache_sentinel_confirms_empty(stable_empty_snapshot,
+                                                   _members_cache->is_sentinel(chat_session_id))) {
+            auto observed = _members_cache->version(chat_session_id);
             release_guard();
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
-            return {{}, true};
+            set_local_sentinel(observed);
+            return {{}, true, observed};
         }
 
         // L2 miss → RedisMutex + RPC
-        RedisMutex warm_mutex(_redis, "warm:members:" + chat_session_id, 5000);
+        RedisMutex warm_mutex(_redis, key::members_warm_lock_key(chat_session_id), 5000);
         if (!warm_mutex.try_lock(std::chrono::milliseconds(100))) {
             release_guard();
             return {};  // 其他实例正在预热，调用方重试
         }
 
+        auto observed_version = _members_cache->version(chat_session_id);
         auto result = fetch_members_from_conversation_service_(chat_session_id, rid, caller_cntl);
         if (!result.has_value()) {
             warm_mutex.unlock();
@@ -428,51 +482,59 @@ public:
         members = std::move(*result);
 
         if (members.empty()) {
-            _members_cache->set_sentinel(chat_session_id);
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+            if (!_members_cache->set_sentinel_if_version(chat_session_id, observed_version)) {
+                metrics::g_members_cache_version_conflict_total << 1;
+                warm_mutex.unlock();
+                release_guard();
+                return {};
+            }
+            set_local_sentinel(observed_version);
         } else {
-            _members_cache->warm(chat_session_id, members);
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
+            if (!_members_cache->warm_if_version(chat_session_id, members, observed_version)) {
+                metrics::g_members_cache_version_conflict_total << 1;
+                warm_mutex.unlock();
+                release_guard();
+                return {};
+            }
+            set_local_members(members, observed_version);
         }
 
         warm_mutex.unlock();
         release_guard();
-        return {members, members.empty()};
+        return {members, members.empty(), observed_version};
     } else {
         // ===== 无 InflightRegistry：跳过进程内锁，仅靠 RedisMutex 跨实例防惊群 =====
 
         // L2 Redis check
-        auto members = _members_cache->list(chat_session_id);
+        auto snap = _members_cache->list_snapshot(chat_session_id);
+        if (!snap.stable) {
+            metrics::g_members_cache_snapshot_race_total << 1;
+            return {};
+        }
+        auto members = std::move(snap.members);
         if (!members.empty()) {
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
-            return {members, false};
+            set_local_members(members, snap.version);
+            return {members, false, snap.version};
         }
 
+        const bool stable_empty_snapshot = snap.stable && members.empty();
         // L2 空但哨兵存在
-        if (_members_cache->is_sentinel(chat_session_id)) {
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
-            return {{}, true};
+        if (chatnow::cache_sentinel_confirms_empty(stable_empty_snapshot,
+                                                   _members_cache->is_sentinel(chat_session_id))) {
+            auto observed = _members_cache->version(chat_session_id);
+            set_local_sentinel(observed);
+            return {{}, true, observed};
         }
 
         // RedisMutex 前快速 L1 double-check（无锁）
-        if (_local_members_cache) {
-            auto local = _local_members_cache->get(mkey);
-            if (local.has_value()) {
-                auto &m = *local;
-                if (m.size() == 1 && m[0] == "__sentinel__") return {{}, true};
-                return {m, false};
-            }
-        }
+        if (auto local = try_local()) return *local;
 
-        RedisMutex warm_mutex(_redis, "warm:members:" + chat_session_id, 5000);
+        RedisMutex warm_mutex(_redis, key::members_warm_lock_key(chat_session_id), 5000);
         if (!warm_mutex.try_lock(std::chrono::milliseconds(100))) {
             return {};  // 其他实例正在预热
         }
 
+        auto observed_version = _members_cache->version(chat_session_id);
         auto result = fetch_members_from_conversation_service_(chat_session_id, rid, caller_cntl);
         if (!result.has_value()) {
             warm_mutex.unlock();
@@ -481,23 +543,29 @@ public:
         members = std::move(*result);
 
         if (members.empty()) {
-            _members_cache->set_sentinel(chat_session_id);
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, {"__sentinel__"}, randomized_ttl(std::chrono::seconds(60)));
+            if (!_members_cache->set_sentinel_if_version(chat_session_id, observed_version)) {
+                metrics::g_members_cache_version_conflict_total << 1;
+                warm_mutex.unlock();
+                return {};
+            }
+            set_local_sentinel(observed_version);
         } else {
-            _members_cache->warm(chat_session_id, members);
-            if (_local_members_cache)
-                _local_members_cache->set(mkey, members, randomized_ttl(std::chrono::seconds(8)));
+            if (!_members_cache->warm_if_version(chat_session_id, members, observed_version)) {
+                metrics::g_members_cache_version_conflict_total << 1;
+                warm_mutex.unlock();
+                return {};
+            }
+            set_local_members(members, observed_version);
         }
 
         warm_mutex.unlock();
-        return {members, members.empty()};
+        return {members, members.empty(), observed_version};
     }
 }
 
     std::string resolve_user_info(const std::string &uid) const {
         if (!_local_user_cache) return "";
-        std::string ukey = "user:" + uid;
+        std::string ukey = key::local_user_info_cache_key(uid);
         auto cached = _local_user_cache->get(ukey);
         if (cached.has_value()) return *cached;
         return "";
@@ -505,7 +573,7 @@ public:
 
     void warm_user_info(const std::string &uid, const std::string &serialized_info) {
         if (_local_user_cache && !serialized_info.empty())
-            _local_user_cache->set("user:" + uid, serialized_info,
+            _local_user_cache->set(key::local_user_info_cache_key(uid), serialized_info,
                                    randomized_ttl(std::chrono::seconds(45)));
     }
 
@@ -537,6 +605,33 @@ public:
         return members;
     }
 
+    std::optional<chatnow::message::Message> select_existing_message_by_client_msg_(
+        const std::string &uid,
+        const std::string &client_msg_id,
+        const std::string &rid,
+        brpc::Controller *caller_cntl) {
+        if (client_msg_id.empty()) return std::nullopt;
+        auto channel = _mm_channels->choose(_message_service_name);
+        if (!channel) {
+            LOG_WARN("请求ID: {} - message_service 不可达，无法回查幂等消息 uid={}", rid, uid);
+            return std::nullopt;
+        }
+
+        chatnow::message::MessageService_Stub stub(channel.get());
+        chatnow::message::SelectByClientMsgIdReq req;
+        chatnow::message::SelectByClientMsgIdRsp rsp;
+        brpc::Controller cntl;
+        if (caller_cntl) chatnow::auth::forward_auth_metadata(caller_cntl, &cntl);
+        req.set_request_id(rid);
+        req.set_client_msg_id(client_msg_id);
+        stub.SelectByClientMsgId(&cntl, &req, &rsp, brpc::DoNothing());
+        brpc::Join(cntl.call_id());
+        if (cntl.Failed() || !rsp.header().success() || !rsp.has_message()) {
+            return std::nullopt;
+        }
+        return rsp.message();
+    }
+
 private:
     std::string _identity_service_name;
     std::string _conversation_service_name;
@@ -552,7 +647,7 @@ private:
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
     RedisClient::ptr _redis;
-    LocalCache<std::vector<std::string>>::ptr _local_members_cache;
+    LocalCache<MembersCacheEntry>::ptr _local_members_cache;
     LocalCache<std::string>::ptr _local_user_cache;
     InflightRegistry::ptr _inflight_registry;
     int _rate_limit_user_max = 600;
@@ -732,8 +827,10 @@ public:
     }
 
     void make_local_cache() {
-        _local_members_cache = std::make_shared<LocalCache<std::vector<std::string>>>(4096);
-        _local_user_cache = std::make_shared<LocalCache<std::string>>(16384);
+        _local_members_cache = std::make_shared<LocalCache<MembersCacheEntry>>(
+            4096, metrics::local_cache_metrics_sink<MembersCacheEntry>());
+        _local_user_cache = std::make_shared<LocalCache<std::string>>(
+            16384, metrics::local_cache_metrics_sink<std::string>());
         _inflight_registry = std::make_shared<InflightRegistry>();
     }
 
@@ -825,7 +922,7 @@ private:
     SeqGen::ptr _seq_gen;
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
-    LocalCache<std::vector<std::string>>::ptr _local_members_cache;
+    LocalCache<MembersCacheEntry>::ptr _local_members_cache;
     LocalCache<std::string>::ptr _local_user_cache;
     InflightRegistry::ptr _inflight_registry;
     std::string _instance_owner;

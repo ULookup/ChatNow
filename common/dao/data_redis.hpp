@@ -27,7 +27,9 @@
 #include <unordered_set>
 #include <vector>
 #include "infra/logger.hpp"
+#include "utils/cache_version.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/redis_keys.hpp"
 
 namespace chatnow
 {
@@ -160,13 +162,13 @@ public:
     }
 
     // --- SCAN ---
-    // 集群模式：for_each 一次遍历所有节点。不支持迭代续扫——cursor 非零时 abort。
+    // 集群模式：for_each 一次遍历所有节点。集群不支持跨节点 cursor
+    // 续扫，因此任意 cursor 都重启一次完整扫描并返回 0。
     template <typename Out>
     long long scan(long long cursor, const std::string &pattern, long long count, Out out) {
         if (_rc) {
             if (cursor != 0) {
-                LOG_ERROR("RedisCluster scan does not support iterative scan, cursor must be 0, got {}", cursor);
-                abort();
+                LOG_WARN("RedisCluster scan cannot resume cursor {}; restarting full cluster scan", cursor);
             }
             _rc->for_each([&](sw::redis::Redis &r) {
                 long long cur = 0;
@@ -186,33 +188,6 @@ private:
     std::shared_ptr<sw::redis::Redis> _r;
     std::shared_ptr<sw::redis::RedisCluster> _rc;
 };
-
-namespace key
-{
-    inline constexpr const char* kSession    = "im:sess:";          // session_id -> user_id
-    inline constexpr const char* kStatus     = "im:status:";        // user_id    -> 1
-    inline constexpr const char* kVerifyCode = "im:code:";          // code_id    -> 验证码
-    inline constexpr const char* kSeqSession = "{seq}:im:seq:ssid:";  // ssid       -> 会话级 seq
-    inline constexpr const char* kSeqUser    = "{seq}:im:seq:uid:";   // uid        -> 用户级 seq
-    inline constexpr const char* kLastMsg    = "im:last:";          // ssid       -> 最后一条消息预览(JSON)
-    inline constexpr const char* kDeviceSet  = "im:dev:";           // uid        -> SET<device_id>
-    inline constexpr const char* kReadAck    = "im:read:";          // mid        -> SET<uid>
-    inline constexpr const char* kMembers    = "im:conversation:members:"; // cid -> SET<user_id>
-    inline constexpr const char* kMembersSentinel = "im:conversation:sentinel:"; // cid -> "1" (负缓存)
-    inline constexpr const char* kRateUser   = "im:rl:user:";       // uid        -> 令牌桶
-    inline constexpr const char* kRateSsid   = "im:rl:ssid:";       // ssid       -> 令牌桶
-    inline constexpr const char* kOnline     = "im:online:";        // uid        -> HASH { device_id: instance_id }
-    inline constexpr const char* kPushRoute  = "im:push:route:";    // uid        -> push_instance_id (单设备)
-    inline constexpr const char* kUnacked    = "im:unack:";         // uid        -> Sorted Set<msg_id, ts>
-    inline constexpr const char* kPushOutbox     = "im:push:outbox";       // 全局 Sorted Set<serialized_payload, ts> 投递失败兜底
-    inline constexpr const char* kCrossOutbox     = "im:push:cross_outbox";
-
-    // --- Presence 域（Push 内模块） ---
-    inline constexpr const char* kPresence        = "im:presence:";         // {uid} → HASH {state,last_active,custom_status}
-    inline constexpr const char* kPresenceDevices = "im:presence:devices:"; // {uid} → SET<device_id>, TTL 120s
-    inline constexpr const char* kPresenceTyping  = "im:presence:typing:";  // {uid} → SET<conversation_id>, TTL 10s
-    inline constexpr const char* kPresenceSub     = "im:presence:sub:";     // {uid} → SET<user_id>
-} // namespace key
 
 /* brief: 默认 TTL 常量 */
 inline constexpr std::chrono::seconds kSessionTtl(24 * 3600 * 7);   // 登录态 7 天
@@ -418,7 +393,7 @@ public:
 
     /* brief: 申请一个会话级 seq；失败返回 0（业务侧需视为 fatal） */
     unsigned long next_session_seq(const std::string &ssid) {
-        try { return static_cast<unsigned long>(_c->incr(key::kSeqSession + ssid)); }
+        try { return static_cast<unsigned long>(_c->incr(key::seq_session_key(ssid))); }
         catch(std::exception &e) {
             LOG_ERROR("SeqGen.next_session_seq 失败 {}: {}", ssid, e.what());
             return 0;
@@ -426,29 +401,24 @@ public:
     }
     /* brief: 申请一个用户级 seq */
     unsigned long next_user_seq(const std::string &uid) {
-        try { return static_cast<unsigned long>(_c->incr(key::kSeqUser + uid)); }
+        try { return static_cast<unsigned long>(_c->incr(key::seq_user_key(uid))); }
         catch(std::exception &e) {
             LOG_ERROR("SeqGen.next_user_seq 失败 {}: {}", uid, e.what());
             return 0;
         }
     }
-    /* brief: 批量申请用户级 seq（pipeline 一次往返）
-     *  - 写扩散群对每个成员各申请一个 user_seq，N 大时构成 N 次 RTT
-     *  - pipeline 把 N 次 INCR 合并为一次往返（仍是 N 次原子操作）
+    /* brief: 批量申请用户级 seq
+     *  - user seq key 按 uid hash tag 分散到 Redis Cluster slots，避免热点
+     *  - 为保证 Cluster 正确性逐 key INCR；后续可按 slot 分组 pipeline 优化
      *  - 任一失败返回空 vector，上层视为 fatal
      */
     std::vector<unsigned long> next_user_seq_batch(const std::vector<std::string> &uids) {
         std::vector<unsigned long> res;
         if(uids.empty()) return res;
         try {
-            auto pipe = _c->pipeline(key::kSeqUser);
-            for(const auto &uid : uids) {
-                pipe.incr(key::kSeqUser + uid);
-            }
-            auto reply = pipe.exec();
             res.reserve(uids.size());
-            for(size_t i = 0; i < uids.size(); ++i) {
-                res.push_back(static_cast<unsigned long>(reply.get<long long>(i)));
+            for(const auto &uid : uids) {
+                res.push_back(static_cast<unsigned long>(_c->incr(key::seq_user_key(uid))));
             }
         } catch(std::exception &e) {
             LOG_ERROR("SeqGen.next_user_seq_batch 失败 size={}: {}", uids.size(), e.what());
@@ -459,7 +429,7 @@ public:
     /* brief: 启动回填 / Redis 数据丢失修复用：把当前 seq 拉到至少 base（Lua 原子操作，消除多实例并发 race） */
     void backfill_session(const std::string &ssid, unsigned long base) {
         try {
-            std::vector<std::string> keys = {key::kSeqSession + ssid};
+            std::vector<std::string> keys = {key::seq_session_key(ssid)};
             std::vector<std::string> args = {std::to_string(base)};
             _c->eval<long long>(kBackfillLua, keys.begin(), keys.end(), args.begin(), args.end());
         } catch(std::exception &e) {
@@ -468,7 +438,7 @@ public:
     }
     void backfill_user(const std::string &uid, unsigned long base) {
         try {
-            std::vector<std::string> keys = {key::kSeqUser + uid};
+            std::vector<std::string> keys = {key::seq_user_key(uid)};
             std::vector<std::string> args = {std::to_string(base)};
             _c->eval<long long>(kBackfillLua, keys.begin(), keys.end(), args.begin(), args.end());
         } catch(std::exception &e) {
@@ -609,56 +579,168 @@ public:
     using ptr = std::shared_ptr<Members>;
     Members(const RedisClient::ptr &c) : _c(c) {}
 
+    struct Snapshot {
+        std::vector<std::string> members;
+        uint64_t version = 0;
+        bool stable = true;
+    };
+
+    uint64_t version(const std::string &ssid) {
+        try {
+            auto v = _c->get(key::members_version_key(ssid));
+            if (!v) return 0;
+            auto parsed = parse_cache_version(*v);
+            if (!parsed.has_value()) {
+                LOG_ERROR("Members.version 无法解析 {}: {}", ssid, *v);
+                return kUnknownCacheVersion;
+            }
+            return *parsed;
+        } catch(std::exception &e) {
+            LOG_ERROR("Members.version 失败 {}: {}", ssid, e.what());
+            return kUnknownCacheVersion;
+        }
+    }
+
     /* brief: 取群成员列表；空返回 → 调用方回查 RPC + warm() */
     std::vector<std::string> list(const std::string &ssid) {
         std::vector<std::string> res;
-        try { _c->smembers(key::kMembers + ssid, std::inserter(res, res.end())); }
+        try { _c->smembers(key::members_key(ssid), std::inserter(res, res.end())); }
         catch(std::exception &e) { LOG_ERROR("Members.list 失败 {}: {}", ssid, e.what()); }
         return res;
     }
+
+    Snapshot list_snapshot(const std::string &ssid) {
+        Snapshot snap;
+        try {
+            auto before = version(ssid);
+            _c->smembers(key::members_key(ssid), std::inserter(snap.members, snap.members.end()));
+            auto after = version(ssid);
+            snap.version = after;
+            snap.stable = cache_snapshot_is_stable(before, after);
+        } catch(std::exception &e) {
+            LOG_ERROR("Members.list_snapshot 失败 {}: {}", ssid, e.what());
+            snap.stable = false;
+        }
+        return snap;
+    }
+
     /* brief: 缓存预热 / 重建 */
     void warm(const std::string &ssid, const std::vector<std::string> &uids,
               std::chrono::seconds ttl = kMembersTtl) {
-        if(uids.empty()) return;
+        auto observed = version(ssid);
+        (void)warm_if_version(ssid, uids, observed, ttl);
+    }
+
+    bool warm_if_version(const std::string &ssid, const std::vector<std::string> &uids,
+                         uint64_t observed_version,
+                         std::chrono::seconds ttl = kMembersTtl) {
+        if(uids.empty()) return false;
+        if(!cache_version_is_known(observed_version)) return false;
+        if(!cache_ttl_allows_write(ttl)) return false;
         try {
-            std::string k = key::kMembers + ssid;
-            _c->sadd(k, uids.begin(), uids.end());
-            _c->expire(k, randomized_ttl(ttl));
+            std::vector<std::string> keys = {
+                key::members_key(ssid),
+                key::members_version_key(ssid),
+                key::members_sentinel_key(ssid)
+            };
+            std::vector<std::string> args = {
+                std::to_string(observed_version),
+                std::to_string(randomized_ttl(ttl).count())
+            };
+            args.insert(args.end(), uids.begin(), uids.end());
+            auto ok = _c->eval<long long>(kWarmIfVersionLua, keys.begin(), keys.end(),
+                                          args.begin(), args.end());
+            return ok == 1;
         } catch(std::exception &e) {
-            LOG_ERROR("Members.warm 失败 {}: {}", ssid, e.what());
+            LOG_ERROR("Members.warm_if_version 失败 {}: {}", ssid, e.what());
+            return false;
         }
     }
     /* brief: 单成员加入/退出（增量维护） */
     void add(const std::string &ssid, const std::string &uid) {
-        try { _c->sadd(key::kMembers + ssid, uid); }
+        try {
+            std::vector<std::string> keys = {
+                key::members_key(ssid),
+                key::members_version_key(ssid),
+                key::members_sentinel_key(ssid),
+            };
+            std::vector<std::string> args = {
+                uid,
+                std::to_string(randomized_ttl(kMembersTtl).count()),
+            };
+            (void)_c->eval<long long>(kAddMemberLua, keys.begin(), keys.end(),
+                                      args.begin(), args.end());
+        }
         catch(std::exception &e) { LOG_ERROR("Members.add 失败 {}-{}: {}", ssid, uid, e.what()); }
     }
     void remove(const std::string &ssid, const std::string &uid) {
-        try { _c->srem(key::kMembers + ssid, uid); }
+        try {
+            std::vector<std::string> keys = {
+                key::members_key(ssid),
+                key::members_version_key(ssid),
+                key::members_sentinel_key(ssid),
+            };
+            std::vector<std::string> args = {
+                uid,
+                std::to_string(randomized_ttl(kMembersTtl).count()),
+            };
+            (void)_c->eval<long long>(kRemoveMemberLua, keys.begin(), keys.end(),
+                                      args.begin(), args.end());
+        }
         catch(std::exception &e) { LOG_ERROR("Members.remove 失败 {}-{}: {}", ssid, uid, e.what()); }
     }
-    /* brief: 整组失效（解散群 / DDL 变更） */
+    /* brief: 整组失效（解散群 / DDL 变更），同时推进版本阻止旧 warm 回写 */
     void invalidate(const std::string &ssid) {
-        try { _c->del(key::kMembers + ssid); }
+        try {
+            std::vector<std::string> keys = {
+                key::members_key(ssid),
+                key::members_sentinel_key(ssid),
+                key::members_version_key(ssid)
+            };
+            std::vector<std::string> args;
+            _c->eval<long long>(kInvalidateLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        }
         catch(std::exception &e) { LOG_ERROR("Members.invalidate 失败 {}: {}", ssid, e.what()); }
     }
     void touch_ttl(const std::string &ssid, std::chrono::seconds ttl = kMembersTtl) {
-        try { _c->expire(key::kMembers + ssid, randomized_ttl(ttl)); }
+        if(!cache_ttl_allows_write(ttl)) return;
+        try { _c->expire(key::members_key(ssid), randomized_ttl(ttl)); }
         catch (std::exception &e) { LOG_ERROR("Members.touch_ttl 失败 {}: {}", ssid, e.what()); }
     }
     /* brief: 设置会话不存在哨兵（负缓存），独立 key，不与成员数据混合 */
     void set_sentinel(const std::string &ssid, std::chrono::seconds ttl = std::chrono::seconds(60)) {
+        auto observed = version(ssid);
+        (void)set_sentinel_if_version(ssid, observed, ttl);
+    }
+
+    bool set_sentinel_if_version(const std::string &ssid, uint64_t observed_version,
+                                 std::chrono::seconds ttl = std::chrono::seconds(60)) {
+        if(!cache_version_is_known(observed_version)) return false;
+        if(!cache_ttl_allows_write(ttl)) return false;
         try {
-            _c->set(key::kMembersSentinel + ssid, "1", randomized_ttl(ttl));
+            std::vector<std::string> keys = {
+                key::members_sentinel_key(ssid),
+                key::members_version_key(ssid),
+                key::members_key(ssid)
+            };
+            std::vector<std::string> args = {
+                std::to_string(observed_version),
+                std::to_string(randomized_ttl(ttl).count())
+            };
+            auto ok = _c->eval<long long>(kSentinelIfVersionLua, keys.begin(), keys.end(),
+                                          args.begin(), args.end());
+            return ok == 1;
         } catch (std::exception &e) {
-            LOG_ERROR("Members.set_sentinel 失败 {}: {}", ssid, e.what());
+            LOG_ERROR("Members.set_sentinel_if_version 失败 {}: {}", ssid, e.what());
+            return false;
         }
     }
 
     /* brief: 检查哨兵是否存在（会话确认不存在） */
     bool is_sentinel(const std::string &ssid) {
         try {
-            return _c->get(key::kMembersSentinel + ssid).has_value();
+            return _c->get(key::members_sentinel_key(ssid)).has_value();
         } catch (std::exception &e) {
             LOG_ERROR("Members.is_sentinel 失败 {}: {}", ssid, e.what());
             return false;
@@ -669,6 +751,44 @@ public:
         set_sentinel(ssid, ttl);
     }
 private:
+    static constexpr const char *kWarmIfVersionLua =
+        "local cur = redis.call('GET', KEYS[2]) "
+        "if not cur then cur = '0' end "
+        "if cur ~= ARGV[1] then return 0 end "
+        "redis.call('DEL', KEYS[1]) "
+        "for i = 3, #ARGV do redis.call('SADD', KEYS[1], ARGV[i]) end "
+        "redis.call('EXPIRE', KEYS[1], ARGV[2]) "
+        "redis.call('DEL', KEYS[3]) "
+        "return 1";
+
+    static constexpr const char *kSentinelIfVersionLua =
+        "local cur = redis.call('GET', KEYS[2]) "
+        "if not cur then cur = '0' end "
+        "if cur ~= ARGV[1] then return 0 end "
+        "redis.call('DEL', KEYS[3]) "
+        "redis.call('SET', KEYS[1], '1', 'EX', ARGV[2]) "
+        "return 1";
+
+    static constexpr const char *kAddMemberLua =
+        "redis.call('SADD', KEYS[1], ARGV[1]) "
+        "redis.call('DEL', KEYS[3]) "
+        "redis.call('INCR', KEYS[2]) "
+        "redis.call('EXPIRE', KEYS[1], ARGV[2]) "
+        "return 1";
+
+    static constexpr const char *kRemoveMemberLua =
+        "redis.call('SREM', KEYS[1], ARGV[1]) "
+        "redis.call('DEL', KEYS[3]) "
+        "redis.call('INCR', KEYS[2]) "
+        "redis.call('EXPIRE', KEYS[1], ARGV[2]) "
+        "return 1";
+
+    static constexpr const char *kInvalidateLua =
+        "redis.call('INCR', KEYS[3]) "
+        "redis.call('DEL', KEYS[1]) "
+        "redis.call('DEL', KEYS[2]) "
+        "return 1";
+
     RedisClient::ptr _c;
 };
 
@@ -687,7 +807,7 @@ public:
               const std::string &push_instance,
               std::chrono::seconds ttl = kOnlineTtl) {
         try {
-            std::string k = key::kOnline + uid;
+            std::string k = key::online_key(uid);
             _c->hset(k, device_id, push_instance);
             _c->expire(k, randomized_ttl(ttl));
         } catch(std::exception &e) {
@@ -696,20 +816,20 @@ public:
     }
     /* brief: 心跳续期（续整个 uid 的 HASH） */
     void touch(const std::string &uid, std::chrono::seconds ttl = kOnlineTtl) {
-        try { _c->expire(key::kOnline + uid, randomized_ttl(ttl)); }
+        try { _c->expire(key::online_key(uid), randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
     }
     /* brief: 设备下线 — HDEL uid did */
     void unbind(const std::string &uid, const std::string &device_id,
                 const std::string &push_instance) {
-        try { _c->hdel(key::kOnline + uid, device_id); }
+        try { _c->hdel(key::online_key(uid), device_id); }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what()); }
     }
     /* brief: 取用户所有在线设备 → device_id 列表 */
     std::vector<std::string> devices(const std::string &uid) {
         std::vector<std::string> res;
         try {
-            _c->hkeys(key::kOnline + uid, std::back_inserter(res));
+            _c->hkeys(key::online_key(uid), std::back_inserter(res));
         } catch(std::exception &e) { LOG_ERROR("OnlineRoute.devices 失败 {}: {}", uid, e.what()); }
         return res;
     }
@@ -717,7 +837,7 @@ public:
     std::unordered_map<std::string, std::string> device_instances_map(const std::string &uid) {
         std::unordered_map<std::string, std::string> res;
         try {
-            _c->hgetall(key::kOnline + uid, std::inserter(res, res.end()));
+            _c->hgetall(key::online_key(uid), std::inserter(res, res.end()));
         } catch (std::exception &e) {
             LOG_ERROR("OnlineRoute.device_instances_map 失败 {}: {}", uid, e.what());
         }
@@ -726,7 +846,7 @@ public:
     /* brief: 取设备所在 Push 实例 */
     std::string device_instance(const std::string &uid, const std::string &device_id) {
         try {
-            auto v = _c->hget(key::kOnline + uid, device_id);
+            auto v = _c->hget(key::online_key(uid), device_id);
             return v ? *v : "";
         } catch(std::exception &e) {
             LOG_ERROR("OnlineRoute.device_instance 失败 {}-{}: {}", uid, device_id, e.what());
@@ -735,7 +855,7 @@ public:
     }
     /* brief: 是否有任意在线设备 */
     bool online(const std::string &uid) {
-        try { return _c->hlen(key::kOnline + uid) > 0; }
+        try { return _c->hlen(key::online_key(uid)) > 0; }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.online 失败 {}: {}", uid, e.what()); return false; }
     }
 private:
@@ -743,7 +863,7 @@ private:
 };
 
 // =============================================================================
-// 令牌桶限流（基于 INCR + EXPIRE 简易实现；要求 Redis 7+ 推荐用 redis-cell）
+// 令牌桶限流（Lua 原子补 token + 扣 token，避免固定窗口边界放大）
 // =============================================================================
 
 class RateLimiter
@@ -753,17 +873,23 @@ public:
     RateLimiter(const RedisClient::ptr &c) : _c(c) {}
 
     /**
-     * brief: 滑动窗口 incr-and-check（Lua 原子 INCR+EXPIRE）
-     *   - window_sec 内最多允许 max_count 次操作
+     * brief: token bucket（Lua 原子读写）
+     *   - window_sec 内最多补充 max_count 个 token，桶容量 max_count
      *   - 命中限制返回 false（业务可返回 429 / RATE_LIMITED）
      */
     bool allow(const std::string &key_full, int max_count, int window_sec) {
         try {
             std::vector<std::string> keys = {key_full};
-            std::vector<std::string> args = {std::to_string(window_sec)};
+            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            std::vector<std::string> args = {
+                std::to_string(max_count),
+                std::to_string(window_sec),
+                std::to_string(now_ms)
+            };
             long long cur = _c->eval<long long>(kRateLimitScript, keys.begin(), keys.end(),
                                                 args.begin(), args.end());
-            return cur <= max_count;
+            return cur == 1;
         } catch(std::exception &e) {
             LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
             return true;
@@ -781,11 +907,39 @@ private:
 };
 
 inline const std::string RateLimiter::kRateLimitScript = R"(
-    local current = redis.call('INCR', KEYS[1])
-    if current == 1 then
-        redis.call('EXPIRE', KEYS[1], ARGV[1])
+    local capacity = tonumber(ARGV[1])
+    local window_ms = tonumber(ARGV[2]) * 1000
+    local now_ms = tonumber(ARGV[3])
+    if capacity <= 0 or window_ms <= 0 then
+        return 1
     end
-    return current
+
+    local interval_ms = math.floor(window_ms / capacity)
+    if interval_ms < 1 then interval_ms = 1 end
+
+    local tokens = tonumber(redis.call('HGET', KEYS[1], 'tokens'))
+    local ts = tonumber(redis.call('HGET', KEYS[1], 'ts'))
+    if tokens == nil or ts == nil or now_ms < ts then
+        tokens = capacity
+        ts = now_ms
+    else
+        local refill = math.floor((now_ms - ts) / interval_ms)
+        if refill > 0 then
+            tokens = math.min(capacity, tokens + refill)
+            ts = ts + refill * interval_ms
+        end
+    end
+
+    if tokens <= 0 then
+        redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', ts)
+        redis.call('PEXPIRE', KEYS[1], window_ms * 2)
+        return 0
+    end
+
+    tokens = tokens - 1
+    redis.call('HSET', KEYS[1], 'tokens', tokens, 'ts', ts)
+    redis.call('PEXPIRE', KEYS[1], window_ms * 2)
+    return 1
 )";
 
 // =============================================================================
@@ -875,7 +1029,7 @@ public:
     using ptr = std::shared_ptr<ESOutbox>;
     ESOutbox(const RedisClient::ptr &c, const std::string &key)
         : _c(c), _key(key) {}
-    ESOutbox(const RedisClient::ptr &c) : ESOutbox(c, "im:es:outbox") {}
+    ESOutbox(const RedisClient::ptr &c) : ESOutbox(c, key::es_outbox_key()) {}
 
     void enqueue(const std::string &payload, long long score_ts) {
         try { _c->zadd(_key, payload, static_cast<double>(score_ts)); }
@@ -1015,63 +1169,85 @@ public:
 
     /* 设置状态 */
     void set_state(const std::string &uid, const std::string &state) {
-        _r->hset(key::kPresence + uid, "state", state);
+        try { _r->hset(key::kPresence + uid, "state", state); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.set_state 失败 {}: {}", uid, e.what()); }
     }
 
     /* 获取状态 */
     std::string get_state(const std::string &uid) {
-        auto v = _r->hget(key::kPresence + uid, "state");
-        return v ? *v : "offline";
+        try {
+            auto v = _r->hget(key::kPresence + uid, "state");
+            return v ? *v : "offline";
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.get_state 失败 {}: {}", uid, e.what());
+            return "offline";
+        }
     }
 
     /* 更新最后活跃时间 */
     void touch_active(const std::string &uid, int64_t ts_ms) {
-        _r->hset(key::kPresence + uid, "last_active", std::to_string(ts_ms));
+        try { _r->hset(key::kPresence + uid, "last_active", std::to_string(ts_ms)); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.touch_active 失败 {}: {}", uid, e.what()); }
     }
 
     /* 设置自定义状态 */
     void set_custom_status(const std::string &uid, const std::string &text) {
-        _r->hset(key::kPresence + uid, "custom_status", text);
+        try { _r->hset(key::kPresence + uid, "custom_status", text); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.set_custom_status 失败 {}: {}", uid, e.what()); }
     }
 
     /* 添加在线设备：与 Push._write_presence_online_ 使用相同的 per-device HASH 模式 */
     void add_device(const std::string &uid, const std::string &device_id) {
-        auto k = std::string("im:presence:device:{") + uid + "}:" + device_id;
-        _r->hset(k, "state", "ONLINE");
-        _r->expire(k, std::chrono::seconds(120));
+        try {
+            auto k = key::presence_device_key(uid, device_id);
+            _r->hset(k, "state", "ONLINE");
+            _r->expire(k, std::chrono::seconds(120));
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.add_device 失败 {}-{}: {}", uid, device_id, e.what());
+        }
     }
 
     /* 获取在线设备列表：SCAN 匹配 im:presence:device:{uid}:* */
     std::vector<std::string> get_devices(const std::string &uid) {
         std::vector<std::string> out;
-        auto cursor = 0ULL;
-        while (true) {
-            std::vector<std::string> batch;
-            cursor = _r->scan(cursor, "im:presence:device:{" + uid + "}:*", 100,
-                             std::back_inserter(batch));
-            for (auto& k : batch) {
-                auto pos = k.rfind(':');
-                if (pos != std::string::npos) out.push_back(k.substr(pos + 1));
+        try {
+            auto cursor = 0ULL;
+            while (true) {
+                std::vector<std::string> batch;
+                cursor = _r->scan(cursor, key::presence_device_scan_pattern(uid), 100,
+                                 std::back_inserter(batch));
+                for (auto& k : batch) {
+                    auto pos = k.rfind(':');
+                    if (pos != std::string::npos) out.push_back(k.substr(pos + 1));
+                }
+                if (cursor == 0) break;
             }
-            if (cursor == 0) break;
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.get_devices 失败 {}: {}", uid, e.what());
         }
         return out;
     }
 
     /* 输入中指示 */
     void set_typing(const std::string &uid, const std::string &conv_id) {
-        auto k = key::kPresenceTyping + uid;
-        _r->sadd(k, conv_id);
-        _r->expire(k, std::chrono::seconds(10));
+        try {
+            auto k = key::kPresenceTyping + uid;
+            _r->sadd(k, conv_id);
+            _r->expire(k, std::chrono::seconds(10));
+        } catch(std::exception &e) {
+            LOG_ERROR("PresenceRedis.set_typing 失败 {}-{}: {}", uid, conv_id, e.what());
+        }
     }
 
     /* 订阅状态 */
     void subscribe(const std::string &uid, const std::string &target_uid) {
-        _r->sadd(key::kPresenceSub + uid, target_uid);
+        try { _r->sadd(key::kPresenceSub + uid, target_uid); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.subscribe 失败 {}-{}: {}", uid, target_uid, e.what()); }
     }
 
     void unsubscribe(const std::string &uid, const std::string &target_uid) {
-        _r->srem(key::kPresenceSub + uid, target_uid);
+        try { _r->srem(key::kPresenceSub + uid, target_uid); }
+        catch(std::exception &e) { LOG_ERROR("PresenceRedis.unsubscribe 失败 {}-{}: {}", uid, target_uid, e.what()); }
     }
 
 private:
