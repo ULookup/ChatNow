@@ -97,6 +97,65 @@ jobs:
         if: always()
         run: docker compose down -v
 
+  reliability:
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - name: Start full stack
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run cache reliability gate
+        run: cd tests && make test-reliability
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  perf-cache:
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - name: Start full stack with PF-09 rate limits
+        env:
+          TRANSMITE_RATE_LIMIT_USER_MAX: '100000'
+          TRANSMITE_RATE_LIMIT_SESSION_MAX: '200000'
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run cache performance gate
+        run: cd tests && make test-perf-cache-gate
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
   perf:
     needs: func
     runs-on: ubuntu-22.04
