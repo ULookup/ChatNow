@@ -36,7 +36,7 @@ Stop when identity or ownership is ambiguous, authorization cannot be evaluated 
 ### Identity, credentials, and logs
 
 - Preserve server-derived identity across trusted metadata and validate it again at the receiving boundary. Never forward a client identity as authenticated context.
-- Never log or expose bearer tokens, authorization headers, passwords, signing keys, session secrets, cookies, presigned URLs, real credentials, or raw credential fingerprints.
+- Never log or expose bearer tokens, authorization headers, passwords, signing keys, session secrets, cookies, presigned URLs, or real credentials. Do not create, log, or expose any credential-derived token fingerprint, including a hash, keyed HMAC, prefix, suffix, encoded value, or truncated derivative. Permit such a derivative only when an approved protocol explicitly requires it, constrain it to that protocol, and never repurpose it for diagnostics; prefer request or trace IDs.
 - Minimize personal data. Prefer a trace/request ID or purpose-specific opaque correlation ID. Redact or omit user identifiers, device identifiers, message content, contact data, object names, and search text unless the Issue documents necessity, access, retention, and a safe representation.
 - Write English structured logs with stable event and outcome fields. Avoid free-form concatenation of untrusted values and log injection; encode fields through the established logger.
 
@@ -86,6 +86,7 @@ Return these fields in order:
 | Rationalization | Required correction |
 |---|---|
 | "Log the token temporarily; delete it tomorrow." | Never record a reusable credential. Correlate with a safe request or opaque purpose-specific ID. |
+| "A hash, HMAC, or truncated token is safe to log." | It remains credential-derived. Prohibit it unless an approved protocol explicitly requires it; prefer request or trace IDs. |
 | "The client already knows its user ID." | Knowledge is not authority; derive the actor from verified server context. |
 | "Escaping makes this SQL or JSON safe." | Bind SQL values and construct allowlisted Elasticsearch DSL nodes. |
 | "The storage SDK normalizes the key." | Constrain server-owned keys and prove containment before access. |
