@@ -155,19 +155,32 @@ func TestCIGates(t *testing.T) {
 	require.True(t, ok, "CI must build the Compose service artifacts once")
 	assertServiceArtifactProducer(t, producer)
 
+	for _, consumer := range []struct {
+		job    string
+		target string
+	}{
+		{"bvt", "cd tests && make test-bvt"},
+		{"func", "cd tests && make test-func"},
+		{"reliability", "cd tests && make test-reliability"},
+		{"perf-cache", "cd tests && make test-perf-cache-gate"},
+	} {
+		job, exists := workflow.Jobs[consumer.job]
+		require.True(t, exists, "%s must be a dedicated clean-runner consumer", consumer.job)
+		require.Equal(t, "service-artifacts", job.Needs)
+		assertFullStackGateJob(t, job, consumer.target)
+		assertInvalidGateJobsRejected(t, job, consumer.target)
+	}
+
 	reliability, ok := workflow.Jobs["reliability"]
 	require.True(t, ok, "RL-05 must have a dedicated reliability job")
 	require.Equal(t, "service-artifacts", reliability.Needs)
 	require.Equal(t, "github.event_name == 'pull_request' || github.event_name == 'schedule'", reliability.If)
-	assertFullStackGateJob(t, reliability, "cd tests && make test-reliability")
 
 	perfCache, ok := workflow.Jobs["perf-cache"]
 	require.True(t, ok, "PF-09 must have a dedicated perf-cache job")
 	require.Equal(t, "service-artifacts", perfCache.Needs)
 	require.Equal(t, "github.event_name == 'schedule'", perfCache.If)
-	assertFullStackGateJob(t, perfCache, "cd tests && make test-perf-cache-gate")
 	assertTargetAbsent(t, perfCache, "test-perf-cache")
-	assertInvalidGateJobsRejected(t, perfCache, "cd tests && make test-perf-cache-gate")
 
 	require.Equal(t, "2147483647", gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_USER_MAX"))
 	require.Equal(t, "2147483647", gateEnv(t, perfCache, "TRANSMITE_RATE_LIMIT_SESSION_MAX"))
@@ -192,18 +205,13 @@ cmake --build build --parallel "$(nproc)" --target conversation_server gateway_s
 	packageCommand  = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts`
 	validateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/validate_compose_artifacts.sh compose-artifacts`
 	restoreCommand  = `for service in conversation gateway identity media message presence push relationship transmite; do
-  chmod +x "compose-artifacts/$service/build/${service}_server"
-  rm -rf "$service/build" "$service/depends"
-  cp -a "compose-artifacts/$service/build" "$service/build"
-  cp -a "compose-artifacts/$service/depends" "$service/depends"
-done`
-	restoreWithoutChmodCommand = `for service in conversation gateway identity media message presence push relationship transmite; do
   rm -rf "$service/build" "$service/depends"
   cp -a "compose-artifacts/$service/build" "$service/build"
   cp -a "compose-artifacts/$service/depends" "$service/depends"
 done`
 	chmodArtifactsCommand = `for service in conversation gateway identity media message presence push relationship transmite; do
   chmod +x "compose-artifacts/$service/build/${service}_server"
+  chmod +x "$service/build/${service}_server"
 done`
 )
 
@@ -348,6 +356,7 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	setupGo := exactUsesStepIndex(valid, "actions/setup-go@v5")
 	download := exactUsesStepIndex(valid, "actions/download-artifact@v4")
 	restore := exactRunStepIndex(valid, restoreCommand)
+	chmod := exactRunStepIndex(valid, chmodArtifactsCommand)
 	validate := exactRunStepIndex(valid, consumerValidateCommand)
 	start := exactRunStepIndex(valid, "docker compose up -d --build")
 	wait := exactRunStepIndex(valid, "./scripts/wait_for_services.sh")
@@ -358,6 +367,7 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	require.NotEqual(t, -1, setupGo)
 	require.NotEqual(t, -1, download)
 	require.NotEqual(t, -1, restore)
+	require.NotEqual(t, -1, chmod)
 	require.NotEqual(t, -1, validate)
 	require.NotEqual(t, -1, start)
 	require.NotEqual(t, -1, wait)
@@ -375,12 +385,11 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 		"restore allowed to fail": func(job *workflowJob) {
 			job.Steps[restore].ContinueOnError = true
 		},
-		"restore without executable mode repair": func(job *workflowJob) {
-			job.Steps[restore].Run = restoreWithoutChmodCommand
+		"missing executable mode repair": func(job *workflowJob) {
+			job.Steps = append(job.Steps[:chmod], job.Steps[chmod+1:]...)
 		},
 		"executable mode repair after validation": func(job *workflowJob) {
-			job.Steps[restore].Run = restoreWithoutChmodCommand
-			insertWorkflowStep(job, validate+1, workflowStep{Run: chmodArtifactsCommand})
+			job.Steps[chmod], job.Steps[validate] = job.Steps[validate], job.Steps[chmod]
 		},
 		"artifact validation allowed to fail": func(job *workflowJob) {
 			job.Steps[validate].ContinueOnError = true
@@ -496,6 +505,7 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		{"protoc generator install", exactRunStepIndex(job, "go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11")},
 		{"artifact download", exactUsesStepIndex(job, "actions/download-artifact@v4")},
 		{"artifact restore", exactRunStepIndex(job, restoreCommand)},
+		{"executable mode repair", exactRunStepIndex(job, chmodArtifactsCommand)},
 		{"artifact validation", exactRunStepIndex(job, consumerValidateCommand)},
 		{"full-stack startup", exactRunStepIndex(job, "docker compose up -d --build")},
 		{"service wait", exactRunStepIndex(job, "./scripts/wait_for_services.sh")},

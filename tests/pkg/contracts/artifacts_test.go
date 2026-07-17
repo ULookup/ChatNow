@@ -41,6 +41,17 @@ func TestComposeArtifactBuilderIsLocked(t *testing.T) {
 		require.Contains(t, dockerfile, `"$`+dependency+`"`, "%s must be consumed by the builder", dependency)
 	}
 	require.Contains(t, dockerfile, "ldconfig")
+
+	for _, service := range composeArtifactServices {
+		runtimeDockerfile := readContractFile(t, root, service+"/Dockerfile")
+		require.Contains(t, runtimeDockerfile, "ARG UBUNTU_IMAGE="+imageLock[1],
+			"%s runtime must use the builder's exact Ubuntu digest", service)
+		require.Contains(t, runtimeDockerfile, "FROM ${UBUNTU_IMAGE}")
+		require.Contains(t, runtimeDockerfile, "COPY ./depends/ /im/depends/")
+		require.Contains(t, runtimeDockerfile, "LD_LIBRARY_PATH=/im/depends")
+		require.NotContains(t, runtimeDockerfile, "COPY ./depends/* /lib",
+			"%s must not overwrite distribution libraries", service)
+	}
 }
 
 func TestComposeArtifactPackagerContract(t *testing.T) {
@@ -55,6 +66,8 @@ func TestComposeArtifactPackagerContract(t *testing.T) {
 	require.Contains(t, script, `"$build_root/$service/${service}_server"`)
 	require.Contains(t, script, `[[ -x "$binary" ]]`)
 	require.Contains(t, script, "not found")
+	require.Contains(t, script, `local_prefix="${LOCAL_PREFIX:-/usr/local}"`)
+	require.Contains(t, script, "library is outside local build prefix")
 	require.Contains(t, script, "sha256sum")
 	require.Contains(t, script, "sort -z")
 
@@ -101,6 +114,7 @@ func TestComposeArtifactValidatorContract(t *testing.T) {
 	require.Contains(t, script, "not found")
 	require.Contains(t, script, "depends_dir_real")
 	require.Contains(t, script, "resolved_library")
+	require.Contains(t, script, "packaged runtime loader or system ABI library")
 }
 
 func TestComposeArtifactScriptsEndToEnd(t *testing.T) {
@@ -120,6 +134,46 @@ func TestComposeArtifactScriptsEndToEnd(t *testing.T) {
 
 		output, err := fixture.validate(t, fixture.lddPath)
 		require.NoError(t, err, "%s", output)
+	})
+
+	t.Run("does not package runtime loader or distribution libraries", func(t *testing.T) {
+		fixture := newArtifactFixture(t, root)
+		fixture.lddPath = fixture.writeLDDWithSystemRuntime(t, filepath.Join(fixture.tools, "ldd-system"))
+		fixture.packageArtifacts(t)
+
+		for _, service := range composeArtifactServices {
+			depends := filepath.Join(fixture.artifactRoot, service, "depends")
+			require.FileExists(t, filepath.Join(depends, "libfixture.so"))
+			require.NoFileExists(t, filepath.Join(depends, "libc.so.6"))
+			require.NoFileExists(t, filepath.Join(depends, "libstdc++.so.6"))
+			require.NoFileExists(t, filepath.Join(depends, "ld-linux-x86-64.so.2"))
+		}
+	})
+
+	t.Run("rejects injected packaged system ABI library", func(t *testing.T) {
+		fixture := newArtifactFixture(t, root)
+		fixture.packageArtifacts(t)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.artifactRoot, "gateway", "depends", "libc.so.6"),
+			[]byte("not glibc\n"), 0o644))
+		fixture.rewriteManifest(t)
+
+		output, err := fixture.validate(t, fixture.lddPath)
+		require.Error(t, err)
+		require.Contains(t, output, "packaged runtime loader or system ABI library")
+	})
+
+	t.Run("rejects injected packaged runtime loader", func(t *testing.T) {
+		fixture := newArtifactFixture(t, root)
+		fixture.packageArtifacts(t)
+		require.NoError(t, os.WriteFile(
+			filepath.Join(fixture.artifactRoot, "identity", "depends", "ld-linux-x86-64.so.2"),
+			[]byte("not a loader\n"), 0o755))
+		fixture.rewriteManifest(t)
+
+		output, err := fixture.validate(t, fixture.lddPath)
+		require.Error(t, err)
+		require.Contains(t, output, "packaged runtime loader or system ABI library")
 	})
 
 	t.Run("rejects manifest tampering", func(t *testing.T) {
@@ -285,10 +339,23 @@ echo "libfixture.so => $library (0x1)"
 	return path
 }
 
+func (fixture artifactFixture) writeLDDWithSystemRuntime(t *testing.T, path string) string {
+	t.Helper()
+	script := `#!/bin/sh
+set -eu
+echo "libfixture.so => ${LD_LIBRARY_PATH:-` + fixture.temp + `}/libfixture.so (0x1)"
+echo "libstdc++.so.6 => /usr/lib/x86_64-linux-gnu/libstdc++.so.6 (0x2)"
+echo "libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x3)"
+echo "/lib64/ld-linux-x86-64.so.2 (0x4)"
+`
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
 func (fixture artifactFixture) packageArtifacts(t *testing.T) {
 	t.Helper()
 	command := exec.Command("bash", filepath.Join(fixture.root, "scripts/package_compose_artifacts.sh"), fixture.buildRoot, fixture.artifactRoot)
-	command.Env = append(os.Environ(), "PATH="+fixture.tools+":"+os.Getenv("PATH"))
+	command.Env = append(os.Environ(), "PATH="+fixture.tools+":"+os.Getenv("PATH"), "LOCAL_PREFIX="+fixture.temp)
 	output, err := command.CombinedOutput()
 	require.NoError(t, err, "%s", output)
 }

@@ -6,6 +6,8 @@ build_root="${1:-build}"
 artifact_root="${2:-compose-artifacts}"
 ldd_command="${LDD:-ldd}"
 sha256sum_command="${SHA256SUM:-sha256sum}"
+local_prefix="${LOCAL_PREFIX:-/usr/local}"
+local_prefix="$(cd "$local_prefix" && pwd -P)"
 
 rm -rf "$artifact_root"
 mkdir -p "$artifact_root"
@@ -34,8 +36,22 @@ for service in "${services[@]}"; do
 
     while IFS= read -r library; do
         [[ -n "$library" ]] || continue
+        resolved_library="$(realpath "$library")" || {
+            echo "unable to resolve shared library for $binary: $library" >&2
+            exit 1
+        }
+        case "$resolved_library" in
+            "$local_prefix"/*)
+                ;;
+            *)
+                # Distribution libraries and the ELF loader are supplied by the
+                # runtime image, which is pinned to the builder's exact digest.
+                # A library is outside local build prefix and is not packaged.
+                continue
+                ;;
+        esac
         library_name="$(basename "$library")"
-        cp -L "$library" "$depends_dir/$library_name"
+        cp -L "$resolved_library" "$depends_dir/$library_name"
     done < <(awk '
         /=> \/[^ ]+/ { print $3; next }
         /^[[:space:]]*\/[^ ]+/ { print $1 }

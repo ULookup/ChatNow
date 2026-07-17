@@ -45,6 +45,16 @@ for service in "${services[@]}"; do
     fi
     depends_dir_real="$(cd "$depends_dir" && pwd -P)"
 
+    while IFS= read -r packaged_library; do
+        library_name="$(basename "$packaged_library")"
+        case "$library_name" in
+            ld-linux*.so.*|ld-musl-*.so.*|libc.so.*|libm.so.*|libpthread.so.*|librt.so.*|libdl.so.*|libgcc_s.so.*|libstdc++.so.*|libanl.so.*|libBrokenLocale.so.*|libcrypt.so.*|libnss_*.so.*|libresolv.so.*|libutil.so.*)
+                echo "packaged runtime loader or system ABI library for $binary: $packaged_library" >&2
+                exit 1
+                ;;
+        esac
+    done < <(find "$depends_dir" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print | LC_ALL=C sort)
+
     ldd_output="$(env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH="$depends_dir" "$ldd_command" "$binary" 2>&1)" || {
         echo "isolated ldd failed for $binary: $ldd_output" >&2
         exit 1
@@ -60,7 +70,7 @@ for service in "${services[@]}"; do
         library_name="$(basename "$library")"
         if [[ "$entry_kind" == "loader" ]]; then
             case "$library_name" in
-                ld-linux*.so.*|ld-musl-*.so.*) continue ;;
+                ld-linux*.so.*|ld-musl-*.so.*) ;;
                 *)
                     echo "unexpected system library outside packaged closure for $binary: $library" >&2
                     exit 1
@@ -75,6 +85,7 @@ for service in "${services[@]}"; do
         resolved_library="$(realpath "$library")"
         case "$resolved_library" in
             "$depends_dir_real"/*) ;;
+            /lib/*|/lib64/*|/usr/lib/*) ;;
             *)
                 echo "shared library is outside packaged closure for $binary: $library" >&2
                 exit 1
