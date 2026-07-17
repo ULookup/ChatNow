@@ -73,7 +73,7 @@ func TestFN_DC_UnreadCount(t *testing.T) {
 	dbV.UnreadCount(t, bob.UserID, convID, 3)
 
 	// bob sync 消息后，HTTP 响应也应显示 unread=3
-	// （sync 不会清未读，需要 UpdateReadAck 才清）
+	// （sync 与送达 ACK 都不会清未读；用户已读需调用 Conversation.MarkRead）
 	// 这里只验证 DB 一致性，不测 HTTP（HTTP 测试在 FN-MS 中覆盖）
 }
 

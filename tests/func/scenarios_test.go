@@ -627,7 +627,7 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 	require.NoError(t, b.DoAuth("/service/conversation/list", listReq, listRsp2))
 	for _, c := range listRsp2.Conversations {
 		if c.ConversationId == convID {
-			assert.Equal(t, uint64(0), c.Self.UnreadCount, "read ack 后未读数应清零")
+			assert.Equal(t, uint64(0), c.Self.UnreadCount, "MarkRead 后未读数应清零")
 		}
 	}
 
