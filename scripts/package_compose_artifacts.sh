@@ -50,7 +50,15 @@ for service in "${services[@]}"; do
             echo "unable to resolve shared library for $binary: $library" >&2
             exit 1
         }
-        cp -L "$resolved_library" "$depends_dir/$library_name"
+        destination="$depends_dir/$library_name"
+        if [[ -e "$destination" ]]; then
+            if ! cmp -s "$resolved_library" "$destination"; then
+                echo "conflicting shared libraries share artifact basename for $binary: $library_name" >&2
+                exit 1
+            fi
+            continue
+        fi
+        cp -L "$resolved_library" "$destination"
     done < <(awk '
         /=> \/[^ ]+/ { print $3; next }
         /^[[:space:]]*\/[^ ]+/ { print $1 }

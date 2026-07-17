@@ -92,6 +92,12 @@ func TestReadAckUsesConversationSequenceWatermark(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(serviceProto), "uint64 seq_id = 3;")
 	require.NotContains(t, string(serviceProto), "uint64 message_id = 3;")
+	require.Contains(t, string(serviceProto), "送达确认水位")
+	require.NotContains(t, string(serviceProto), "已读水位线")
+
+	messageTests, err := os.ReadFile(filepath.Join(root, "tests/func/message_test.go"))
+	require.NoError(t, err)
+	require.NotContains(t, string(messageTests), "read watermark")
 
 	server, err := os.ReadFile(filepath.Join(root, "message/source/message_server.h"))
 	require.NoError(t, err)
@@ -121,6 +127,7 @@ func TestReadAckUsesConversationSequenceWatermark(t *testing.T) {
 	require.Contains(t, clientNotify, "closure->req.set_seq_id(ack.seq_id())")
 	require.NotContains(t, clientNotify, "closure->req.set_message_id(")
 	require.Contains(t, clientNotify, "ack.seq_id() > 0 && !ack.conversation_id().empty()")
+	require.NotContains(t, clientNotify, "conversation read watermark")
 }
 
 type workflowContract struct {

@@ -444,7 +444,7 @@ func TestFN_MS_SelectByClientMsgId_NotFound(t *testing.T) {
 	assert.Nil(t, rsp.Message, "不存在的 client_msg_id 应返回 nil message")
 }
 
-// FN-MS | P0 | UpdateReadAck advances the conversation read watermark.
+// FN-MS | P0 | UpdateReadAck advances the conversation delivery ACK watermark.
 func TestFN_MS_UpdateReadAck_Success(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
 	messageID, seqID := fixture.SendTextMessage(t, alice, convID, "ack-test-msg")
@@ -485,7 +485,7 @@ func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
 	ackRsp := &msg.UpdateReadAckRsp{}
 	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq, ackRsp))
 	require.True(t, ackRsp.GetHeader().GetSuccess(),
-		"newer read watermark failed: %s", ackRsp.GetHeader().GetErrorMessage())
+		"newer delivery ACK watermark failed: %s", ackRsp.GetHeader().GetErrorMessage())
 
 	// 再 ACK 较早消息，last_ack_seq 不应回退。
 	ackReq2 := &msg.UpdateReadAckReq{
@@ -496,7 +496,7 @@ func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
 	ackRsp2 := &msg.UpdateReadAckRsp{}
 	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq2, ackRsp2))
 	require.True(t, ackRsp2.GetHeader().GetSuccess(),
-		"backward read watermark must be idempotent: %s", ackRsp2.GetHeader().GetErrorMessage())
+		"backward delivery ACK watermark must be idempotent: %s", ackRsp2.GetHeader().GetErrorMessage())
 
 	// 直查 DB 验证 last_ack_seq 仍为 seq2。
 	verifier.LastAckSeq(t, bob.UserID, convID, seq2)

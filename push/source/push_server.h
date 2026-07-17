@@ -407,7 +407,7 @@ public:
             if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
 
             // Non-message pushes still ACK their Unacked entry but carry no
-            // conversation read watermark.
+            // conversation delivery ACK watermark.
             if (!(ack.seq_id() > 0 && !ack.conversation_id().empty())) return;
 
             // 异步上报会话 seq_id 水位（无入站 RPC context，需手动设置 auth metadata）

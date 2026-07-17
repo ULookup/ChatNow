@@ -1,6 +1,7 @@
 package contracts
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,6 +107,23 @@ func TestComposeArtifactPackagerContract(t *testing.T) {
 		output, err := result.CombinedOutput()
 		require.Error(t, err)
 		require.Contains(t, string(output), "unresolved shared library")
+	})
+
+	t.Run("rejects conflicting libraries with the same artifact basename", func(t *testing.T) {
+		fixture := newArtifactFixture(t, root)
+		first := filepath.Join(fixture.temp, "first", "libcollision.so")
+		second := filepath.Join(fixture.temp, "second", "libcollision.so")
+		require.NoError(t, os.MkdirAll(filepath.Dir(first), 0o755))
+		require.NoError(t, os.MkdirAll(filepath.Dir(second), 0o755))
+		require.NoError(t, os.WriteFile(first, []byte("first\n"), 0o644))
+		require.NoError(t, os.WriteFile(second, []byte("second\n"), 0o644))
+		fixture.lddPath = fixture.writeLDDLibraries(t, filepath.Join(fixture.tools, "ldd-collision"), first, second)
+
+		command := exec.Command("bash", scriptPath, fixture.buildRoot, fixture.artifactRoot)
+		command.Env = append(os.Environ(), "LDD="+fixture.lddPath, "PATH="+fixture.tools+":"+os.Getenv("PATH"))
+		output, err := command.CombinedOutput()
+		require.Error(t, err)
+		require.Contains(t, string(output), "conflicting shared libraries share artifact basename")
 	})
 }
 
@@ -377,6 +395,17 @@ echo "libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x3)"
 echo "/lib64/ld-linux-x86-64.so.2 (0x4)"
 `
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+func (fixture artifactFixture) writeLDDLibraries(t *testing.T, path string, libraries ...string) string {
+	t.Helper()
+	var script strings.Builder
+	script.WriteString("#!/bin/sh\nset -eu\n")
+	for _, library := range libraries {
+		fmt.Fprintf(&script, "echo 'libfixture.so => %s (0x1)'\n", library)
+	}
+	require.NoError(t, os.WriteFile(path, []byte(script.String()), 0o755))
 	return path
 }
 
