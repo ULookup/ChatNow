@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=compose_artifact_core_abi.sh
+. "$script_dir/compose_artifact_core_abi.sh"
+
 services=(conversation gateway identity media message presence push relationship transmite)
 artifact_root="${1:-compose-artifacts}"
 if [[ ! -d "$artifact_root" ]]; then
@@ -47,12 +51,10 @@ for service in "${services[@]}"; do
 
     while IFS= read -r packaged_library; do
         library_name="$(basename "$packaged_library")"
-        case "$library_name" in
-            ld-linux*.so.*|ld-musl-*.so.*|libc.so.*|libm.so.*|libpthread.so.*|librt.so.*|libdl.so.*|libgcc_s.so.*|libstdc++.so.*|libanl.so.*|libBrokenLocale.so.*|libcrypt.so.*|libnss_*.so.*|libresolv.so.*|libutil.so.*)
-                echo "packaged runtime loader or system ABI library for $binary: $packaged_library" >&2
-                exit 1
-                ;;
-        esac
+        if is_core_system_abi "$library_name"; then
+            echo "packaged runtime loader or system ABI library for $binary: $packaged_library" >&2
+            exit 1
+        fi
     done < <(find "$depends_dir" -mindepth 1 -maxdepth 1 \( -type f -o -type l \) -print | LC_ALL=C sort)
 
     ldd_output="$(env -i PATH=/usr/bin:/bin LD_LIBRARY_PATH="$depends_dir" "$ldd_command" "$binary" 2>&1)" || {
@@ -68,16 +70,6 @@ for service in "${services[@]}"; do
     while IFS=$'\t' read -r entry_kind library; do
         [[ -n "$library" ]] || continue
         library_name="$(basename "$library")"
-        if [[ "$entry_kind" == "loader" ]]; then
-            case "$library_name" in
-                ld-linux*.so.*|ld-musl-*.so.*) ;;
-                *)
-                    echo "unexpected system library outside packaged closure for $binary: $library" >&2
-                    exit 1
-                    ;;
-            esac
-        fi
-
         if [[ ! -f "$library" ]]; then
             echo "shared library is outside packaged closure for $binary: $library" >&2
             exit 1
@@ -85,10 +77,11 @@ for service in "${services[@]}"; do
         resolved_library="$(realpath "$library")"
         case "$resolved_library" in
             "$depends_dir_real"/*) ;;
-            /lib/*|/lib64/*|/usr/lib/*) ;;
             *)
-                echo "shared library is outside packaged closure for $binary: $library" >&2
-                exit 1
+                if ! is_core_system_abi "$library_name" || ! is_system_library_path "$resolved_library"; then
+                    echo "non-core library is outside packaged closure for $binary: $library" >&2
+                    exit 1
+                fi
                 ;;
         esac
     done < <(awk '

@@ -153,20 +153,23 @@ func TestCIGates(t *testing.T) {
 
 	producer, ok := workflow.Jobs["service-artifacts"]
 	require.True(t, ok, "CI must build the Compose service artifacts once")
+	require.Equal(t, "github.event_name != 'push' || github.ref != 'refs/heads/main'", producer.If)
 	assertServiceArtifactProducer(t, producer)
+	require.Equal(t, "github.event_name != 'push' || github.ref != 'refs/heads/main'", workflow.Jobs["bvt"].If)
 
 	for _, consumer := range []struct {
 		job    string
 		target string
+		needs  []string
 	}{
-		{"bvt", "cd tests && make test-bvt"},
-		{"func", "cd tests && make test-func"},
-		{"reliability", "cd tests && make test-reliability"},
-		{"perf-cache", "cd tests && make test-perf-cache-gate"},
+		{"bvt", "cd tests && make test-bvt", []string{"service-artifacts"}},
+		{"func", "cd tests && make test-func", []string{"bvt", "service-artifacts"}},
+		{"reliability", "cd tests && make test-reliability", []string{"service-artifacts"}},
+		{"perf-cache", "cd tests && make test-perf-cache-gate", []string{"service-artifacts"}},
 	} {
 		job, exists := workflow.Jobs[consumer.job]
 		require.True(t, exists, "%s must be a dedicated clean-runner consumer", consumer.job)
-		require.Equal(t, "service-artifacts", job.Needs)
+		require.ElementsMatch(t, consumer.needs, workflowNeeds(job.Needs))
 		assertFullStackGateJob(t, job, consumer.target)
 		assertInvalidGateJobsRejected(t, job, consumer.target)
 	}
@@ -376,6 +379,9 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	require.NotEqual(t, -1, teardown)
 
 	for name, mutate := range map[string]func(*workflowJob){
+		"producer dependency missing": func(job *workflowJob) {
+			job.Needs = nil
+		},
 		"Go setup allowed to fail": func(job *workflowJob) {
 			job.Steps[setupGo].ContinueOnError = true
 		},
@@ -487,8 +493,12 @@ func isForbiddenMakeTarget(run, target string) bool {
 
 func validateFullStackGateJob(job workflowJob, target string) error {
 	const install = "sudo apt-get update\nsudo apt-get install -y protobuf-compiler netcat-openbsd"
-	if job.Needs != "service-artifacts" {
-		return fmt.Errorf("gate job must depend on service-artifacts")
+	requiredNeeds := []string{"service-artifacts"}
+	if target == "cd tests && make test-func" {
+		requiredNeeds = append(requiredNeeds, "bvt")
+	}
+	if !sameStringSet(workflowNeeds(job.Needs), requiredNeeds) {
+		return fmt.Errorf("gate job has incorrect producer dependencies")
 	}
 	for _, step := range job.Steps {
 		if isForbiddenMakeTarget(step.Run, "test-perf-cache") {
@@ -554,6 +564,44 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		return fmt.Errorf("teardown command must appear exactly once")
 	}
 	return nil
+}
+
+func workflowNeeds(raw any) []string {
+	switch value := raw.(type) {
+	case string:
+		return []string{value}
+	case []any:
+		needs := make([]string, 0, len(value))
+		for _, item := range value {
+			need, ok := item.(string)
+			if !ok {
+				return nil
+			}
+			needs = append(needs, need)
+		}
+		return needs
+	default:
+		return nil
+	}
+}
+
+func sameStringSet(actual, expected []string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	seen := make(map[string]bool, len(actual))
+	for _, value := range actual {
+		if seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	for _, value := range expected {
+		if !seen[value] {
+			return false
+		}
+	}
+	return true
 }
 
 func continueOnErrorEnabled(value any) bool {
