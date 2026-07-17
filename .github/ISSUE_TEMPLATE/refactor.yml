@@ -1,0 +1,90 @@
+name: Refactor
+description: Propose a behavior-preserving ChatNow structural improvement.
+title: "refactor: "
+labels: ["type:refactor", "agent"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use an English Issue title. Write the response in Chinese. Keep paths, commands, identifiers, and machine tokens in English.
+  - type: input
+    id: target_version
+    attributes:
+      label: Target Version
+      description: Write the owning version development branch, such as 3.0-dev.
+      placeholder: 3.0-dev
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Write the response in Chinese and cite reproducible repository or runtime evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: problem_or_goal
+    attributes:
+      label: Problem or Goal
+      description: Write the response in Chinese and state one observable problem or goal.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Write the response in Chinese and define the included change.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: Write the response in Chinese, or use N/A with a concrete explanation.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria
+      description: Write testable acceptance criteria in Chinese.
+    validations:
+      required: true
+  - type: textarea
+    id: test_first_plan
+    attributes:
+      label: Test-first Plan
+      description: Write the RED, GREEN, and regression plan in Chinese. Use the current Go test framework.
+    validations:
+      required: true
+  - type: textarea
+    id: risk_and_security
+    attributes:
+      label: Risk and Security
+      description: Write risks and mitigations in Chinese, or use N/A with a concrete explanation.
+    validations:
+      required: true
+  - type: textarea
+    id: architecture_impact
+    attributes:
+      label: Architecture Impact
+      description: Start with Yes or No, then explain the judgment in Chinese.
+      placeholder: No，因为服务边界和状态所有权不变。
+    validations:
+      required: true
+  - type: textarea
+    id: core_flow_impact
+    attributes:
+      label: Core-flow Impact
+      description: Start with Yes or No, then explain the judgment in Chinese.
+      placeholder: No，因为核心调用、状态和失败流程不变。
+    validations:
+      required: true
+  - type: textarea
+    id: required_skill_updates
+    attributes:
+      label: Required Skill Updates
+      description: List repository Skill paths in English and explain changes in Chinese, or use N/A with a concrete explanation.
+    validations:
+      required: true

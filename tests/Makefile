@@ -1,4 +1,4 @@
-.PHONY: proto test-bvt test-func test-reliability test-scenario test-perf test-perf-cache test-perf-cache-gate clean deps
+.PHONY: proto test-bvt test-func test-reliability test-scenario test-perf test-perf-cache test-perf-cache-gate test-agent-policy clean deps
 
 PF09_BASELINE_MSG_PER_SEC ?= 5000
 PF09_EXPECTED_TRANSMITE_INSTANCES ?= 1
@@ -61,9 +61,13 @@ test-perf-cache:
 test-perf-cache-gate:
 	@test "$$(uname -s)" = Linux || (echo "PF-09 gate requires Linux" >&2; exit 1)
 	PF09_RUN_FULLSTACK=1 PF09_BASELINE_MSG_PER_SEC=$(PF09_BASELINE_MSG_PER_SEC) \
-		PF09_EXPECTED_TRANSMITE_INSTANCES=$(PF09_EXPECTED_TRANSMITE_INSTANCES) \
+	PF09_EXPECTED_TRANSMITE_INSTANCES=$(PF09_EXPECTED_TRANSMITE_INSTANCES) \
 		go test -tags=perf ./perf/... -run '^$$' -bench '^BenchmarkPF09_UserInfoCache$$' \
 		-benchmem -count=3 -benchtime=1x
+
+# Run repository Agent policy validator tests
+test-agent-policy:
+	go test ./pkg/agentpolicy ./cmd/agent-policy -count=1
 
 # Download dependencies
 deps:

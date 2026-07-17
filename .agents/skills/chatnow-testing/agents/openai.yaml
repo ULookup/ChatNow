@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test ChatNow Changes"
+  short_description: "Apply ChatNow test-first Go engineering rules"
+  default_prompt: "Use $chatnow-testing before implementing this ChatNow behavior change."

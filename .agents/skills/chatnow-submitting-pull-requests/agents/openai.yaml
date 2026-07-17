@@ -1,0 +1,4 @@
+interface:
+  display_name: "Submit ChatNow Pull Requests"
+  short_description: "Create complete, reviewable ChatNow Draft PRs"
+  default_prompt: "Use $chatnow-submitting-pull-requests to prepare this ChatNow Draft PR."

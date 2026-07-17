@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Git in ChatNow"
+  short_description: "Choose version lines, branches, and commits safely"
+  default_prompt: "Use $chatnow-using-git to create the correct ChatNow task branch and commits."
