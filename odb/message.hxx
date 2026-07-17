@@ -178,7 +178,7 @@ private:
     #pragma db type("bigint unsigned")
     unsigned long _seq_id {0};
 
-    #pragma db type("varchar(32)")
+    #pragma db type("varchar(48)")
     std::string _session_id;
 
     // 发送者：不单建索引（IM 几乎无"按发送者列消息"路径）

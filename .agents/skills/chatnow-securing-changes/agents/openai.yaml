@@ -1,0 +1,4 @@
+interface:
+  display_name: "Secure ChatNow Changes"
+  short_description: "Protect ChatNow identities, data, inputs, and secrets"
+  default_prompt: "Use $chatnow-securing-changes to assess and secure this ChatNow change."

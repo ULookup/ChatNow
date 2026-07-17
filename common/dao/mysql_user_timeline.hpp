@@ -7,7 +7,7 @@
 #include <odb/database.hxx>
 #include <odb/mysql/database.hxx>
 #include <odb/mysql/connection.hxx>
-#include <odb/mysql/statement.hxx>
+#include <mysql/mysql.h>
 
 #include <memory>
 #include <string>
@@ -282,18 +282,86 @@ public:
         return true;
     }
 
+    /* brief: 批量删除 user_timeline 中指定 message_id 的行（仅删调用方自己的） */
+    int delete_by_message_ids(const std::string &uid,
+                              const std::string &cid,
+                              const std::vector<unsigned long> &mids) {
+        if(mids.empty()) return 0;
+        int n = 0;
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<UserTimeline>;
+            for(auto mid : mids) {
+                n += static_cast<int>(_db->erase_query<UserTimeline>(
+                    query::user_id == uid &&
+                    query::session_id == cid &&
+                    query::message_id == mid));
+            }
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("delete_by_message_ids uid={} cid={} size={}: {}",
+                      uid, cid, mids.size(), e.what());
+        }
+        return n;
+    }
+
+    /* brief: 清空 user_timeline 中该会话所有行（仅删调用方自己的） */
+    int delete_by_conversation(const std::string &uid, const std::string &cid) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<UserTimeline>;
+            int n = static_cast<int>(_db->erase_query<UserTimeline>(
+                query::user_id == uid && query::session_id == cid));
+            trans.commit();
+            return n;
+        } catch(std::exception &e) {
+            LOG_ERROR("delete_by_conversation uid={} cid={}: {}", uid, cid, e.what());
+            return 0;
+        }
+    }
+
+    /* brief: 取所有用户的 max(user_seq)，给 SeqGen 启动回填用 */
+    std::vector<std::pair<std::string, unsigned long>> select_max_user_seq_per_user() {
+        std::vector<std::pair<std::string, unsigned long>> res;
+        try {
+            odb::transaction trans(_db->begin());
+            using view = odb::query<UserTimeline>;
+            odb::result<UserTimeline> r(_db->query<UserTimeline>(
+                "GROUP BY " + view::user_id));
+            std::set<std::string> uids;
+            for(auto it = r.begin(); it != r.end(); ++it) uids.insert(it->user_id());
+            for(const auto &u : uids) {
+                std::shared_ptr<UserTimeline> m(_db->query_one<UserTimeline>(
+                    (view::user_id == u) + " ORDER BY " + view::user_seq + " DESC"));
+                if(m) res.emplace_back(u, m->user_seq());
+            }
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("select_max_user_seq_per_user: {}", e.what());
+        }
+        return res;
+    }
+
     /* brief: 获取所有用户的最大 user_seq（用于启动回填） */
     std::vector<std::pair<std::string, unsigned long>> select_max_user_seq() {
         std::vector<std::pair<std::string, unsigned long>> res;
         try {
             auto &mysql_db = dynamic_cast<odb::mysql::database&>(*_db);
             auto conn = mysql_db.connection();
-            std::unique_ptr<odb::mysql::statement> stmt(conn->create_statement());
-            stmt->execute(
-                "SELECT user_id, MAX(user_seq) AS max_seq FROM user_timeline GROUP BY user_id");
-            auto r = stmt->result_set();
-            while(r.next()) {
-                res.emplace_back(r.get_string(1), r.get_unsigned_long(2));
+            MYSQL* handle = conn->handle();
+            if (mysql_query(handle,
+                    "SELECT user_id, MAX(user_seq) AS max_seq FROM user_timeline GROUP BY user_id") == 0) {
+                MYSQL_RES* result = mysql_store_result(handle);
+                if (result) {
+                    MYSQL_ROW row;
+                    while ((row = mysql_fetch_row(result))) {
+                        unsigned long* lengths = mysql_fetch_lengths(result);
+                        std::string uid(row[0] ? row[0] : "", row[0] ? lengths[0] : 0);
+                        unsigned long max_seq = row[1] ? strtoul(row[1], nullptr, 10) : 0;
+                        res.emplace_back(std::move(uid), max_seq);
+                    }
+                    mysql_free_result(result);
+                }
             }
         } catch(std::exception &e) {
             LOG_ERROR("获取所有用户最大user_seq失败: {}", e.what());

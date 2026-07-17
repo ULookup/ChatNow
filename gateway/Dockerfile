@@ -1,5 +1,7 @@
 # 声明基础镜像来源
-FROM ubuntu:24.04
+ARG UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+FROM ${UBUNTU_IMAGE}
+ENV LD_LIBRARY_PATH=/im/depends
 # 声明工作路径
 WORKDIR /im
 RUN mkdir -p /im/logs &&\
@@ -9,7 +11,7 @@ RUN mkdir -p /im/logs &&\
 # 将可执行程序文件，拷贝进入镜像
 COPY ./build/gateway_server /im/bin
 # 将可执行程序依赖，拷贝进入镜像
-COPY ./depends/* /lib/x86_64-linux-gnu/
-COPY ./nc /bin
+COPY ./depends/ /im/depends/
+RUN apt-get update && apt-get install -y netcat-openbsd && rm -rf /var/lib/apt/lists/*
 # 设置容器的启动默认操作 --- 运行程序
 CMD /im/bin/gateway_server -flagfile=/im/conf/gateway_server.conf

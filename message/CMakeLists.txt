@@ -7,7 +7,7 @@ set(target "message_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files common/types.proto common/error.proto common/envelope.proto message/message_types.proto message/message_service.proto message/message_internal.proto)
+set(proto_files common/types.proto common/error.proto common/envelope.proto common/auth/metadata.proto identity/identity_service.proto media/media_service.proto message/message_types.proto message/message_internal.proto message/message_service.proto push/notify.proto push/push_service.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
@@ -31,7 +31,7 @@ endforeach()
 # 3.3 生成ODB框架代码
 # 3.3.1 添加所需的odb映射代码文件名称
 set(odb_path ${CMAKE_CURRENT_SOURCE_DIR}/../odb)
-set(odb_files message.hxx user_timeline.hxx chat_session.hxx chat_session_member.hxx chat_session_view.hxx)
+set(odb_files message.hxx user_timeline.hxx conversation.hxx conversation_member.hxx conversation_view.hxx message_reaction.hxx message_pin.hxx)
 # 3.3.2 检查框架代码文件是否已经生成
 set(odb_hxx "")
 set(odb_cxx "")
@@ -65,16 +65,19 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
     -lhiredis -lredis++ -lcpr -lelasticlient -ljsoncpp
-    -lamqpcpp -lev)
+    -lamqpcpp -lev -lmysqlclient)
 
 set(test_client "message_client")
 # 4. 获取源码目录下的所有源码文件
 set(test_files "")
-aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test)
+    aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/test test_files)
+endif()
 # 5. 声明目标及依赖
-add_executable(${test_client} ${test_files} ${proto_srcs})
-
-target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
+if(test_files)
+    add_executable(${test_client} ${test_files} ${proto_srcs})
+    target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
+endif()
 
 # 6. 设置头文件默认搜索路径
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
@@ -83,4 +86,8 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../odb)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 # 7. 设置需要连接的库
 # 8. 设置安装路径
-INSTALL(TARGETS ${target} ${test_client} RUNTIME DESTINATION bin)
+if(test_files)
+    INSTALL(TARGETS ${target} ${test_client} RUNTIME DESTINATION bin)
+else()
+    INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)
+endif()

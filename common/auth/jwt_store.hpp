@@ -15,8 +15,7 @@
  */
 
 #include "infra/logger.hpp"
-
-#include <sw/redis++/redis++.h>
+#include "dao/data_redis.hpp"
 
 #include <chrono>
 #include <memory>
@@ -33,7 +32,7 @@ inline constexpr const char* kRtChainPrefix  = "im:jwt:rt_chain:";
 class JwtStore {
 public:
     using ptr = std::shared_ptr<JwtStore>;
-    explicit JwtStore(std::shared_ptr<sw::redis::Redis> c) : _c(std::move(c)) {}
+    explicit JwtStore(chatnow::RedisClient::ptr c) : _c(std::move(c)) {}
 
     void revoke(const std::string& jti, int ttl_sec);
     bool is_revoked(const std::string& jti);
@@ -64,7 +63,7 @@ public:
                                                 int new_refresh_ttl_sec);
 
 private:
-    std::shared_ptr<sw::redis::Redis> _c;
+    chatnow::RedisClient::ptr _c;
 
     static constexpr int kChainTtlSec = 24 * 3600;
 };

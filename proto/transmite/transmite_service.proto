@@ -1,29 +1,26 @@
 syntax = "proto3";
 package chatnow.transmite;
 
+option cc_generic_services = true;
+
 import "common/envelope.proto";
 import "message/message_types.proto";
 
-message NewMessageReq {
-    string request_id = 1;
-    optional string user_id = 2;
-    optional string session_id = 3;
-    string conversation_id = 4;
-    MessageContent content = 5;
-    string client_msg_id = 6;
-}
-message NewMessageRsp {
-    ResponseHeader header = 1;
-    int64 message_id = 2;
-    uint64 seq_id = 3;
-}
-
-message GetTransmitTargetRsp {
-    ResponseHeader header = 1;
-    Message message = 2;
-    repeated string target_id_list = 3;
-}
-
 service MsgTransmitService {
-    rpc GetTransmitTarget(NewMessageReq) returns (GetTransmitTargetRsp);
+    rpc SendMessage(SendMessageReq) returns (SendMessageRsp);
+}
+
+message SendMessageReq {
+    string request_id = 1;
+    string conversation_id = 2;
+    chatnow.message.MessageContent content = 3;
+    string client_msg_id = 4;                           // 客户端幂等键
+    optional chatnow.message.ReplyRef reply_to = 5;     // 回复引用
+    repeated string mentioned_user_ids = 6;             // @提及
+    optional chatnow.message.ForwardInfo forward_info = 7; // 转发来源
+}
+
+message SendMessageRsp {
+    chatnow.common.ResponseHeader header = 1;
+    chatnow.message.Message message = 2;                // 组装后的完整消息
 }

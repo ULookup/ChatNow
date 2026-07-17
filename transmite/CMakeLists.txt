@@ -7,7 +7,7 @@ set(target "transmite_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files common/types.proto common/error.proto common/envelope.proto message/message_types.proto transmite/transmite_service.proto)
+set(proto_files common/types.proto common/error.proto common/envelope.proto common/auth/metadata.proto message/message_types.proto identity/identity_service.proto conversation/conversation_service.proto message/message_service.proto message/message_internal.proto transmite/transmite_service.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
@@ -40,22 +40,6 @@ target_link_libraries(${target} -lgflags -lspdlog
     -lcpprest -lcurl -lamqpcpp -lev
     -lhiredis -lredis++)
 
-set(test_client "transmite_client")
-# 4. 获取源码目录下的所有源码文件
-set(test_files ${CMAKE_CURRENT_SOURCE_DIR}/test/transmite_client.cc)
-# 5. 声明目标及依赖
-add_executable(${test_client} ${test_files} ${proto_srcs})
-
-target_link_libraries(${test_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
-
-set(trans_user_client "trans_user_client")
-# 4. 获取源码目录下的所有源码文件
-set(trans_user_files ${CMAKE_CURRENT_SOURCE_DIR}/test/trans_user_client.cc)
-# 5. 声明目标及依赖
-add_executable(${trans_user_client} ${trans_user_files} ${proto_srcs})
-
-target_link_libraries(${trans_user_client} -lgtest -lgflags -lspdlog -lfmt -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api -lcpprest -lcurl /usr/local/lib/libjsoncpp.so.19)
-
 # 6. 设置头文件默认搜索路径
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
@@ -63,4 +47,4 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../odb)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../third/include)
 # 7. 设置需要连接的库
 # 8. 设置安装路径
-INSTALL(TARGETS ${target} ${trans_user_client} ${test_client} RUNTIME DESTINATION bin)
+INSTALL(TARGETS ${target} RUNTIME DESTINATION bin)

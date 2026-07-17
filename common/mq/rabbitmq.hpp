@@ -187,8 +187,12 @@ public:
         }
         post_task([this, exchange, routing_key, body, headers, callback]() {
             AMQP::Envelope env(body.data(), body.size());
-            for (const auto &kv : headers) {
-                env.setHeader(kv.first, kv.second);
+            if (!headers.empty()) {
+                AMQP::Table hdrs;
+                for (const auto &kv : headers) {
+                    hdrs[kv.first] = kv.second;
+                }
+                env.setHeaders(hdrs);
             }
             _reliable->publish(exchange, routing_key, env)
                 .onAck  ([callback]()                  { if(callback) callback(PublishStatus::Acked,  "broker 已确认"); })
@@ -254,10 +258,11 @@ public:
                                             bool redelivered) {
                     std::map<std::string, std::string> headers;
                     const auto &table = message.headers();
-                    for (const auto &kv : table) {
-                        // AMQP::Field 仅在为字符串类型时取出；其他类型转为字符串表示
-                        if (kv.second.isString()) {
-                            headers[kv.first] = std::string(kv.second);
+                    // AMQP::Table 不支持 begin/end 迭代，按需提取已知 key
+                    if (table.contains("trace_id")) {
+                        const auto &field = table["trace_id"];
+                        if (field.isString()) {
+                            headers["trace_id"] = std::string(field);
                         }
                     }
                     try {

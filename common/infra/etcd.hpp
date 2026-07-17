@@ -47,7 +47,7 @@ public:
         try {
             // 撤销 lease，关联的 key 立刻失效；旧实现错调 Lease() 实际是 getter
             _keep_alive->Cancel();
-            _client->lease_revoke(_lease_id).wait();
+            _client->leaserevoke(_lease_id).wait();
         } catch(...) { /* 析构吞异常 */ }
     }
 
@@ -101,29 +101,50 @@ public:
               const NotifyCallback &put_cb,
               const NotifyCallback &del_cb)
         : _client(std::make_shared<etcd::Client>(host)),
+          _basedir(basedir),
           _put_cb(put_cb), _del_cb(del_cb)
     {
-        // 1) 全量拉取 basedir 下当前 key，触发 PUT 回调
-        auto resp = _client->ls(basedir).get();
-        if(!resp.is_ok()) {
-            LOG_ERROR("拉取 etcd basedir={} 失败: {}", basedir, resp.error_message());
-        } else {
-            for(int i = 0; i < static_cast<int>(resp.keys().size()); ++i) {
-                if(_put_cb) _put_cb(resp.key(i), resp.value(i).as_string());
-            }
-        }
+        full_sync_();
         // 2) 长轮询监听增量事件
         _watcher = std::make_shared<etcd::Watcher>(
             *_client.get(), basedir,
             std::bind(&Discovery::callback, this, std::placeholders::_1),
             true);
+        // 3) 定时全量刷新兜底：Watcher 长连接断开可能丢事件，每隔 kRefreshSec 全量 ls 一次
+        _refresh_running = true;
+        _refresh_thread = std::thread([this]() {
+            while (_refresh_running) {
+                std::this_thread::sleep_for(std::chrono::seconds(kRefreshSec));
+                if (!_refresh_running) break;
+                try {
+                    full_sync_();
+                } catch (std::exception &e) {
+                    LOG_ERROR("Discovery 定时刷新异常: {}", e.what());
+                }
+            }
+        });
     }
 
     ~Discovery() {
+        _refresh_running = false;
+        if (_refresh_thread.joinable()) _refresh_thread.join();
         try { if(_watcher) _watcher->Cancel(); } catch(...) {}
     }
 
 private:
+    static constexpr int kRefreshSec = 30;  // 每 30s 全量 ls 一次，补齐丢掉的增量事件
+
+    void full_sync_() {
+        auto resp = _client->ls(_basedir).get();
+        if(!resp.is_ok()) {
+            LOG_ERROR("拉取 etcd basedir={} 失败: {}", _basedir, resp.error_message());
+            return;
+        }
+        for(int i = 0; i < static_cast<int>(resp.keys().size()); ++i) {
+            if(_put_cb) _put_cb(resp.key(i), resp.value(i).as_string());
+        }
+    }
+
     void callback(const etcd::Response &resp) {
         if(!resp.is_ok()) {
             LOG_ERROR("收到错误的事件通知: {}", resp.error_message());
@@ -142,8 +163,11 @@ private:
 
     NotifyCallback _put_cb;
     NotifyCallback _del_cb;
+    std::string _basedir;
     std::shared_ptr<etcd::Client> _client;
     std::shared_ptr<etcd::Watcher> _watcher;
+    std::atomic<bool> _refresh_running{false};
+    std::thread _refresh_thread;
 };
 
 } // namespace chatnow

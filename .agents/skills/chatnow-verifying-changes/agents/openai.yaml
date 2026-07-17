@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify ChatNow Changes"
+  short_description: "Collect fresh evidence before ChatNow completion claims"
+  default_prompt: "Use $chatnow-verifying-changes to verify and report this ChatNow change."

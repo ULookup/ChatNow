@@ -84,6 +84,24 @@ public:
         return res;
     }
 
+    /* brief: 更新 bucket + object_key（并发去重改名时用） */
+    bool update_bucket_key(const std::string& file_id, const std::string& bucket, const std::string& object_key) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<MediaFile>;
+            auto row = _db->query_one<MediaFile>(query::file_id == file_id);
+            if (!row) { trans.commit(); return false; }
+            row->bucket(bucket);
+            row->object_key(object_key);
+            _db->update(*row);
+            trans.commit();
+        } catch (std::exception& e) {
+            LOG_ERROR("media_file update_bucket_key 失败: file_id={} err={}", file_id, e.what());
+            return false;
+        }
+        return true;
+    }
+
     /* brief: 更新 status，调用方在外层完成 ref_count++/quota++ 等业务动作 */
     bool update_status(const std::string& file_id, MediaFileStatus status) {
         try {
@@ -108,7 +126,7 @@ public:
             odb::transaction trans(_db->begin());
             using query = odb::query<MediaFile>;
             auto r = _db->query<MediaFile>(
-                ((query::status == static_cast<unsigned char>(MediaFileStatus::PENDING)) &&
+                ((query::status == MediaFileStatus::PENDING) &&
                  (query::uploaded_at < cutoff)) +
                 (" LIMIT " + std::to_string(limit)));
             for (auto& f : r) v.push_back(f);
@@ -126,7 +144,7 @@ public:
             odb::transaction trans(_db->begin());
             using query = odb::query<MediaFile>;
             auto r = _db->query<MediaFile>(
-                ((query::status == static_cast<unsigned char>(MediaFileStatus::QUARANTINED)) &&
+                ((query::status == MediaFileStatus::QUARANTINED) &&
                  (query::uploaded_at < cutoff)) +
                 (" LIMIT " + std::to_string(limit)));
             for (auto& f : r) v.push_back(f);
@@ -144,7 +162,7 @@ public:
             odb::transaction trans(_db->begin());
             using query = odb::query<MediaFile>;
             auto r = _db->query<MediaFile>(
-                ((query::status == static_cast<unsigned char>(MediaFileStatus::COMMITTED)) &&
+                ((query::status == MediaFileStatus::COMMITTED) &&
                  (query::uploaded_at > cursor)) +
                 " ORDER BY " + query::uploaded_at +
                 (" LIMIT " + std::to_string(limit)));
@@ -164,8 +182,8 @@ public:
             using query = odb::query<MediaFile>;
             auto r = _db->query<MediaFile>(
                 (query::content_hash == hash) &&
-                ((query::status == static_cast<unsigned char>(MediaFileStatus::DELETED)) ||
-                 (query::status == static_cast<unsigned char>(MediaFileStatus::QUARANTINED))));
+                ((query::status == MediaFileStatus::DELETED) ||
+                 (query::status == MediaFileStatus::QUARANTINED)));
             for (auto& f : r) v.push_back(f);
             trans.commit();
         } catch (std::exception& e) {
@@ -182,7 +200,7 @@ public:
             using query = odb::query<MediaFile>;
             auto r = _db->query<MediaFile>(
                 (query::owner_id == owner_id) &&
-                (query::status == static_cast<unsigned char>(MediaFileStatus::PENDING)));
+                (query::status == MediaFileStatus::PENDING));
             for (auto& f : r) total += f.file_size();
             trans.commit();
         } catch (std::exception& e) {

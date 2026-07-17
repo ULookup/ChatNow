@@ -1,6 +1,16 @@
 syntax = "proto3";
 package chatnow.common;
 
+enum DevicePlatform {
+    DEVICE_PLATFORM_UNSPECIFIED = 0;
+    IOS = 1;
+    ANDROID = 2;
+    WEB = 3;
+    DESKTOP_WIN = 4;
+    DESKTOP_MAC = 5;
+    DESKTOP_LINUX = 6;
+}
+
 message UserInfo {
     string user_id = 1;
     string nickname = 2;

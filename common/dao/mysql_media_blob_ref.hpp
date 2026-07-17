@@ -42,7 +42,7 @@ public:
         return res;
     }
 
-    /* brief: 不存在则插入（ref_count 初始 0），存在则不动；并发安全靠主键唯一约束 */
+    /* brief: 不存在则插入（ref_count 初始 0），存在则不动；并发抢插靠捕获 unique 冲突 */
     bool upsert(const MediaBlobRef& r) {
         try {
             odb::transaction trans(_db->begin());
@@ -50,7 +50,11 @@ public:
             auto existing = _db->query_one<MediaBlobRef>(query::content_hash == r.content_hash());
             if (!existing) {
                 MediaBlobRef tmp = r;
-                _db->persist(tmp);
+                try {
+                    _db->persist(tmp);
+                } catch (const odb::object_already_persistent&) {
+                    // 并发 upsert 先一步插入 — 可以接受，行已存在
+                }
             }
             trans.commit();
         } catch (std::exception& e) {

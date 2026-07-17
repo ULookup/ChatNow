@@ -1,0 +1,4 @@
+interface:
+  display_name: "ChatNow Architecture Orientation"
+  short_description: "Map ChatNow architecture and core flows from source"
+  default_prompt: "Use $chatnow-orienting to map affected ChatNow services and invariants."

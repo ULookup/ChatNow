@@ -28,6 +28,24 @@ inline constexpr int32_t kAuthVerifyCodeExpired     = 1007;
 inline constexpr int32_t kAuthRefreshTokenReused    = 1008;
 inline constexpr int32_t kAuthDeviceRevoked         = 1009;
 
+// 2000-2999 关系（与 proto/common/error.proto 同步）
+inline constexpr int32_t kRelationshipAlreadyFriends   = 2001;
+inline constexpr int32_t kRelationshipNotFriends       = 2002;
+inline constexpr int32_t kRelationshipBlocked          = 2003;
+inline constexpr int32_t kRelationshipRequestPending   = 2004;
+
+// 3000-3999 会话（与 proto/common/error.proto 同步）
+inline constexpr int32_t kConversationNotFound         = 3001;
+inline constexpr int32_t kConversationNotMember        = 3002;
+inline constexpr int32_t kConversationNoPermission     = 3003;
+inline constexpr int32_t kConversationMemberLimit      = 3004;
+
+// 4000-4999 消息（与 proto/common/error.proto 同步）
+inline constexpr int32_t kMessageNotFound          = 4001;
+inline constexpr int32_t kMessageRecallTimeout     = 4002;
+inline constexpr int32_t kMessageAlreadyRecalled   = 4003;
+inline constexpr int32_t kMessageContentInvalid    = 4004;
+
 // 5000-5999 媒体（P4，与 proto/common/error.proto 同步）
 inline constexpr int32_t kMediaFileTooLarge        = 5001;
 inline constexpr int32_t kMediaUnsupportedFormat   = 5002;
@@ -42,5 +60,6 @@ inline constexpr int32_t kSystemInternalError      = 9001;
 inline constexpr int32_t kSystemUnavailable        = 9002;
 inline constexpr int32_t kSystemTimeout            = 9003;
 inline constexpr int32_t kSystemInvalidArgument    = 9004;
+inline constexpr int32_t kNotImplemented           = 9005;
 
 }  // namespace chatnow::error

@@ -10,8 +10,6 @@ services:
       - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
       - ETCD_ADVERTISE_CLIENT_URLS=http://0.0.0.0:2379
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       - ./middle/data/etcd:/var/lib/etcd:rw
     ports:
       - 2379:2379
@@ -20,33 +18,104 @@ services:
     image: mysql:8.0.44
     container_name: mysql-service
     environment:
-      MYSQL_ROOT_PASSWORD: YHY060403
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       - ./sql:/docker-entrypoint-initdb.d/:rw
       - ./middle/data/mysql:/var/lib/mysql:rw
     ports:
       - 3306:3306
     restart: always
-  redis:
-    image: redis:7.0.15
-    container_name: redis-service
+  redis-node1:
+    image: redis:7.2.5
+    container_name: redis-node1
+    command: redis-server --port 6379 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-1.aof
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      - ./middle/data/redis:/var/lib/redis:rw
+      - ./middle/data/redis/node1:/data:rw
     ports:
-      - 6379:6379
+      - "6379:6379"
     restart: always
+
+  redis-node2:
+    image: redis:7.2.5
+    container_name: redis-node2
+    command: redis-server --port 6380 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-2.aof
+    volumes:
+      - ./middle/data/redis/node2:/data:rw
+    ports:
+      - "6380:6380"
+    restart: always
+
+  redis-node3:
+    image: redis:7.2.5
+    container_name: redis-node3
+    command: redis-server --port 6381 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-3.aof
+    volumes:
+      - ./middle/data/redis/node3:/data:rw
+    ports:
+      - "6381:6381"
+    restart: always
+
+  redis-node4:
+    image: redis:7.2.5
+    container_name: redis-node4
+    command: redis-server --port 6382 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-4.aof
+    volumes:
+      - ./middle/data/redis/node4:/data:rw
+    ports:
+      - "6382:6382"
+    restart: always
+
+  redis-node5:
+    image: redis:7.2.5
+    container_name: redis-node5
+    command: redis-server --port 6383 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-5.aof
+    volumes:
+      - ./middle/data/redis/node5:/data:rw
+    ports:
+      - "6383:6383"
+    restart: always
+
+  redis-node6:
+    image: redis:7.2.5
+    container_name: redis-node6
+    command: redis-server --port 6384 --cluster-enabled yes --cluster-config-file /data/nodes.conf --cluster-node-timeout 5000 --appendonly yes --appendfilename appendonly-6.aof
+    volumes:
+      - ./middle/data/redis/node6:/data:rw
+    ports:
+      - "6384:6384"
+    restart: always
+
+  redis-cluster-init:
+    image: redis:7.2.5
+    container_name: redis-cluster-init
+    depends_on:
+      - redis-node1
+      - redis-node2
+      - redis-node3
+      - redis-node4
+      - redis-node5
+      - redis-node6
+    entrypoint: |
+      /bin/sh -c "
+      echo 'Waiting for all Redis nodes...' &&
+      sleep 10 &&
+      echo 'Creating 3-master 3-slave cluster...' &&
+      echo yes | redis-cli --cluster create \
+        redis-node1:6379 redis-node2:6380 redis-node3:6381 \
+        redis-node4:6382 redis-node5:6383 redis-node6:6384 \
+        --cluster-replicas 1 &&
+      echo 'Verifying cluster...' &&
+      redis-cli --cluster check redis-node1:6379 &&
+      echo 'Cluster ready.' &&
+      tail -f /dev/null
+      "
+    restart: "no"
   elasticsearch:
     image: elasticsearch:7.17.21
     container_name: elasticsearch-service
     environment:
       - "discovery.type=single-node"
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       - ./middle/data/elasticsearch:/var/lib/elasticsearch:rw
     ports:
       - 9200:9200
@@ -57,22 +126,18 @@ services:
     container_name: rabbitmq-service
     environment:
       RABBITMQ_DEFAULT_USER: root
-      RABBITMQ_DEFAULT_PASS: YHY060403
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
       - ./middle/data/rabbitmq:/var/lib/rabbitmq:rw
     ports:
       - 5672:5672
     restart: always
-  file_server:
-    build: ./file
-    container_name: file_server-service
+  media_server:
+    build: ./media
+    container_name: media_server-service
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/file_server.conf:/im/conf/file_server.conf
+      - ./conf/docker/media_server.conf:/im/conf/media_server.conf
+      - ./conf/media.json:/im/conf/media.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -81,17 +146,15 @@ services:
     restart: always
     depends_on:
       - etcd
+      - mysql
+      - redis-cluster-init
     entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/file_server -flagfile=/im/conf/file_server.conf"
-  friend_server:
-    build: ./friend
-    container_name: friend_server-service
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384 -c "/im/bin/media_server -flagfile=/im/conf/media_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
+  relationship_server:
+    build: ./relationship
+    container_name: relationship_server-service
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/friend_server.conf:/im/conf/friend_server.conf
+      - ./conf/docker/relationship_server.conf:/im/conf/relationship_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -103,16 +166,31 @@ services:
       - mysql
       - elasticsearch
     entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200 -c "/im/bin/friend_server -flagfile=/im/conf/friend_server.conf"
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,elasticsearch:9200 -c "/im/bin/relationship_server -flagfile=/im/conf/relationship_server.conf"
+  conversation_server:
+    build: ./conversation
+    container_name: conversation_server-service
+    volumes:
+      - ./conf/docker/conversation_server.conf:/im/conf/conversation_server.conf
+      - ./middle/data/logs:/var/lib/logs:rw
+      - ./middle/data/data:/var/lib/data:rw
+      - ./entrypoint.sh:/im/bin/entrypoint.sh
+    ports:
+      - 10007:10007
+    restart: always
+    depends_on:
+      - etcd
+      - mysql
+      - redis-cluster-init
+      - elasticsearch
+    entrypoint:
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384,elasticsearch:9200 -c "/im/bin/conversation_server -flagfile=/im/conf/conversation_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   gateway_server:
     build: ./gateway
     container_name: gateway_server-service
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/gateway_server.conf:/im/conf/gateway_server.conf
+      - ./conf/docker/gateway_server.conf:/im/conf/gateway_server.conf
+      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -121,15 +199,15 @@ services:
     restart: always
     depends_on:
       - etcd
-      - redis
+      - redis-cluster-init
     entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379 -c "/im/bin/gateway_server -flagfile=/im/conf/gateway_server.conf"
+      /im/bin/entrypoint.sh -d etcd:2379,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384 -c "/im/bin/gateway_server -flagfile=/im/conf/gateway_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   push_server:
     build: ./push
     container_name: push_server-service
     volumes:
-      - ./conf/push_server.conf:/im/conf/push_server.conf
+      - ./conf/docker/push_server.conf:/im/conf/push_server.conf
+      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -139,18 +217,15 @@ services:
     restart: always
     depends_on:
       - etcd
-      - redis
+      - redis-cluster-init
       - rabbitmq
     entrypoint:
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,6379,5672 -c "/im/bin/push_server -flagfile=/im/conf/push_server.conf"
+      /im/bin/entrypoint.sh -d etcd:2379,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384,rabbitmq:5672 -c "/im/bin/push_server -flagfile=/im/conf/push_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   message_server:
     build: ./message
     container_name: message_server-service
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/message_server.conf:/im/conf/message_server.conf
+      - ./conf/docker/message_server.conf:/im/conf/message_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -162,36 +237,14 @@ services:
       - mysql
       - elasticsearch
       - rabbitmq
+      - redis-cluster-init
     entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,9200,5672 -c "/im/bin/message_server -flagfile=/im/conf/message_server.conf"
-  speech_server:
-    build: ./speech
-    container_name: speech_server-service
-    volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/speech_server.conf:/im/conf/speech_server.conf
-      - ./middle/data/logs:/var/lib/logs:rw
-      - ./middle/data/data:/var/lib/data:rw
-      - ./entrypoint.sh:/im/bin/entrypoint.sh
-    ports:
-      - 10001:10001
-    restart: always
-    depends_on:
-      - etcd
-    entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379 -c "/im/bin/speech_server -flagfile=/im/conf/speech_server.conf"
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384,elasticsearch:9200,rabbitmq:5672 -c "/im/bin/message_server -flagfile=/im/conf/message_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
   transmite_server:
     build: ./transmite
     container_name: transmite_server-service
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/transmite_server.conf:/im/conf/transmite_server.conf
+      - ./conf/docker/transmite_server.conf:/im/conf/transmite_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -202,17 +255,15 @@ services:
       - etcd
       - mysql
       - rabbitmq
+      - redis-cluster-init
     entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,5672 -c "/im/bin/transmite_server -flagfile=/im/conf/transmite_server.conf"
-  user_server:
-    build: ./user
-    container_name: user_server-service
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384,rabbitmq:5672 -c "/im/bin/transmite_server -flagfile=/im/conf/transmite_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384 -rate_limit_user_max=${TRANSMITE_RATE_LIMIT_USER_MAX:-600} -rate_limit_session_max=${TRANSMITE_RATE_LIMIT_SESSION_MAX:-3000}"
+  identity_server:
+    build: ./identity
+    container_name: identity_server-service
     volumes:
-      #1. 希望容器内的程序能访问宿主机上的文件
-      #2. 希望容器内程序运行所产生的数据文件能落在宿主机上
-      #3. 挂载的信息：nc指令文件 entrypoint.sh文件 数据目录（im/logs, im/data), 配置文件
-      - ./conf/user_server.conf:/im/conf/user_server.conf
+      - ./conf/docker/identity_server.conf:/im/conf/identity_server.conf
+      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -222,8 +273,23 @@ services:
     depends_on:
       - etcd
       - mysql
-      - redis
+      - redis-cluster-init
       - elasticsearch
     entrypoint:
-      # 与dockerfile的cmd类似---替代dockerfile的cmd
-      /im/bin/entrypoint.sh -h 10.0.4.10 -p 2379,3306,6379,9200 -c "/im/bin/user_server -flagfile=/im/conf/user_server.conf"
+      /im/bin/entrypoint.sh -d etcd:2379,mysql:3306,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384,elasticsearch:9200 -c "/im/bin/identity_server -flagfile=/im/conf/identity_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"
+  presence_server:
+    build: ./presence
+    container_name: presence_server-service
+    volumes:
+      - ./conf/docker/presence_server.conf:/im/conf/presence_server.conf
+      - ./middle/data/logs:/var/lib/logs:rw
+      - ./middle/data/data:/var/lib/data:rw
+      - ./entrypoint.sh:/im/bin/entrypoint.sh
+    ports:
+      - 9050:9050
+    restart: always
+    depends_on:
+      - etcd
+      - redis-cluster-init
+    entrypoint:
+      /im/bin/entrypoint.sh -d etcd:2379,redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384 -c "/im/bin/presence_server -flagfile=/im/conf/presence_server.conf -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384"

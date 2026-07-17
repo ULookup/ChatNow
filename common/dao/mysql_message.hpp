@@ -6,7 +6,7 @@
 #include "message-odb.hxx"
 #include <odb/mysql/database.hxx>
 #include <odb/mysql/connection.hxx>
-#include <odb/mysql/statement.hxx>
+#include <mysql/mysql.h>
 
 #include <memory>
 #include <string>
@@ -83,11 +83,100 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            res.reset(_db->query_one<Message>(
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(
                 query::user_id == user_id && query::client_msg_id == client_msg_id));
+            auto it = r.begin();
+            if (it != r.end()) res.reset(new Message(*it));
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("通过 client_msg_id 查询失败 {}-{}: {}", user_id, client_msg_id, e.what());
+        }
+        return res;
+    }
+
+    /* brief: 把消息软删为 RECALLED 状态；status=0→1 race-safe；返回是否更新成功 */
+    bool update_status_to_recalled(unsigned long mid) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == mid &&
+                                         query::status == MessageStatus::NORMAL));
+            auto it = r.begin();
+            if(it == r.end()) {
+                trans.commit();
+                return false;
+            }
+            Message m(*it);
+            m.status(MessageStatus::REVOKED);
+            m.content("");
+            m.revoke_time(boost::posix_time::microsec_clock::universal_time());
+            _db->update(m);
+            trans.commit();
+            return true;
+        } catch(std::exception &e) {
+            LOG_ERROR("update_status_to_recalled mid={} failed: {}", mid, e.what());
+            return false;
+        }
+    }
+
+    /* brief: 取会话内 max(seq_id)；SyncMessages latest_seq + SeqGen 回填 */
+    unsigned long select_max_seq_by_conversation(const std::string &cid) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(
+                (query::session_id == cid) + " ORDER BY " + query::seq_id + " DESC LIMIT 1"));
+            auto it = r.begin();
+            unsigned long seq = (it != r.end()) ? it->seq_id() : 0UL;
+            trans.commit();
+            return seq;
+        } catch(std::exception &e) {
+            LOG_ERROR("select_max_seq_by_conversation cid={} failed: {}", cid, e.what());
+            return 0UL;
+        }
+    }
+
+    /* brief: 取 [before_seq) 历史消息；按 seq_id DESC 排序，limit 条；过滤已删除 */
+    std::vector<Message> select_history(const std::string &cid,
+                                        unsigned long before_seq,
+                                        int limit) {
+        std::vector<Message> res;
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            odb::result<Message> r(_db->query<Message>(
+                (query::session_id == cid &&
+                 query::seq_id < before_seq &&
+                 query::status != MessageStatus::DELETED) +
+                "ORDER BY " + query::seq_id + " DESC LIMIT " + std::to_string(limit)));
+            for(auto it = r.begin(); it != r.end(); ++it) res.push_back(*it);
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("select_history cid={} before_seq={}: {}", cid, before_seq, e.what());
+        }
+        return res;
+    }
+
+    /* brief: 取 (after_seq, ...] 之后的消息；按 seq_id ASC 排序，limit 条；过滤已删除 */
+    std::vector<Message> select_after(const std::string &cid,
+                                      unsigned long after_seq,
+                                      int limit) {
+        std::vector<Message> res;
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<Message>;
+            odb::result<Message> r(_db->query<Message>(
+                (query::session_id == cid &&
+                 query::seq_id > after_seq &&
+                 query::status != MessageStatus::DELETED) +
+                "ORDER BY " + query::seq_id + " ASC LIMIT " + std::to_string(limit)));
+            for(auto it = r.begin(); it != r.end(); ++it) res.push_back(*it);
+            trans.commit();
+        } catch(std::exception &e) {
+            LOG_ERROR("select_after cid={} after_seq={}: {}", cid, after_seq, e.what());
         }
         return res;
     }
@@ -98,7 +187,10 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            res.reset(_db->query_one<Message>(query::message_id == message_id));
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == message_id));
+            auto it = r.begin();
+            if (it != r.end()) res.reset(new Message(*it));
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("按 message_id 查询失败 {}: {}", message_id, e.what());
@@ -220,15 +312,18 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            std::shared_ptr<Message> m(_db->query_one<Message>(query::message_id == message_id));
-            if(!m) {
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == message_id));
+            auto it = r.begin();
+            if(it == r.end()) {
                 trans.commit();
                 return false;
             }
-            m->status(MessageStatus::REVOKED);
-            m->revoke_time(boost::posix_time::microsec_clock::universal_time());
-            m->revoke_by(operator_id);
-            _db->update(*m);
+            Message m(*it);
+            m.status(MessageStatus::REVOKED);
+            m.revoke_time(boost::posix_time::microsec_clock::universal_time());
+            m.revoke_by(operator_id);
+            _db->update(m);
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("撤回消息失败 {}: {}", message_id, e.what());
@@ -242,13 +337,16 @@ public:
         try {
             odb::transaction trans(_db->begin());
             using query = odb::query<Message>;
-            std::shared_ptr<Message> m(_db->query_one<Message>(query::message_id == message_id));
-            if(!m) {
+            using result = odb::result<Message>;
+            result r(_db->query<Message>(query::message_id == message_id));
+            auto it = r.begin();
+            if(it == r.end()) {
                 trans.commit();
                 return false;
             }
-            m->status(MessageStatus::DELETED);
-            _db->update(*m);
+            Message m(*it);
+            m.status(MessageStatus::DELETED);
+            _db->update(m);
             trans.commit();
         } catch(std::exception &e) {
             LOG_ERROR("软删除消息失败 {}: {}", message_id, e.what());
@@ -280,13 +378,20 @@ public:
         try {
             auto &mysql_db = dynamic_cast<odb::mysql::database&>(*_db);
             auto conn = mysql_db.connection();
-            std::unique_ptr<odb::mysql::statement> stmt(
-                conn->create_statement());
-            stmt->execute(
-                "SELECT session_id, MAX(seq_id) AS max_seq FROM message GROUP BY session_id");
-            auto r = stmt->result_set();
-            while(r.next()) {
-                res.emplace_back(r.get_string(1), r.get_unsigned_long(2));
+            MYSQL* handle = conn->handle();
+            if (mysql_query(handle,
+                    "SELECT session_id, MAX(seq_id) AS max_seq FROM message GROUP BY session_id") == 0) {
+                MYSQL_RES* result = mysql_store_result(handle);
+                if (result) {
+                    MYSQL_ROW row;
+                    while ((row = mysql_fetch_row(result))) {
+                        unsigned long* lengths = mysql_fetch_lengths(result);
+                        std::string sid(row[0] ? row[0] : "", row[0] ? lengths[0] : 0);
+                        unsigned long max_seq = row[1] ? strtoul(row[1], nullptr, 10) : 0;
+                        res.emplace_back(std::move(sid), max_seq);
+                    }
+                    mysql_free_result(result);
+                }
             }
         } catch(std::exception &e) {
             LOG_ERROR("获取所有会话最大seq失败: {}", e.what());

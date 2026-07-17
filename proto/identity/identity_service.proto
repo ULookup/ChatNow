@@ -52,7 +52,9 @@ message RegisterReq {
 }
 message RegisterRsp {
     chatnow.common.ResponseHeader header = 1;
-    string user_id        = 2;
+    string user_id                 = 2;
+    AuthTokens tokens              = 3;
+    chatnow.common.UserInfo user_info = 4;
 }
 
 // ========== Login ==========
@@ -88,7 +90,10 @@ message LogoutRsp {
 
 message SendVerifyCodeReq {
     string request_id = 1;
-    string phone      = 2;
+    oneof destination {
+        string email = 2;
+        string phone = 3;
+    }
 }
 message SendVerifyCodeRsp {
     chatnow.common.ResponseHeader header        = 1;
@@ -111,7 +116,6 @@ message RefreshTokenRsp {
 message GetProfileReq {
     string request_id = 1;
     optional string user_id = 2;     // 空=查自己
-    optional string session_id = 3;  // TODO P7: 删除（横切 §2.8）
 }
 message GetProfileRsp {
     chatnow.common.ResponseHeader header = 1;
@@ -120,15 +124,10 @@ message GetProfileRsp {
 
 message UpdateProfileReq {
     string request_id = 1;
-    optional string user_id = 2;     // TODO P7: 删除（§2.8）
-    optional string session_id = 3;  // TODO P7: 删除（§2.8）
-    optional string nickname       = 4;
-    optional string bio            = 5;
-    // P4 改造：客户端只传 file_id（来自 MediaService.ApplyUpload + CompleteUpload）；
-    // 服务端校验 + 用 avatar_url::of(public_prefix, file_id) 计算公开 URL，
-    // 写入 user.avatar_id；响应里 UserInfo.avatar_url 是服务端拼出来的可达 URL。
-    optional string avatar_file_id = 6;
-    optional string phone          = 7;
+    optional string nickname       = 2;
+    optional string bio            = 3;
+    optional string avatar_file_id = 4;
+    optional string phone          = 5;
 }
 message UpdateProfileRsp {
     chatnow.common.ResponseHeader header = 1;
@@ -138,8 +137,6 @@ message UpdateProfileRsp {
 message SearchUsersReq {
     string request_id = 1;
     string search_key = 2;
-    optional string session_id = 3;  // TODO P7: 删除（§2.8）
-    optional string user_id    = 4;  // TODO P7: 删除（§2.8）
 }
 message SearchUsersRsp {
     chatnow.common.ResponseHeader     header = 1;

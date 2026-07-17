@@ -1,12 +1,12 @@
 # ChatNow 架构现状与未来优化方向
 
-> **版本**: v2.0 候选基线（含 `fix/v2.0-blockers-and-cleanup` 分支修复）
-> **日期**: 2026-05-13
-> **范围**: 重点是核心消息链路；外围（用户 / 好友 / 文件 / 语音）仅简述
+> **版本**: v3.0 开发线（`3.0-dev` 分支）
+> **日期**: 2026-05-19（更新）
+> **范围**: 核心消息链路 + 缓存基础设施 + 测试套件；外围（用户 / 好友 / 媒体 / 语音）简述
 
 ---
 
-## 一、当前架构（v2.0 候选基线）
+## 一、当前架构（v3.0 开发线）
 
 ### 1.1 服务拓扑
 
@@ -24,20 +24,20 @@
        ┌──────────┘ │ │ │ │ │ └──────────┐
        │            │ │ │ │ │            │
        ▼            ▼ ▼ ▼ ▼ ▼            ▼
-  ┌────────┐  ┌─────────────────┐    ┌────────┐
-  │  User  │  │ Friend / Chat / │    │ Speech │
-  │        │  │ File / ...      │    │        │
-  └────────┘  └─────────────────┘    └────────┘
-       ▲                                  ▲
-       │                                  │
-       │     ┌────────────────────────────┘
+  ┌──────────┐  ┌─────────────────────┐  ┌──────────┐
+  │ Identity │  │ Relationship /      │  │ Presence │
+  │          │  │ Conversation /      │  │          │
+  └──────────┘  │ Media / ...         │  └──────────┘
+       ▲        └─────────────────────┘       ▲
+       │                                      │
+       │     ┌────────────────────────────────┘
        │     │
    ┌───┴─────┴───┐    publish_confirm    ┌──────────────┐
    │  Transmite  │ ─────────────────────▶│  RabbitMQ    │
    │ (Ingest)    │   chat_msg_exchange   │ (FANOUT)     │
-   └─────────────┘                       └──┬────────┬──┘
-                                            │        │
-                                  msg_queue_db    msg_queue_es
+   │ + L1 Cache  │                       └──┬────────┬──┘
+   └─────────────┘                          │        │
+                                  msg_queue_db    es_index_queue
                                             │        │
                                             ▼        ▼
                                        ┌──────────────────┐
@@ -54,10 +54,10 @@
                                               ▼       ▼
                                        ┌─────────┐ ┌────┐
                                        │  Push   │ │ ES │
-                                       │ (9001)  │ └────┘
-                                       │ WS 终结  │
-                                       │ 路由表   │
-                                       │ ACK 重传 │
+                                       │ WS 9001 │ └────┘
+                                       │brpc10008│
+                                       │ L1 Route│
+                                       │ Cache   │
                                        └─────────┘
                                             │
                                       WS    │
@@ -75,24 +75,27 @@ Step 2  Gateway         → MsgTransmitService.GetTransmitTarget (brpc)
 Step 3  Transmite:
         │ a) SelectByClientMsg       幂等去重（client_msg_id 命中即返）
         │ b) RateLimiter.allow_*     用户级 + 会话级限流（固定窗口）
-        │ c) Members.list / RPC 回填  群成员列表（缓存优先）
-        │ d) SnowflakeId.Next()      worker_id 由 Redis 租约自动分配
-        │ e) SeqGen.next_session_seq Redis INCR 会话内单调
-        │ f) SeqGen.next_user_seq_batch (写扩散群批量；大群跳过)
-        │ g) Publisher.publish_confirm  → chat_msg_exchange (FANOUT)
-Step 4  RabbitMQ FANOUT  → msg_queue_db / msg_queue_es
+        │ c) resolve_members         群成员列表（L1 LocalCache → InflightRegistry → RedisMutex → Redis → RPC） 
+        │ d) resolve_user_info       用户信息（L1 LocalCache 缓存加速）
+        │ e) SnowflakeId.Next()      worker_id 由 etcd LeaderElection 自动分配
+        │ f) SeqGen.next_session_seq Redis INCR 会话内单调（多实例 RedisMutex 协调回填）
+        │ g) SeqGen.next_user_seq_batch (写扩散群批量；大群跳过)
+        │ h) Publisher.publish_confirm  → chat_msg_exchange (FANOUT)
+Step 4  RabbitMQ FANOUT  → msg_queue_db / es_index_queue
 Step 5  Message Service:
         │ DB consumer:
         │   a) 单事务: insert message + (写扩散群) user_timeline 批量
         │   b) 落库后 publish_confirm → msg_push_queue
-        │   c) 投递失败 → enqueue 到 PushOutbox (Redis ZSET) → reaper 重投
+        │   c) 投递失败 → enqueue 到 PushOutbox (Redis ZSET) → etcd LeaderElection reaper 重投
         │   d) redelivered 二次失败 → NackDiscard 进 DLX
         │ ES consumer:
-        │   仅 STRING 类型进索引；二次失败 NackDiscard
+        │   DB commit 后投递轻量 ESIndexEvent → es_index_exchange → onESIndexMessage
+        │   仅 STRING 类型进索引；失败落 ESOutbox (Redis ZSET) + reaper 重投
 Step 6  Push Service:
         │ a) onPushMessage: per-uid 注入 user_seq + 序列化
         │ b) UnackedPush.push (uid, user_seq, ts) → ZSET 等 ACK
-        │ c) 本机直推 / 跨实例 PushBatch (异步 brpc)
+        │ c) 查 L1 OnlineRoute 缓存 → 本机直推 / 跨实例 PushBatch (异步 brpc)
+        │ d) shutdown 时清理本地路由，stale reaper 接管未确认消息
 Step 7  Client → MSG_PUSH_ACK → push:
         │ UnackedPush.ack (zrem)
         │ 异步 UpdateAckSeq → message → DAO 原子 UPDATE GREATEST
@@ -103,30 +106,45 @@ Step 7  Client → MSG_PUSH_ACK → push:
 | 维度 | 实现 |
 |---|---|
 | 幂等 | `client_msg_id` 唯一索引 |
-| 单调 / 增量同步 | `(session_id, seq_id)` + `user_seq` 双游标 |
-| 多实例发号 | Redis 租约 + atomic 自动分配 worker_id |
-| 多实例推送 | `OnlineRoute` Redis SET<instance> + 跨实例 PushBatch |
+| 单调 / 增量同步 | `(conversation_id, seq_id)` + `user_seq` 双游标 |
+| 多实例发号 | etcd LeaderElection + `EtcdWorkIdAllocator` 自动分配 worker_id，失主拒绝出 ID |
+| 多实例推送 | `OnlineRoute` Redis SET<instance> + L1 本地缓存 + 跨实例 PushBatch |
 | ACK 收敛 | UnackedPush ZSET + DAO 原子 GREATEST |
 | 大群读扩散 | ≥200 切；timeline 仅写扩散群 |
 | MQ DLX | redelivered 二次失败 NackDiscard 入死信 |
 | 限流 | 用户级 + 会话级固定窗口 |
-| 兜底 reaper | PushOutbox 单实例 Lua 租约 + 重投 |
-| 防重号 | lease_lost watchdog 立即 abort |
+| 兜底 reaper | PushOutbox / ESOutbox / CrossInstanceOutbox 三路 reaper，统一 etcd LeaderElection 租约 |
+| 防重号 | `is_leader` 轮询 + 失主立即 abort |
+| **L1 多级缓存** | `LocalCache<T>` 进程内 LRU + `InflightRegistry` per-key 防击穿 + `RedisMutex` 跨实例互斥 + `randomized_ttl` 防雪崩 |
+| **缓存穿透防护** | sentinel 空值缓存（不存在的数据直接返回空，不穿透到 DB） |
+| **Redis 集群** | 6 节点 3M3S Cluster，`RedisClient::ptr` 统一适配单机 / Cluster 双模式 |
+| **统一选举** | etcd LeaderElection CAS 替代旧 Lua CAS（Snowflake + Outbox reaper + Media GC） |
+| **优雅退出** | Push shutdown 清理本地路由 + stale reaper 线程安全析构（正确 join） |
+| **Prometheus 告警** | Redis Cluster / LeaderElection / L1 cache 告警规则就位 |
 
-### 1.4 当前架构的核心短板
+### 1.4 当前架构的核心短板（2026-05-19 更新）
 
-| 短板 | 影响 | 修复优先级 |
-|---|---|---|
-| Publisher mandatory=false | broker 收到不等于 queue 收到，启动顺序错位会静默丢消息 | 高 |
-| 跨实例 PushBatch 失败仅 LOG_WARN | 不入 outbox / unacked 不带 payload，重发链路不闭合 | 高 |
-| 限流早于成员校验 | 攻击者伪造 uid 打爆受害人计数器 | 高 |
-| Members 缓存 read-then-compute | 与成员变更存在写扩散漏人窗口 | 中 |
-| 大群读/写扩散切换 | GetRecentMsg 未 union 两条路径，跨阈值会丢消息 | 中 |
-| fallback worker_id | Redis 不通时与正常 slot 撞号 | 中 |
-| 0 监控 | brpc bvar 未暴露；无 Prom / Grafana / 日志聚合 | 高 |
-| 无 healthcheck | 容器层依赖 restart: always | 中 |
-| 文件类消息走"客户端前置上传" | 失败后无 GC，孤儿文件累积 | 低 |
-| 限流是固定窗口 | 边界放行 ≈2N，对反爬不严格 | 低 |
+| 短板 | 影响 | 修复优先级 | 状态 |
+|---|---|---|---|
+| Publisher mandatory=false | broker 收到不等于 queue 收到，启动顺序错位会静默丢消息 | 高 | ⏳ 待修复 |
+| 跨实例 PushBatch 失败仅 LOG_WARN | 不入 outbox / unacked 不带 payload，重发链路不闭合 | 高 | ⏳ 待修复 |
+| 限流早于成员校验 | 攻击者伪造 uid 打爆受害人计数器 | 高 | ⏳ 待修复 |
+| Members 缓存 read-then-compute | 与成员变更存在写扩散漏人窗口 | 中 | 🟡 已有 L1 缓存但无版本号防竞态 |
+| 大群读/写扩散切换 | GetRecentMsg 未 union 两条路径，跨阈值会丢消息 | 中 | ⏳ 待修复 |
+| 0 监控 | brpc bvar 未暴露；无 Prom / Grafana / 日志聚合 | 高 | 🟡 Prometheus 告警规则已就位，Grafana / 日志聚合待建 |
+| 无 healthcheck | 容器层依赖 restart: always | 中 | ⏳ 待修复 |
+| 限流是固定窗口 | 边界放行 ≈2N，对反爬不严格 | 低 | ⏳ 待修复 |
+
+> **v3.0 已修复的 P0/P1 短板**：
+> - ~~fallback worker_id~~ → 改为 etcd LeaderElection，Redis 不可用时不发号（安全失败）
+> - ~~Outbox reaper Lua CAS~~ → 统一迁移到 etcd LeaderElection Transaction CAS
+> - ~~Snowflake polling 死循环~~ → 已修复竞争窗口
+> - ~~LeaderElection data race~~ → `_running` 改为 `std::atomic<bool>` + `condition_variable`
+> - ~~stale reaper 线程泄漏~~ → 析构时正确 join
+> - ~~单 Redis 无 HA~~ → 升级为 6 节点 3M3S Redis Cluster
+> - ~~无 L1 本地缓存~~ → `LocalCache<T>` + `InflightRegistry` + `RedisMutex` 体系
+> - ~~无缓存穿透防护~~ → sentinel null-cache
+> - ~~缓存雪崩风险~~ → `randomized_ttl` 随机偏移
 
 ---
 
@@ -134,9 +152,9 @@ Step 7  Client → MSG_PUSH_ACK → push:
 
 按"投入产出比 × 上线必要性"排序，分三档。
 
-### 2.1 第一优先级 — 上线候选必须补齐
+### 2.1 第一优先级 — 上线候选必须补齐（更新：2026-05-19）
 
-#### A. Publisher 一致性升级（B2.1）
+#### A. Publisher 一致性升级（仍待修复）
 **问题**：`publish_confirm` 在 `mandatory=false` 下，broker 接收 ≠ 至少有一个 queue 接收。Transmite 先于 message 起，exchange 已声明但无 binding，FANOUT 直接 drop。
 
 **方向**：
@@ -152,28 +170,20 @@ Step 7  Client → MSG_PUSH_ACK → push:
 - 跨实例 PushBatch 失败 → 入 outbox 或本端 unacked 提前抢救
 - 长尾路径：每个 uid 一条 dead-letter Sorted Set，超过 N 次重发的 user_seq 进入「需要客户端主动 pull」状态
 
-#### C. 安全闸门
-**问题**：限流键直接用请求里的 `uid`，攻击者可以把任意 uid 打爆。
-
-**方向**：
-- 限流前先做 Members 校验（已经查过，只是顺序问题）
-- 限流键改为 (request_uid, real_session_uid) 复合，攻击者打不到第三方
-- 配套：内容审核接入（敏感词 / 反垃圾），先做被动埋点 → 后做主动拦截
-
-#### D. 监控与可观测性
+#### C. 监控与可观测性升级
 **问题**：v2.0 是 0 监控，链路出问题靠 grep 日志。
 
 **方向（按工作量分层）**：
 
-| 层级 | 内容 | 工时 |
-|---|---|---|
-| L1 | brpc 内置 `/status /vars /rpcz /health` 暴露 | 1 天 |
-| L2 | Prometheus + Grafana + 中间件 exporter (rabbitmq, redis, mysql, es) | 3-5 天 |
-| L3 | 业务 bvar：`message_publish_total / unacked_size / push_outbox_lag / lease_lost_total / dlx_total / rate_limited_total` | 1 周 |
-| L4 | OpenTelemetry C++ + Jaeger 全链路 | 1-2 周 |
-| L5 | promtail/Filebeat → Loki/ES 日志聚合 | 2-3 天 |
+| 层级 | 内容 | 工时 | 状态 |
+|---|---|---|---|
+| L1 | brpc 内置 `/status /vars /rpcz /health` 暴露 | 1 天 | ⏳ 待做 |
+| L2 | Prometheus + Grafana + 中间件 exporter (rabbitmq, redis, mysql, es) | 3-5 天 | 🟡 Prometheus 告警规则已就位（`scripts/prometheus/redis_alerts.yml`），Grafana 待建 |
+| L3 | 业务 bvar：`message_publish_total / unacked_size / push_outbox_lag / lease_lost_total / dlx_total / rate_limited_total` | 1 周 | ⏳ 待做 |
+| L4 | OpenTelemetry C++ + Jaeger 全链路 | 1-2 周 | ⏳ 待做 |
+| L5 | promtail/Filebeat → Loki/ES 日志聚合 | 2-3 天 | ⏳ 待做 |
 
-**最低生产监控套件 5 条告警**：DLX 增量异常 / outbox 积压 > 1000 / lease_lost > 0 / ACK 收敛 P99 > 30s / 在线连接突降 50%。
+**现有 Prometheus 告警覆盖**：Redis Cluster 节点 down / 内存使用率 > 80% / LeaderElection lease_lost > 0 / L1 cache 命中率骤降。
 
 ---
 
@@ -259,15 +269,15 @@ Step 7  Client → MSG_PUSH_ACK → push:
 
 ---
 
-## 三、立刻可做 vs 渐进做（优先级矩阵）
+## 三、立刻可做 vs 渐进做（优先级矩阵，2026-05-19 更新）
 
 ```
                   立刻做                    可灰度做
                 ┌───────────────────┐  ┌───────────────────┐
    高影响       │ A Publisher 一致性 │  │ E Members 竞态    │
                 │ B 推送链路闭环      │  │ F 大群迁移期       │
-                │ C 限流安全          │  │ I Outbox 模式      │
-                │ D L1/L3 监控        │  │ K 多活             │
+                │ D L1/L3 监控        │  │ I Outbox 模式      │
+                │ C 限流安全          │  │ K 多活             │
                 └───────────────────┘  └───────────────────┘
                 ┌───────────────────┐  ┌───────────────────┐
    低影响       │ N healthcheck      │  │ G 文件链路        │
@@ -278,16 +288,18 @@ Step 7  Client → MSG_PUSH_ACK → push:
                 └───────────────────┘  └───────────────────┘
 ```
 
+> **v3.0 已完成**：Redis Cluster 化 ✅ / L1 多级缓存体系 ✅ / LeaderElection 统一选举 ✅ / 服务全部迁移到新 proto ✅ / 测试套件（Go func + perf） ✅ / Prometheus 告警规则 ✅
+
 **建议路线**：
 
-- v2.1（2 周）：A + B + C + D 的 L1/L3 + N + O — 让上线候选真正进生产
-- v2.2（1 月）：E + F + I + L4 OpenTelemetry — 容量与一致性
-- v2.3 之后（季度级）：G/H/J/K/L/M — 长期演进
+- v3.1（2 周）：A + B + C + D 的 L1 — 补齐发送和推送链路的最后一段
+- v3.2（1 月）：E + F + I + D 的 L2/L4（Grafana + OpenTelemetry） — 容量与可观测性
+- v3.3 之后（季度级）：G/H/J/K/L/M — 长期演进
 
 ---
 
 ## 四、一句话总结
 
-**当前架构**：v2.0 已经从"单 Gateway 直推 + 单事务写扩散"演进到"Ingest / Store / Push 三角架构 + 增量同步双游标 + 高可用兜底"，本 PR 修完后核心链路通畅、ACK 闭环、多实例可路由、关停安全。
+**当前架构**：v3.0 已经从 v2.0 的"Ingest / Store / Push 三角架构"进一步演进为"Ingest(+L1 Cache) / Store / Push(+L1 Route Cache) + Redis Cluster + etcd LeaderElection 统一选举 + 多级缓存防护体系"。8 个服务全部迁移到新 proto 域命名空间，9 个服务容器化部署（含 Presence），Go 功能/性能测试套件就位。
 
-**下一步重点**：把"publisher → broker → consumer → push → client"这条链上的每一段都从"best-effort"变成"可观测 + 可恢复 + 可重试 + 可审计"。第一优先级是 Publisher mandatory + 推送闭环 + 监控 — 没这三样，再多业务 feature 都是在沙地盖楼。
+**下一步重点**：把"publisher → broker → consumer → push → client"这条链上的每一段都从"best-effort"变成"可观测 + 可恢复 + 可重试 + 可审计"。第一优先级是 Publisher mandatory + 推送闭环 + 监控可视化 — 没这三样，再多业务 feature 都是在沙地盖楼。

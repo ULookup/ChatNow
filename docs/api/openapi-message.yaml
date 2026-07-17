@@ -1,0 +1,622 @@
+openapi: 3.1.0
+info:
+  title: ChatNow Message API
+  version: 3.0.0
+  description: |
+    消息域。Proto: proto/message/message_service.proto
+    Service: chatnow.message.MessageService
+    注意: sync 接口超时 10s（长轮询），其余 3s。
+
+servers:
+  - url: http://localhost:9000
+    description: Gateway HTTP
+
+security:
+  - bearerAuth: []
+
+paths:
+  /service/message/sync:
+    post:
+      summary: 同步消息（长轮询）
+      description: 超时 10000ms。传入 after_seq 拉取该会话的新消息。
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: SyncMessages, request: SyncMessagesReq, response: SyncMessagesRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SyncMessagesReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SyncMessagesRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/get_history:
+    post:
+      summary: 获取历史消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: GetHistory, request: GetHistoryReq, response: GetHistoryRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetHistoryReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetHistoryRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/get_by_id:
+    post:
+      summary: 按ID批量获取消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: GetMessagesById, request: GetMessagesByIdReq, response: GetMessagesByIdRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetMessagesByIdReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetMessagesByIdRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/search:
+    post:
+      summary: 搜索消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: SearchMessages, request: SearchMessagesReq, response: SearchMessagesRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SearchMessagesReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SearchMessagesRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/recall:
+    post:
+      summary: 撤回消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: RecallMessage, request: RecallMessageReq, response: RecallMessageRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/RecallMessageReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/add_reaction:
+    post:
+      summary: 添加表情回应
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: AddReaction, request: AddReactionReq, response: AddReactionRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/AddReactionReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/remove_reaction:
+    post:
+      summary: 移除表情回应
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: RemoveReaction, request: RemoveReactionReq, response: RemoveReactionRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/RemoveReactionReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/get_reactions:
+    post:
+      summary: 获取表情回应列表
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: GetReactions, request: GetReactionsReq, response: GetReactionsRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/GetReactionsReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/GetReactionsRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/pin:
+    post:
+      summary: 置顶消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: PinMessage, request: PinMessageReq, response: PinMessageRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/PinMessageReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/unpin:
+    post:
+      summary: 取消置顶消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: UnpinMessage, request: UnpinMessageReq, response: UnpinMessageRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UnpinMessageReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/list_pinned:
+    post:
+      summary: 置顶消息列表
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: ListPinnedMessages, request: ListPinnedReq, response: ListPinnedRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ListPinnedReq' }
+      responses:
+        '200':
+          description: 成功
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/ListPinnedRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/delete:
+    post:
+      summary: 删除消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: DeleteMessages, request: DeleteMessagesReq, response: DeleteMessagesRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/DeleteMessagesReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/clear:
+    post:
+      summary: 清空会话消息
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: ClearConversation, request: ClearConversationReq, response: ClearConversationRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ClearConversationReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/update_read_ack:
+    post:
+      summary: 更新已读确认
+      description: 标记会话中已读到的最大 seq_id，用于已读回执。
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: UpdateReadAck, request: UpdateReadAckReq, response: UpdateReadAckRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/UpdateReadAckReq' }
+      responses:
+        '200': { $ref: '#/components/responses/Success' }
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/message/select_by_client_msg_id:
+    post:
+      summary: 按客户端消息ID查询
+      description: 通过 client_msg_id 幂等查找消息，用于断网重发去重。命中返回已有消息，未命中返回空。
+      tags: [Message]
+      x-protobuf: { service: chatnow.message.MessageService, rpc: SelectByClientMsgId, request: SelectByClientMsgIdReq, response: SelectByClientMsgIdRsp, file: proto/message/message_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/SelectByClientMsgIdReq' }
+      responses:
+        '200':
+          description: 成功（命中时 message 非空，未命中时 message 为空）
+          content:
+            application/x-protobuf:
+              schema:
+                allOf:
+                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: '#/components/schemas/SelectByClientMsgIdRsp'
+        '4xx': { $ref: '#/components/responses/BusinessError' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Success:
+      description: 成功（仅 ResponseHeader，无额外数据）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+    BusinessError:
+      description: 业务错误（error_code != 0）
+      content:
+        application/x-protobuf:
+          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+
+  schemas:
+    MessageType:
+      x-protobuf: { message: MessageType, file: proto/message/message_types.proto }
+      type: integer
+      description: 0=UNSPECIFIED, 1=TEXT, 2=IMAGE, 3=FILE, 4=AUDIO, 5=VIDEO, 6=LOCATION, 7=STICKER, 8=SYSTEM_NOTICE
+
+    MessageStatus:
+      x-protobuf: { message: MessageStatus, file: proto/message/message_types.proto }
+      type: integer
+      description: 0=NORMAL, 1=RECALLED, 2=DELETED
+
+    MessageContent:
+      x-protobuf: { message: MessageContent, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        type: { $ref: '#/components/schemas/MessageType' }
+        body:
+          oneOf:
+            - { $ref: '#/components/schemas/TextContent' }
+            - { $ref: '#/components/schemas/ImageContent' }
+            - { $ref: '#/components/schemas/FileContent' }
+            - { $ref: '#/components/schemas/AudioContent' }
+            - { $ref: '#/components/schemas/VideoContent' }
+            - { $ref: '#/components/schemas/LocationContent' }
+            - { $ref: '#/components/schemas/StickerContent' }
+            - { $ref: '#/components/schemas/SystemNoticeContent' }
+
+    TextContent:
+      type: object
+      properties: { text: { type: string } }
+
+    ImageContent:
+      type: object
+      properties:
+        file_id: { type: string }
+        width: { type: integer }
+        height: { type: integer }
+        thumbnail_url: { type: string }
+
+    FileContent:
+      type: object
+      properties:
+        file_id: { type: string }
+        file_name: { type: string }
+        file_size: { type: integer, format: int64 }
+        mime_type: { type: string }
+
+    AudioContent:
+      type: object
+      properties:
+        file_id: { type: string }
+        duration_sec: { type: integer }
+
+    VideoContent:
+      type: object
+      properties:
+        file_id: { type: string }
+        duration_sec: { type: integer }
+        width: { type: integer }
+        height: { type: integer }
+        thumbnail_url: { type: string }
+
+    LocationContent:
+      type: object
+      properties:
+        latitude: { type: number, format: double }
+        longitude: { type: number, format: double }
+        name: { type: string }
+        address: { type: string }
+
+    StickerContent:
+      type: object
+      properties:
+        sticker_id: { type: string }
+        pack_id: { type: string }
+
+    SystemNoticeContent:
+      type: object
+      properties:
+        text: { type: string }
+        notice_type: { type: string }
+
+    Message:
+      x-protobuf: { message: Message, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        message_id: { type: integer, format: int64 }
+        conversation_id: { type: string }
+        content: { $ref: '#/components/schemas/MessageContent' }
+        sender_id: { type: string }
+        created_at_ms: { type: integer, format: int64 }
+        edited_at_ms: { type: integer, format: int64 }
+        seq_id: { type: integer }
+        user_seq: { type: integer }
+        client_msg_id: { type: string }
+        status: { $ref: '#/components/schemas/MessageStatus' }
+        reply_to: { $ref: '#/components/schemas/ReplyRef' }
+        mentioned_user_ids:
+          type: array
+          items: { type: string }
+        forward_info: { $ref: '#/components/schemas/ForwardInfo' }
+        reactions:
+          type: array
+          items: { $ref: '#/components/schemas/ReactionGroup' }
+        is_pinned: { type: boolean }
+
+    ReplyRef:
+      x-protobuf: { message: ReplyRef, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        replied_message_id: { type: integer, format: int64 }
+        replied_sender_id: { type: string }
+        replied_message_type: { $ref: '#/components/schemas/MessageType' }
+        content_preview: { type: string }
+        is_recalled: { type: boolean }
+
+    ReactionGroup:
+      x-protobuf: { message: ReactionGroup, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        emoji: { type: string }
+        count: { type: integer }
+        recent_user_ids:
+          type: array
+          items: { type: string }
+        self_reacted: { type: boolean }
+
+    ForwardInfo:
+      x-protobuf: { message: ForwardInfo, file: proto/message/message_types.proto }
+      type: object
+      properties:
+        forward_from_user_id: { type: string }
+        forward_at_ms: { type: integer, format: int64 }
+        source_conversation_id: { type: string }
+
+    SyncMessagesReq:
+      x-protobuf: { message: SyncMessagesReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, after_seq, limit]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        after_seq: { type: integer }
+        limit: { type: integer }
+
+    SyncMessagesRsp:
+      type: object
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        has_more: { type: boolean }
+        latest_seq: { type: integer }
+
+    GetHistoryReq:
+      x-protobuf: { message: GetHistoryReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, before_seq, limit]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        before_seq: { type: integer }
+        limit: { type: integer }
+
+    GetHistoryRsp:
+      type: object
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        has_more: { type: boolean }
+
+    GetMessagesByIdReq:
+      x-protobuf: { message: GetMessagesByIdReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, message_ids]
+      properties:
+        request_id: { type: string }
+        message_ids:
+          type: array
+          items: { type: integer, format: int64 }
+
+    GetMessagesByIdRsp:
+      type: object
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+
+    SearchMessagesReq:
+      x-protobuf: { message: SearchMessagesReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, keyword]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        keyword: { type: string }
+        limit: { type: integer }
+        cursor: { type: string }
+
+    SearchMessagesRsp:
+      type: object
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        has_more: { type: boolean }
+        next_cursor: { type: string }
+
+    RecallMessageReq:
+      x-protobuf: { message: RecallMessageReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, message_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        message_id: { type: integer, format: int64 }
+
+    AddReactionReq:
+      x-protobuf: { message: AddReactionReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, message_id, emoji]
+      properties:
+        request_id: { type: string }
+        message_id: { type: integer, format: int64 }
+        emoji: { type: string }
+
+    RemoveReactionReq:
+      x-protobuf: { message: RemoveReactionReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, message_id, emoji]
+      properties:
+        request_id: { type: string }
+        message_id: { type: integer, format: int64 }
+        emoji: { type: string }
+
+    GetReactionsReq:
+      x-protobuf: { message: GetReactionsReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, message_id]
+      properties:
+        request_id: { type: string }
+        message_id: { type: integer, format: int64 }
+
+    GetReactionsRsp:
+      type: object
+      properties:
+        reactions:
+          type: array
+          items: { $ref: '#/components/schemas/ReactionGroup' }
+
+    PinMessageReq:
+      x-protobuf: { message: PinMessageReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, message_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        message_id: { type: integer, format: int64 }
+
+    UnpinMessageReq:
+      x-protobuf: { message: UnpinMessageReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, message_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        message_id: { type: integer, format: int64 }
+
+    ListPinnedReq:
+      x-protobuf: { message: ListPinnedReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+
+    ListPinnedRsp:
+      type: object
+      properties:
+        messages:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+
+    DeleteMessagesReq:
+      x-protobuf: { message: DeleteMessagesReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, message_ids]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        message_ids:
+          type: array
+          items: { type: integer, format: int64 }
+
+    ClearConversationReq:
+      x-protobuf: { message: ClearConversationReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+
+    UpdateReadAckReq:
+      x-protobuf: { message: UpdateReadAckReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, conversation_id, seq_id]
+      properties:
+        request_id: { type: string }
+        conversation_id: { type: string }
+        seq_id: { type: integer, format: int64 }
+
+    SelectByClientMsgIdReq:
+      x-protobuf: { message: SelectByClientMsgIdReq, file: proto/message/message_service.proto }
+      type: object
+      required: [request_id, client_msg_id]
+      properties:
+        request_id: { type: string }
+        client_msg_id: { type: string }
+
+    SelectByClientMsgIdRsp:
+      type: object
+      properties:
+        message: { $ref: '#/components/schemas/Message' }

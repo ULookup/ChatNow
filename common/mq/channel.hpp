@@ -41,8 +41,12 @@ public:
 
     explicit ServiceChannel(const std::string &name) : _service_name(name), _index(0) {}
 
-    /* brief: 节点上线，新增 brpc::Channel */
+    /* brief: 节点上线，新增 brpc::Channel（幂等：已存在的 host 跳过） */
     void append(const std::string &host) {
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+            if (_hosts.find(host) != _hosts.end()) return;  // 已存在，跳过
+        }
         auto channel = std::make_shared<brpc::Channel>();
         brpc::ChannelOptions options;
         options.connect_timeout_ms = kConnectTimeoutMs;
@@ -54,6 +58,7 @@ public:
             return;
         }
         std::unique_lock<std::mutex> lock(_mutex);
+        if (_hosts.find(host) != _hosts.end()) return;  // double-check
         _hosts[host] = channel;
         _channels.push_back(channel);
     }
@@ -124,7 +129,8 @@ public:
         _follow_services.insert(service_name);
     }
 
-    /* brief: etcd PUT 事件回调 */
+    /* brief: etcd PUT 事件回调。同时用 service_name 和完整 instance 路径做 key：
+     *        choose(service_name) → RR 负载均衡；choose(instance_path) → 直连特定实例。 */
     void onServiceOnline(const std::string &service_instance, const std::string &host) {
         std::string service_name = getServiceName(service_instance);
         ServiceChannel::ptr service;
@@ -141,6 +147,8 @@ public:
             } else {
                 service = it->second;
             }
+            // 同时以完整路径注册，供跨实例直连（如 Push 跨实例转发）
+            _services[service_instance] = service;
         }
         LOG_DEBUG("{}-{} 服务上线新节点", service_name, host);
         service->append(host);

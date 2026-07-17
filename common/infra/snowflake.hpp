@@ -28,6 +28,8 @@
 #include <stdexcept>
 #include <thread>
 
+#include "infra/leader_election.hpp"
+
 namespace chatnow
 {
 
@@ -121,6 +123,54 @@ private:
     std::mutex mu_;
     uint64_t   last_ts_  = 0;
     uint64_t   sequence_ = 0;
+};
+
+// etcd-based worker_id allocator: each slot (0-1023) maps to an etcd key
+// /chatnow/snowflake/worker/{id}. Campaign on slot 0 first; if taken, try next.
+class EtcdWorkIdAllocator {
+public:
+    using ptr = std::shared_ptr<EtcdWorkIdAllocator>;
+
+    EtcdWorkIdAllocator(std::shared_ptr<etcd::Client> etcd, int max_workers = 1024)
+        : _etcd(std::move(etcd)), _max_workers(max_workers) {}
+
+    int acquire(const std::string &instance_id, int fallback_worker_id, int lease_ttl = 60) {
+        for (int slot = 0; slot < _max_workers; ++slot) {
+            auto key = "/chatnow/snowflake/worker/" + std::to_string(slot);
+            auto election = std::make_shared<LeaderElection>(
+                _etcd, key, instance_id, lease_ttl, nullptr, nullptr);
+            election->start();
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < deadline) {
+                if (election->is_leader()) {
+                    _active_election = election;
+                    _allocated = slot;
+                    LOG_INFO("EtcdWorkIdAllocator: 申请到 worker_id={}", slot);
+                    return slot;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            election->stop();
+        }
+        LOG_ERROR("EtcdWorkIdAllocator: 无可用 worker_id slot，回退到 fallback={}", fallback_worker_id);
+        _allocated = fallback_worker_id;
+        return fallback_worker_id;
+    }
+
+    bool lease_lost() const {
+        return _active_election && !_active_election->is_leader();
+    }
+
+    void deallocate() {
+        if (_active_election) _active_election->stop();
+    }
+
+private:
+    std::shared_ptr<etcd::Client> _etcd;
+    int _max_workers;
+    int _allocated{-1};
+    LeaderElection::ptr _active_election;
 };
 
 } // namespace chatnow
