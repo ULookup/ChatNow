@@ -150,6 +150,7 @@ message SelectByClientMsgIdRsp {
 message UpdateReadAckReq {
     string request_id = 1;
     string conversation_id = 2;
-    uint64 message_id = 3;
+    // 会话内单调递增的送达确认水位；服务端只允许向前推进。
+    uint64 seq_id = 3;
 }
 message UpdateReadAckRsp { chatnow.common.ResponseHeader header = 1; }

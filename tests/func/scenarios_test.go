@@ -582,7 +582,7 @@ func TestScenario_LargeGroupFanOut(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Scenario 9: Unread Count Consistency（未读数跨服务一致性）
-// SC-09 | P0 | scenario | 未读数跨服务跨设备一致：发消息 unread+1 -> UpdateReadAck -> unread=0
+// SC-09 | P0 | scenario | 未读数跨服务跨设备一致：发消息 unread+1 -> MarkRead -> unread=0
 // ---------------------------------------------------------------------------
 
 func TestScenario_UnreadCountConsistency(t *testing.T) {
@@ -613,20 +613,21 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 	defer dbV.Close()
 	dbV.UnreadCount(t, b.UserID, convID, 3)
 
-	// Step 4: b UpdateReadAck（读到最后一条 seq）
-	ackReq := &msg.UpdateReadAckReq{
+	// Step 4: b MarkRead（读到最后一条 seq）
+	markReadReq := &conversation.MarkReadReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		SeqId:          lastSeq,
+		LastReadSeq:    lastSeq,
 	}
-	require.NoError(t, b.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
+	require.NoError(t, b.DoAuth(
+		"/service/conversation/mark_read", markReadReq, &conversation.MarkReadRsp{}))
 
 	// Step 5: b 再次 ListConversations，unread_count=0
 	listRsp2 := &conversation.ListConversationsRsp{}
 	require.NoError(t, b.DoAuth("/service/conversation/list", listReq, listRsp2))
 	for _, c := range listRsp2.Conversations {
 		if c.ConversationId == convID {
-			assert.Equal(t, uint64(0), c.Self.UnreadCount, "read ack 后未读数应清零")
+			assert.Equal(t, uint64(0), c.Self.UnreadCount, "MarkRead 后未读数应清零")
 		}
 	}
 

@@ -62,6 +62,7 @@ set(src_files
     ${CMAKE_CURRENT_SOURCE_DIR}/source/download_handler.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/source/speech_handler.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/source/cleanup_worker.hpp)
+find_package(jsoncpp CONFIG REQUIRED)
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
 target_link_libraries(${target}
@@ -71,7 +72,7 @@ target_link_libraries(${target}
     -lodb-mysql -lodb -lodb-boost
     -lredis++ -lhiredis
     -laws-cpp-sdk-s3 -laws-cpp-sdk-core
-    /usr/local/lib/libjsoncpp.so.19)
+    jsoncpp_lib)
 
 # 5. 测试可执行（gtest 单元 + 集成）
 set(test_files
@@ -86,7 +87,7 @@ set(test_files
 #     -lodb-mysql -lodb -lodb-boost
 #     -lredis++ -lhiredis
 #     -laws-cpp-sdk-s3 -laws-cpp-sdk-core
-#     /usr/local/lib/libjsoncpp.so.19)
+#     jsoncpp_lib)
 
 # 6. 头文件搜索路径
 target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

@@ -34,13 +34,15 @@ message NotifyClientAuth {
 }
 
 // Client ACKs a delivered push item. user_seq identifies the per-device
-// unacked entry; message_id is the only source used to advance conversation ACK.
+// unacked entry and message_id identifies the delivered item. seq_id is an
+// optional conversation watermark; non-message pushes leave it as zero.
 message NotifyMsgPushAck {
     string user_id = 1;
     string device_id = 2;
     int64 message_id = 3;
     uint64 user_seq = 4;
     string conversation_id = 5;
+    uint64 seq_id = 6;
 }
 
 message NotifyHeartbeat {

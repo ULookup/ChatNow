@@ -20,19 +20,182 @@
 #include <sw/redis++/redis++.h>
 #include <sw/redis++/redis_cluster.h>
 #include <chrono>
+#include <algorithm>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include "infra/logger.hpp"
+#include "infra/metrics.hpp"
 #include "utils/cache_version.hpp"
+#include "utils/local_rate_limiter.hpp"
 #include "utils/random_ttl.hpp"
+#include "utils/redis_circuit_breaker.hpp"
 #include "utils/redis_keys.hpp"
 
 namespace chatnow
 {
+
+inline bool is_redis_pool_wait_error(const sw::redis::Error &error) noexcept {
+    if (typeid(error) != typeid(sw::redis::Error)) return false;
+    constexpr std::string_view prefix = "Failed to fetch a connection in ";
+    constexpr std::string_view suffix = " milliseconds";
+    const std::string_view message(error.what());
+    if (message.size() <= prefix.size() + suffix.size() ||
+        message.compare(0, prefix.size(), prefix) != 0 ||
+        message.compare(message.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        return false;
+    }
+    const auto milliseconds = message.substr(
+        prefix.size(), message.size() - prefix.size() - suffix.size());
+    for (const char ch : milliseconds) {
+        if (ch < '0' || ch > '9') return false;
+    }
+    return true;
+}
+
+class RedisPipeline {
+public:
+    RedisPipeline(sw::redis::Pipeline pipeline,
+                  std::shared_ptr<RedisCircuitBreaker> breaker,
+                  RedisCircuitBreaker::Permit permit)
+        : _pipeline(std::move(pipeline)), _breaker(std::move(breaker)), _permit(permit) {}
+
+    RedisPipeline(RedisPipeline &&other) noexcept
+        : _pipeline(std::move(other._pipeline)),
+          _breaker(std::move(other._breaker)),
+          _permit(other._permit),
+          _settled(other._settled) {
+        other._settled = true;
+    }
+    RedisPipeline &operator=(RedisPipeline &&other) noexcept {
+        if (this == &other) return *this;
+        abandon_();
+        _pipeline = std::move(other._pipeline);
+        _breaker = std::move(other._breaker);
+        _permit = other._permit;
+        _settled = other._settled;
+        other._settled = true;
+        return *this;
+    }
+    RedisPipeline(const RedisPipeline &) = delete;
+    RedisPipeline &operator=(const RedisPipeline &) = delete;
+    ~RedisPipeline() { abandon_(); }
+
+    template <typename... Args>
+    RedisPipeline &hset(Args &&...args) {
+        return queue_([&] { _pipeline.hset(std::forward<Args>(args)...); });
+    }
+
+    template <typename... Args>
+    RedisPipeline &set(Args &&...args) {
+        return queue_([&] { _pipeline.set(std::forward<Args>(args)...); });
+    }
+
+    template <typename... Args>
+    RedisPipeline &expire(Args &&...args) {
+        return queue_([&] { _pipeline.expire(std::forward<Args>(args)...); });
+    }
+
+    template <typename... Args>
+    RedisPipeline &get(Args &&...args) {
+        return queue_([&] { _pipeline.get(std::forward<Args>(args)...); });
+    }
+
+    sw::redis::QueuedReplies exec() {
+        if (_settled) {
+            throw std::logic_error("RedisPipeline::exec called more than once");
+        }
+        try {
+            auto replies = _pipeline.exec();
+            settle_success_();
+            return replies;
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::ReplyError &) {
+            settle_success_();
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_();
+            else abandon_();
+            throw;
+        } catch (...) {
+            abandon_();
+            throw;
+        }
+    }
+
+private:
+    template <typename F>
+    RedisPipeline &queue_(F &&queue_command) {
+        if (_settled) {
+            throw std::logic_error("RedisPipeline command queued after settlement");
+        }
+        try {
+            std::forward<F>(queue_command)();
+            return *this;
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_();
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_();
+            else abandon_();
+            throw;
+        } catch (...) {
+            abandon_();
+            throw;
+        }
+    }
+
+    void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
+        if (transition == RedisCircuitBreaker::Transition::Opened) {
+            metrics::g_redis_circuit_open_total << 1;
+            LOG_WARN("Redis circuit transition ->Open");
+        } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
+            metrics::g_redis_circuit_recovered_total << 1;
+            LOG_INFO("Redis circuit transition HalfOpen->Closed");
+        }
+    }
+
+    void settle_success_() noexcept {
+        if (_settled) return;
+        _settled = true;
+        record_transition_(_breaker->on_success(_permit));
+    }
+
+    void record_connection_failure_() noexcept {
+        if (_settled) return;
+        _settled = true;
+        metrics::g_redis_call_failure_total << 1;
+        record_transition_(_breaker->on_connection_failure(_permit));
+    }
+
+    void abandon_() noexcept {
+        if (_settled || !_breaker) return;
+        _settled = true;
+        record_transition_(_breaker->on_abandoned(_permit));
+    }
+
+    sw::redis::Pipeline _pipeline;
+    std::shared_ptr<RedisCircuitBreaker> _breaker;
+    RedisCircuitBreaker::Permit _permit;
+    bool _settled = false;
+};
 
 // 类型擦除 Redis 客户端适配器：根据持有的后端类型透明转发到
 // sw::redis::Redis（单机）或 sw::redis::RedisCluster。所有 cache 类
@@ -43,122 +206,157 @@ class RedisClient
 public:
     using ptr = std::shared_ptr<RedisClient>;
 
-    RedisClient(std::shared_ptr<sw::redis::Redis> r) : _r(std::move(r)) {}
-    RedisClient(std::shared_ptr<sw::redis::RedisCluster> rc) : _rc(std::move(rc)) {}
+    RedisClient(std::shared_ptr<sw::redis::Redis> r)
+        : _r(std::move(r)), _breaker(std::make_shared<RedisCircuitBreaker>()) {}
+    RedisClient(std::shared_ptr<sw::redis::RedisCluster> rc)
+        : _rc(std::move(rc)), _breaker(std::make_shared<RedisCircuitBreaker>()) {}
 
     // --- String commands ---
     sw::redis::OptionalString get(const std::string &key) {
-        return _rc ? _rc->get(key) : _r->get(key);
+        return guarded_([&] { return _rc ? _rc->get(key) : _r->get(key); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::seconds ttl = std::chrono::seconds(0)) {
-        return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::milliseconds ttl) {
-        return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl) : _r->set(key, val, ttl); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::seconds ttl, sw::redis::UpdateType type) {
-        return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type); });
     }
     bool set(const std::string &key, const std::string &val,
              std::chrono::milliseconds ttl, sw::redis::UpdateType type) {
-        return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type);
+        return guarded_([&] { return _rc ? _rc->set(key, val, ttl, type) : _r->set(key, val, ttl, type); });
     }
     long long del(const std::string &key) {
-        return _rc ? _rc->del(key) : _r->del(key);
+        return guarded_([&] { return _rc ? _rc->del(key) : _r->del(key); });
     }
     void expire(const std::string &key, std::chrono::seconds ttl) {
-        _rc ? _rc->expire(key, ttl) : _r->expire(key, ttl);
+        guarded_void_([&] { _rc ? _rc->expire(key, ttl) : _r->expire(key, ttl); });
     }
     long long incr(const std::string &key) {
-        return _rc ? _rc->incr(key) : _r->incr(key);
+        return guarded_([&] { return _rc ? _rc->incr(key) : _r->incr(key); });
     }
 
     // --- Set commands ---
     template <typename T>
     long long sadd(const std::string &key, const T &member) {
-        return _rc ? _rc->sadd(key, member) : _r->sadd(key, member);
+        return guarded_([&] { return _rc ? _rc->sadd(key, member) : _r->sadd(key, member); });
     }
     template <typename It>
     long long sadd(const std::string &key, It first, It last) {
-        return _rc ? _rc->sadd(key, first, last) : _r->sadd(key, first, last);
+        return guarded_([&] { return _rc ? _rc->sadd(key, first, last) : _r->sadd(key, first, last); });
     }
     template <typename Out>
     void smembers(const std::string &key, Out out) {
-        _rc ? _rc->smembers(key, out) : _r->smembers(key, out);
+        guarded_void_([&] { _rc ? _rc->smembers(key, out) : _r->smembers(key, out); });
     }
     template <typename T>
     long long srem(const std::string &key, const T &member) {
-        return _rc ? _rc->srem(key, member) : _r->srem(key, member);
+        return guarded_([&] { return _rc ? _rc->srem(key, member) : _r->srem(key, member); });
     }
     long long scard(const std::string &key) {
-        return _rc ? _rc->scard(key) : _r->scard(key);
+        return guarded_([&] { return _rc ? _rc->scard(key) : _r->scard(key); });
     }
 
     // --- Hash commands ---
     long long hset(const std::string &key, const std::string &field, const std::string &val) {
-        return _rc ? _rc->hset(key, field, val) : _r->hset(key, field, val);
+        return guarded_([&] { return _rc ? _rc->hset(key, field, val) : _r->hset(key, field, val); });
     }
     sw::redis::OptionalString hget(const std::string &key, const std::string &field) {
-        return _rc ? _rc->hget(key, field) : _r->hget(key, field);
+        return guarded_([&] { return _rc ? _rc->hget(key, field) : _r->hget(key, field); });
     }
     long long hdel(const std::string &key, const std::string &field) {
-        return _rc ? _rc->hdel(key, field) : _r->hdel(key, field);
+        return guarded_([&] { return _rc ? _rc->hdel(key, field) : _r->hdel(key, field); });
     }
     template <typename Out>
     void hkeys(const std::string &key, Out out) {
-        _rc ? _rc->hkeys(key, out) : _r->hkeys(key, out);
+        guarded_void_([&] { _rc ? _rc->hkeys(key, out) : _r->hkeys(key, out); });
     }
     template <typename Out>
     void hgetall(const std::string &key, Out out) {
-        _rc ? _rc->hgetall(key, out) : _r->hgetall(key, out);
+        guarded_void_([&] { _rc ? _rc->hgetall(key, out) : _r->hgetall(key, out); });
     }
     long long hlen(const std::string &key) {
-        return _rc ? _rc->hlen(key) : _r->hlen(key);
+        return guarded_([&] { return _rc ? _rc->hlen(key) : _r->hlen(key); });
     }
 
     // --- Sorted Set commands ---
     long long zadd(const std::string &key, const std::string &member, double score) {
-        return _rc ? _rc->zadd(key, member, score) : _r->zadd(key, member, score);
+        return guarded_([&] { return _rc ? _rc->zadd(key, member, score) : _r->zadd(key, member, score); });
     }
     long long zadd(const std::string &key, const std::string &member, double score,
                    sw::redis::UpdateType type) {
-        return _rc ? _rc->zadd(key, member, score, type) : _r->zadd(key, member, score, type);
+        return guarded_([&] { return _rc ? _rc->zadd(key, member, score, type) : _r->zadd(key, member, score, type); });
     }
     long long zrem(const std::string &key, const std::string &member) {
-        return _rc ? _rc->zrem(key, member) : _r->zrem(key, member);
+        return guarded_([&] { return _rc ? _rc->zrem(key, member) : _r->zrem(key, member); });
     }
     template <typename Out>
     void zrange(const std::string &key, long long start, long long stop, Out out) {
-        _rc ? _rc->zrange(key, start, stop, out) : _r->zrange(key, start, stop, out);
+        guarded_void_([&] { _rc ? _rc->zrange(key, start, stop, out) : _r->zrange(key, start, stop, out); });
     }
     template <typename Out>
     void zrangebyscore(const std::string &key,
                        const sw::redis::BoundedInterval<double> &interval,
                        const sw::redis::LimitOptions &opts, Out out) {
-        _rc ? _rc->zrangebyscore(key, interval, opts, out)
-            : _r->zrangebyscore(key, interval, opts, out);
+        guarded_void_([&] {
+            _rc ? _rc->zrangebyscore(key, interval, opts, out)
+                : _r->zrangebyscore(key, interval, opts, out);
+        });
     }
 
     // --- Lua scripting ---
     template <typename Ret, typename KeyIt, typename ArgIt>
     Ret eval(const std::string &script, KeyIt key_first, KeyIt key_last,
              ArgIt arg_first, ArgIt arg_last) {
-        return _rc ? _rc->eval<Ret>(script, key_first, key_last, arg_first, arg_last)
-                   : _r->eval<Ret>(script, key_first, key_last, arg_first, arg_last);
+        return guarded_([&]() -> Ret {
+            return _rc ? _rc->eval<Ret>(script, key_first, key_last, arg_first, arg_last)
+                       : _r->eval<Ret>(script, key_first, key_last, arg_first, arg_last);
+        });
     }
     template <typename KeyIt, typename ArgIt, typename Out>
     void eval(const std::string &script, KeyIt key_first, KeyIt key_last,
               ArgIt arg_first, ArgIt arg_last, Out out) {
-        _rc ? _rc->eval(script, key_first, key_last, arg_first, arg_last, out)
-            : _r->eval(script, key_first, key_last, arg_first, arg_last, out);
+        guarded_void_([&] {
+            _rc ? _rc->eval(script, key_first, key_last, arg_first, arg_last, out)
+                : _r->eval(script, key_first, key_last, arg_first, arg_last, out);
+        });
     }
 
     // --- Pipeline ---
-    auto pipeline(const sw::redis::StringView &hash_tag = {}) {
-        return _rc ? _rc->pipeline(hash_tag) : _r->pipeline();
+    RedisPipeline pipeline(const sw::redis::StringView &hash_tag = {}) {
+        auto permit = before_call_();
+        try {
+            return RedisPipeline(_rc ? _rc->pipeline(hash_tag) : _r->pipeline(),
+                                 _breaker, permit);
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ReplyError &) {
+            record_success_(permit);
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            else abandon_(permit);
+            throw;
+        } catch (...) {
+            abandon_(permit);
+            throw;
+        }
+    }
+
+    template <typename Input, typename Output>
+    void mget(Input first, Input last, Output out) {
+        guarded_void_([&] {
+            _rc ? _rc->mget(first, last, out) : _r->mget(first, last, out);
+        });
     }
 
     // --- SCAN ---
@@ -166,27 +364,115 @@ public:
     // 续扫，因此任意 cursor 都重启一次完整扫描并返回 0。
     template <typename Out>
     long long scan(long long cursor, const std::string &pattern, long long count, Out out) {
-        if (_rc) {
-            if (cursor != 0) {
-                LOG_WARN("RedisCluster scan cannot resume cursor {}; restarting full cluster scan", cursor);
-            }
-            _rc->for_each([&](sw::redis::Redis &r) {
-                long long cur = 0;
-                while (true) {
-                    cur = r.scan(cur, pattern, count, out);
-                    if (cur == 0) break;
+        return guarded_([&]() -> long long {
+            if (_rc) {
+                if (cursor != 0) {
+                    LOG_WARN("RedisCluster scan cannot resume cursor {}; restarting full cluster scan", cursor);
                 }
-            });
-            return 0;
-        }
-        return _r->scan(cursor, pattern, count, out);
+                _rc->for_each([&](sw::redis::Redis &r) {
+                    long long cur = 0;
+                    while (true) {
+                        cur = r.scan(cur, pattern, count, out);
+                        if (cur == 0) break;
+                    }
+                });
+                return 0;
+            }
+            return static_cast<long long>(_r->scan(cursor, pattern, count, out));
+        });
     }
 
     bool is_cluster() const { return _rc != nullptr; }
 
 private:
+    RedisCircuitBreaker::Permit before_call_() {
+        try {
+            auto permit = _breaker->before_call();
+            if (permit.probe) LOG_INFO("Redis circuit transition Open->HalfOpen");
+            return permit;
+        } catch (const RedisCircuitOpen &) {
+            metrics::g_redis_circuit_rejected_total << 1;
+            throw;
+        }
+    }
+
+    static void record_transition_(RedisCircuitBreaker::Transition transition) noexcept {
+        if (transition == RedisCircuitBreaker::Transition::Opened) {
+            metrics::g_redis_circuit_open_total << 1;
+            LOG_WARN("Redis circuit transition ->Open");
+        } else if (transition == RedisCircuitBreaker::Transition::Recovered) {
+            metrics::g_redis_circuit_recovered_total << 1;
+            LOG_INFO("Redis circuit transition HalfOpen->Closed");
+        }
+    }
+
+    void record_success_(RedisCircuitBreaker::Permit permit) noexcept {
+        record_transition_(_breaker->on_success(permit));
+    }
+
+    void abandon_(RedisCircuitBreaker::Permit permit) noexcept {
+        record_transition_(_breaker->on_abandoned(permit));
+    }
+
+    void record_connection_failure_(RedisCircuitBreaker::Permit permit) noexcept {
+        metrics::g_redis_call_failure_total << 1;
+        record_transition_(_breaker->on_connection_failure(permit));
+    }
+
+    template <class F>
+    auto guarded_(F &&fn) -> std::invoke_result_t<F &&> {
+        auto permit = before_call_();
+        try {
+            decltype(auto) result = std::forward<F>(fn)();
+            record_success_(permit);
+            return std::forward<decltype(result)>(result);
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ReplyError &) {
+            record_success_(permit);
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            else abandon_(permit);
+            throw;
+        } catch (...) {
+            abandon_(permit);
+            throw;
+        }
+    }
+
+    template <class F>
+    void guarded_void_(F &&fn) {
+        auto permit = before_call_();
+        try {
+            std::forward<F>(fn)();
+            record_success_(permit);
+        } catch (const sw::redis::IoError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ClosedError &) {
+            record_connection_failure_(permit);
+            throw;
+        } catch (const sw::redis::ReplyError &) {
+            record_success_(permit);
+            throw;
+        } catch (const sw::redis::Error &error) {
+            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            else abandon_(permit);
+            throw;
+        } catch (...) {
+            abandon_(permit);
+            throw;
+        }
+    }
+
     std::shared_ptr<sw::redis::Redis> _r;
     std::shared_ptr<sw::redis::RedisCluster> _rc;
+    std::shared_ptr<RedisCircuitBreaker> _breaker;
 };
 
 /* brief: 默认 TTL 常量 */
@@ -196,6 +482,7 @@ inline constexpr std::chrono::seconds kCodeTtl(60 * 5);             // 验证码
 inline constexpr std::chrono::seconds kLastMsgTtl(24 * 3600);       // 最近消息预览 24 小时
 inline constexpr std::chrono::seconds kReadAckTtl(24 * 3600);       // 已读暂存 24 小时
 inline constexpr std::chrono::seconds kMembersTtl(30 * 60);         // 成员缓存 30 分钟
+inline constexpr std::chrono::seconds kUserInfoTtl(3600);           // 用户资料缓存 1 小时
 inline constexpr std::chrono::seconds kOnlineTtl(30);               // 在线路由 30s（依赖心跳续期，每 heartbeat 刷新）
 inline constexpr std::chrono::seconds kUnackedTtl(7 * 24 * 3600);   // 未 ack 重传缓冲 7 天
 
@@ -215,12 +502,12 @@ public:
         copts.port = port;
         copts.db = db;
         copts.keep_alive = keep_alive;
-        copts.connect_timeout = std::chrono::milliseconds(2000);
-        copts.socket_timeout  = std::chrono::milliseconds(2000);
+        copts.connect_timeout = std::chrono::milliseconds(50);
+        copts.socket_timeout  = std::chrono::milliseconds(50);
 
         sw::redis::ConnectionPoolOptions popts;
         popts.size              = pool_size;
-        popts.wait_timeout      = std::chrono::milliseconds(500);
+        popts.wait_timeout      = std::chrono::milliseconds(20);
         popts.connection_lifetime = std::chrono::minutes(30);
 
         return std::make_shared<sw::redis::Redis>(copts, popts);
@@ -255,7 +542,7 @@ public:
 
         sw::redis::ConnectionPoolOptions popts;
         popts.size = pool_size;
-        popts.wait_timeout = std::chrono::milliseconds(500);
+        popts.wait_timeout = std::chrono::milliseconds(20);
         popts.connection_lifetime = std::chrono::minutes(30);
 
         // 逐个尝试种子节点，直到成功连接（sw::redis++ RedisCluster 仅需一个种子
@@ -267,8 +554,8 @@ public:
                 copts.host = host;
                 copts.port = port;
                 copts.keep_alive = keep_alive;
-                copts.connect_timeout = std::chrono::milliseconds(2000);
-                copts.socket_timeout  = std::chrono::milliseconds(2000);
+                copts.connect_timeout = std::chrono::milliseconds(50);
+                copts.socket_timeout  = std::chrono::milliseconds(50);
 
                 auto cluster = std::make_shared<sw::redis::RedisCluster>(copts, popts);
                 // 验证连接可用（立即尝试一个轻量命令）
@@ -298,7 +585,7 @@ public:
     /* brief: 写入登录态，TTL 7 天 */
     void append(const std::string &ssid, const std::string &uid,
                 std::chrono::seconds ttl = kSessionTtl) {
-        try { _c->set(key::kSession + ssid, uid, ttl); }
+        try { _c->set(key::kSession + ssid, uid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Session.append 失败 {}: {}", ssid, e.what()); }
     }
     void remove(const std::string &ssid) {
@@ -311,7 +598,7 @@ public:
     }
     /* brief: 续期（每次心跳调用） */
     void touch(const std::string &ssid, std::chrono::seconds ttl = kSessionTtl) {
-        try { _c->expire(key::kSession + ssid, ttl); }
+        try { _c->expire(key::kSession + ssid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Session.touch 失败 {}: {}", ssid, e.what()); }
     }
 private:
@@ -324,7 +611,7 @@ public:
     using ptr = std::shared_ptr<Status>;
     Status(const RedisClient::ptr &c) : _c(c) {}
     void append(const std::string &uid, std::chrono::seconds ttl = kStatusTtl) {
-        try { _c->set(key::kStatus + uid, "1", ttl); }
+        try { _c->set(key::kStatus + uid, "1", randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Status.append 失败 {}: {}", uid, e.what()); }
     }
     void remove(const std::string &uid) {
@@ -337,7 +624,7 @@ public:
     }
     /* brief: 心跳续期 */
     void touch(const std::string &uid, std::chrono::seconds ttl = kStatusTtl) {
-        try { _c->expire(key::kStatus + uid, ttl); }
+        try { _c->expire(key::kStatus + uid, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Status.touch 失败 {}: {}", uid, e.what()); }
     }
 private:
@@ -351,7 +638,7 @@ public:
     Codes(const RedisClient::ptr &c) : _c(c) {}
     void append(const std::string &cid, const std::string &code,
                 std::chrono::seconds ttl = kCodeTtl) {
-        try { _c->set(key::kVerifyCode + cid, code, ttl); }
+        try { _c->set(key::kVerifyCode + cid, code, randomized_ttl(ttl)); }
         catch(std::exception &e) { LOG_ERROR("Codes.append 失败 {}: {}", cid, e.what()); }
     }
     void remove(const std::string &cid) {
@@ -496,27 +783,74 @@ public:
 
     /* brief: 用户某设备上线 */
     void add(const std::string &uid, const std::string &device_id) {
-        try { _c->sadd(key::kDeviceSet + uid, device_id); }
+        try {
+            const auto effective_ttl = randomized_ttl(kSessionTtl);
+            std::vector<std::string> keys = {key::device_set_key(uid)};
+            std::vector<std::string> args = {
+                device_id, std::to_string(effective_ttl.count())};
+            _c->eval<long long>(kAddLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.add 失败 {}-{}: {}", uid, device_id, e.what()); }
+    }
+    /* brief: 用户设备活动时续期 */
+    void touch(const std::string &uid, std::chrono::seconds ttl = kSessionTtl) {
+        try { _c->expire(key::device_set_key(uid), randomized_ttl(ttl)); }
+        catch(std::exception &e) { LOG_ERROR("DeviceSet.touch 失败 {}: {}", uid, e.what()); }
+        // Rolling-upgrade compatibility only: legacy keys get a bounded grace TTL.
+        try { _c->expire(key::legacy_device_set_key(uid), kLegacyGraceTtl); }
+        catch(std::exception &) {}
     }
     /* brief: 用户某设备下线 */
     void remove(const std::string &uid, const std::string &device_id) {
-        try { _c->srem(key::kDeviceSet + uid, device_id); }
+        try { _c->srem(key::device_set_key(uid), device_id); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.rem 失败 {}-{}: {}", uid, device_id, e.what()); }
+        try { _c->srem(key::legacy_device_set_key(uid), device_id); }
+        catch(std::exception &) {}
     }
     /* brief: 取用户当前所有在线设备 */
     std::vector<std::string> list(const std::string &uid) {
         std::vector<std::string> res;
-        try { _c->smembers(key::kDeviceSet + uid, std::inserter(res, res.end())); }
+        try { _c->smembers(key::device_set_key(uid), std::back_inserter(res)); }
         catch(std::exception &e) { LOG_ERROR("DeviceSet.list 失败 {}: {}", uid, e.what()); }
+        std::vector<std::string> legacy;
+        try { _c->smembers(key::legacy_device_set_key(uid), std::back_inserter(legacy)); }
+        catch(std::exception &) { return res; }
+        if (!legacy.empty()) {
+            std::unordered_set<std::string> merged(res.begin(), res.end());
+            merged.insert(legacy.begin(), legacy.end());
+            res.assign(merged.begin(), merged.end());
+            // Cross-slot migration is intentionally best-effort. New writes use only
+            // the tagged key; the old key expires after the rolling-upgrade window.
+            try {
+                _c->sadd(key::device_set_key(uid), legacy.begin(), legacy.end());
+                _c->expire(key::device_set_key(uid), randomized_ttl(kSessionTtl));
+                _c->expire(key::legacy_device_set_key(uid), kLegacyGraceTtl);
+            } catch (std::exception &) {}
+        }
         return res;
     }
     /* brief: 用户是否有任意在线设备 */
     bool any(const std::string &uid) {
-        try { return _c->scard(key::kDeviceSet + uid) > 0; }
-        catch(std::exception &e) { LOG_ERROR("DeviceSet.any 失败 {}: {}", uid, e.what()); return false; }
+        return !list(uid).empty();
     }
 private:
+    static constexpr std::chrono::seconds kLegacyGraceTtl{24 * 3600};
+    static constexpr const char *kAddLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local ttl = tonumber(ARGV[2])
+if not ttl or ttl <= 0 then return redis.error_reply('invalid ttl') end
+local t = key_type(KEYS[1])
+if t ~= 'none' and t ~= 'set' then return redis.error_reply('device key wrong type') end
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], ttl)
+return 1
+)lua";
+
     RedisClient::ptr _c;
 };
 
@@ -793,6 +1127,290 @@ private:
 };
 
 // =============================================================================
+// 用户资料缓存（value 为序列化 UserInfo protobuf；DAO 不依赖 protobuf 类型）
+// =============================================================================
+
+enum class GenerationWriteResult {
+    Committed,
+    Conflict,
+    Unavailable,
+};
+
+enum class UserInfoL1Publication {
+    GenerationFenced,
+    Denied,
+    ShortLivedFallback,
+};
+
+constexpr UserInfoL1Publication
+user_info_l1_publication(GenerationWriteResult result) noexcept {
+    switch (result) {
+    case GenerationWriteResult::Committed:
+        return UserInfoL1Publication::GenerationFenced;
+    case GenerationWriteResult::Conflict:
+        return UserInfoL1Publication::Denied;
+    case GenerationWriteResult::Unavailable:
+        return UserInfoL1Publication::ShortLivedFallback;
+    }
+    return UserInfoL1Publication::Denied;
+}
+
+template <typename Eval>
+GenerationWriteResult execute_generation_write(bool redis_available,
+                                               Eval &&eval) noexcept {
+    if (!redis_available) return GenerationWriteResult::Unavailable;
+    try {
+        return std::forward<Eval>(eval)() == 0
+            ? GenerationWriteResult::Conflict
+            : GenerationWriteResult::Committed;
+    } catch (const RedisCircuitOpen &) {
+        return GenerationWriteResult::Unavailable;
+    } catch (const std::exception &) {
+        return GenerationWriteResult::Unavailable;
+    }
+}
+
+template <typename Publish>
+void publish_user_info_l1(GenerationWriteResult result, Publish &&publish) {
+    const auto publication = user_info_l1_publication(result);
+    if (publication == UserInfoL1Publication::Denied) return;
+    std::forward<Publish>(publish)(publication);
+}
+
+class UserInfoCache
+{
+public:
+    using ptr = std::shared_ptr<UserInfoCache>;
+    using GenerationEval = std::function<long long()>;
+
+    struct BatchResult {
+        std::unordered_map<std::string, std::string> hits;
+        struct Miss {
+            std::string uid;
+            std::optional<uint64_t> observed_generation;
+        };
+        std::vector<Miss> misses;
+    };
+    struct FencedValue {
+        std::string serialized;
+        uint64_t observed_generation;
+    };
+
+    explicit UserInfoCache(const RedisClient::ptr &c,
+                           GenerationEval generation_eval = {})
+        : _c(c), _generation_eval(std::move(generation_eval)) {}
+
+    std::optional<std::string> get(const std::string &uid) {
+        if (!_c) return std::nullopt;
+        try {
+            auto value = _c->get(key::user_info_key(uid));
+            if (!value) return std::nullopt;
+            return *value;
+        } catch (const RedisCircuitOpen &) {
+            return std::nullopt;
+        } catch (const std::exception &) {
+            return std::nullopt;
+        }
+    }
+
+    BatchResult batch_get(const std::vector<std::string> &uids) {
+        BatchResult result;
+        const size_t count = std::min<size_t>(uids.size(), 2000);
+        if (!_c) {
+            for (size_t i = 0; i < count; ++i) result.misses.push_back({uids[i], std::nullopt});
+            return result;
+        }
+        std::unordered_map<uint32_t, std::vector<std::pair<std::string, std::string>>> groups;
+        for (size_t i = 0; i < count; ++i) {
+            groups[key::user_info_bucket(uids[i])].push_back(
+                {uids[i], key::user_info_key(uids[i])});
+        }
+        for (const auto &group : groups) {
+            const auto &entries = group.second;
+            std::vector<std::string> keys;
+            keys.reserve(entries.size());
+            for (const auto &entry : entries) {
+                keys.push_back(entry.second);
+                keys.push_back(key::user_info_generation_key(entry.first));
+            }
+            try {
+                std::vector<sw::redis::OptionalString> values;
+                values.reserve(keys.size());
+                _c->mget(keys.begin(), keys.end(), std::back_inserter(values));
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    const size_t value_index = i * 2;
+                    if (value_index < values.size() && values[value_index]) {
+                        result.hits[entries[i].first] = *values[value_index];
+                    } else {
+                        std::optional<uint64_t> observed;
+                        if (value_index + 1 < values.size()) {
+                            try {
+                                observed = values[value_index + 1]
+                                    ? std::stoull(*values[value_index + 1]) : uint64_t{0};
+                            } catch (const std::exception &) {}
+                        }
+                        result.misses.push_back({entries[i].first, observed});
+                    }
+                }
+            } catch (const RedisCircuitOpen &) {
+                for (const auto &entry : entries) result.misses.push_back({entry.first, std::nullopt});
+            } catch (const std::exception &) {
+                for (const auto &entry : entries) result.misses.push_back({entry.first, std::nullopt});
+            }
+        }
+        return result;
+    }
+
+    bool set(const std::string &uid, const std::string &serialized,
+             uint64_t observed_generation) {
+        return set_if_generation(uid, serialized, observed_generation) ==
+               GenerationWriteResult::Committed;
+    }
+
+    std::optional<uint64_t> generation(const std::string &uid) {
+        if (!_c) return uint64_t{0};
+        try {
+            auto value = _c->get(key::user_info_generation_key(uid));
+            return value ? std::stoull(*value) : uint64_t{0};
+        } catch (const RedisCircuitOpen &) {
+            return std::nullopt;
+        } catch (const std::exception &) {
+            return std::nullopt;
+        }
+    }
+
+    GenerationWriteResult set_if_generation(const std::string &uid,
+                                            const std::string &serialized,
+                                            uint64_t expected_generation) {
+        return execute_generation_write(
+            static_cast<bool>(_c) || static_cast<bool>(_generation_eval), [&] {
+                const auto ttl = serialized.empty()
+                    ? randomized_ttl(std::chrono::seconds(5))
+                    : randomized_ttl(kUserInfoTtl);
+                std::vector<std::string> keys = {
+                    key::user_info_key(uid), key::user_info_generation_key(uid)};
+                std::vector<std::string> args = {
+                    std::to_string(expected_generation), serialized,
+                    std::to_string(ttl.count())};
+                if (_generation_eval) return _generation_eval();
+                return _c->eval<long long>(kSetIfGenerationLua, keys.begin(), keys.end(),
+                                           args.begin(), args.end());
+            });
+    }
+
+    size_t batch_set(const std::unordered_map<std::string, FencedValue> &values) {
+        if (!_c) return 0;
+        std::unordered_map<uint32_t, std::vector<std::pair<std::string, FencedValue>>> groups;
+        size_t count = 0;
+        for (const auto &entry : values) {
+            if (count++ >= 2000) break;
+            groups[key::user_info_bucket(entry.first)].push_back(entry);
+        }
+        size_t written = 0;
+        for (const auto &group : groups) {
+            std::vector<std::string> keys;
+            std::vector<std::string> args;
+            keys.reserve(group.second.size() * 2);
+            args.reserve(group.second.size() * 3);
+            for (const auto &[uid, value] : group.second) {
+                keys.push_back(key::user_info_key(uid));
+                keys.push_back(key::user_info_generation_key(uid));
+                args.push_back(std::to_string(value.observed_generation));
+                args.push_back(value.serialized);
+                const auto ttl = value.serialized.empty()
+                    ? randomized_ttl(std::chrono::seconds(5))
+                    : randomized_ttl(kUserInfoTtl);
+                args.push_back(std::to_string(ttl.count()));
+            }
+            try {
+                written += static_cast<size_t>(_c->eval<long long>(
+                    kBatchSetIfGenerationLua, keys.begin(), keys.end(),
+                    args.begin(), args.end()));
+            } catch (const RedisCircuitOpen &) {
+            } catch (const std::exception &) {}
+        }
+        return written;
+    }
+
+    bool invalidate(const std::string &uid) noexcept {
+        if (!_c) return true;
+        try {
+            std::vector<std::string> keys = {
+                key::user_info_key(uid), key::user_info_generation_key(uid)};
+            std::vector<std::string> args;
+            _c->eval<long long>(kInvalidateLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+            return true;
+        } catch (const RedisCircuitOpen &) {
+            metrics::g_user_info_invalidation_failure_total << 1;
+            return false;
+        } catch (const std::exception &) {
+            metrics::g_user_info_invalidation_failure_total << 1;
+            return false;
+        }
+    }
+
+private:
+    static constexpr const char *kSetIfGenerationLua = R"lua(
+local generation = tonumber(redis.call('GET', KEYS[2]) or '0')
+if generation ~= tonumber(ARGV[1]) then return 0 end
+redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
+redis.call('EXPIRE', KEYS[2], 604800)
+return 1
+)lua";
+    static constexpr const char *kInvalidateLua = R"lua(
+redis.call('INCR', KEYS[2])
+redis.call('EXPIRE', KEYS[2], 604800)
+redis.call('DEL', KEYS[1])
+return 1
+)lua";
+    // Redis scripts are isolated but do not roll back writes after a runtime
+    // error. Validate every entry before mutating so deterministic late errors
+    // cannot partially fill a bucket. Server OOM during SET is a Redis-level
+    // limitation and is surfaced as a failed best-effort cache fill.
+    static constexpr const char *kBatchSetIfGenerationLua = R"lua(
+if (#KEYS % 2) ~= 0 or #ARGV ~= (#KEYS / 2) * 3 then
+    return redis.error_reply('invalid batch cache arguments')
+end
+local function key_type(key)
+    local reply = redis.call('TYPE', key)
+    if type(reply) == 'table' then return reply.ok end
+    return reply
+end
+for i = 1, #KEYS, 2 do
+    local arg = ((i - 1) / 2) * 3 + 1
+    local value_type = key_type(KEYS[i])
+    local generation_type = key_type(KEYS[i + 1])
+    local expected = tonumber(ARGV[arg])
+    local ttl = tonumber(ARGV[arg + 2])
+    local generation = nil
+    if generation_type == 'none' then generation = 0 end
+    if generation_type == 'string' then generation = tonumber(redis.call('GET', KEYS[i + 1])) end
+    if (value_type ~= 'none' and value_type ~= 'string') or
+       (generation_type ~= 'none' and generation_type ~= 'string') or
+       generation == nil or expected == nil or expected < 0 or
+       expected ~= math.floor(expected) or ARGV[arg + 1] == nil or ttl == nil or
+       ttl <= 0 or ttl ~= math.floor(ttl) then
+        return redis.error_reply('invalid batch cache entry')
+    end
+end
+local written = 0
+for i = 1, #KEYS, 2 do
+    local arg = ((i - 1) / 2) * 3 + 1
+    local generation = tonumber(redis.call('GET', KEYS[i + 1]) or '0')
+    if generation == tonumber(ARGV[arg]) then
+        redis.call('SET', KEYS[i], ARGV[arg + 1], 'EX', ARGV[arg + 2])
+        redis.call('EXPIRE', KEYS[i + 1], 604800)
+        written = written + 1
+    end
+end
+return written
+)lua";
+    RedisClient::ptr _c;
+    GenerationEval _generation_eval;
+};
+
+// =============================================================================
 // 在线路由表（多 Push 实例下：uid -> 持有 ws 连接的 push_instance_id 集合）
 // =============================================================================
 
@@ -807,23 +1425,63 @@ public:
               const std::string &push_instance,
               std::chrono::seconds ttl = kOnlineTtl) {
         try {
-            std::string k = key::online_key(uid);
-            _c->hset(k, device_id, push_instance);
-            _c->expire(k, randomized_ttl(ttl));
+            const auto route_ttl = randomized_ttl(ttl);
+            const auto device_ttl = randomized_ttl(kSessionTtl);
+            std::vector<std::string> keys = {
+                key::online_key(uid), key::device_set_key(uid)};
+            std::vector<std::string> args = {
+                device_id, push_instance, std::to_string(route_ttl.count()),
+                std::to_string(device_ttl.count())};
+            _c->eval<long long>(kBindLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("OnlineRoute.bind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what());
         }
     }
     /* brief: 心跳续期（续整个 uid 的 HASH） */
     void touch(const std::string &uid, std::chrono::seconds ttl = kOnlineTtl) {
-        try { _c->expire(key::online_key(uid), randomized_ttl(ttl)); }
+        try {
+            const auto route_ttl = randomized_ttl(ttl);
+            const auto device_ttl = randomized_ttl(kSessionTtl);
+            std::vector<std::string> keys = {
+                key::online_key(uid), key::device_set_key(uid)};
+            std::vector<std::string> args = {
+                std::to_string(route_ttl.count()),
+                std::to_string(device_ttl.count())};
+            _c->eval<long long>(kTouchLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.touch 失败 {}: {}", uid, e.what()); }
+        try { _c->expire(key::legacy_device_set_key(uid), kLegacyDeviceGraceTtl); }
+        catch (const std::exception &) {}
     }
     /* brief: 设备下线 — HDEL uid did */
     void unbind(const std::string &uid, const std::string &device_id,
                 const std::string &push_instance) {
-        try { _c->hdel(key::online_key(uid), device_id); }
+        std::vector<std::string> legacy_devices;
+        if (device_id.empty()) {
+            try {
+                std::unordered_map<std::string, std::string> routes;
+                _c->hgetall(key::online_key(uid), std::inserter(routes, routes.end()));
+                for (const auto &[did, instance] : routes) {
+                    if (instance == push_instance) legacy_devices.push_back(did);
+                }
+            } catch (const std::exception &) {}
+        } else {
+            legacy_devices.push_back(device_id);
+        }
+        try {
+            std::vector<std::string> keys = {
+                key::online_key(uid), key::device_set_key(uid)};
+            std::vector<std::string> args = {device_id, push_instance};
+            _c->eval<long long>(kUnbindLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
+        }
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.unbind 失败 {}-{}-{}: {}", uid, device_id, push_instance, e.what()); }
+        for (const auto &did : legacy_devices) {
+            try { _c->srem(key::legacy_device_set_key(uid), did); }
+            catch (const std::exception &) {}
+        }
     }
     /* brief: 取用户所有在线设备 → device_id 列表 */
     std::vector<std::string> devices(const std::string &uid) {
@@ -843,6 +1501,14 @@ public:
         }
         return res;
     }
+    // Push delivery is a truth-source path: callers must distinguish an empty
+    // route from an unavailable Redis route table.
+    std::unordered_map<std::string, std::string> device_instances_map_strict(
+            const std::string &uid) {
+        std::unordered_map<std::string, std::string> res;
+        _c->hgetall(key::online_key(uid), std::inserter(res, res.end()));
+        return res;
+    }
     /* brief: 取设备所在 Push 实例 */
     std::string device_instance(const std::string &uid, const std::string &device_id) {
         try {
@@ -859,6 +1525,68 @@ public:
         catch(std::exception &e) { LOG_ERROR("OnlineRoute.online 失败 {}: {}", uid, e.what()); return false; }
     }
 private:
+    static constexpr std::chrono::seconds kLegacyDeviceGraceTtl{24 * 3600};
+    static constexpr const char *kBindLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local route_ttl = tonumber(ARGV[3])
+local device_ttl = tonumber(ARGV[4])
+if not route_ttl or route_ttl <= 0 or not device_ttl or device_ttl <= 0 then
+    return redis.error_reply('invalid ttl')
+end
+local rt = key_type(KEYS[1])
+local dt = key_type(KEYS[2])
+if rt ~= 'none' and rt ~= 'hash' then return redis.error_reply('route key wrong type') end
+if dt ~= 'none' and dt ~= 'set' then return redis.error_reply('device key wrong type') end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+redis.call('SADD', KEYS[2], ARGV[1])
+redis.call('EXPIRE', KEYS[1], route_ttl)
+redis.call('EXPIRE', KEYS[2], device_ttl)
+return 1
+)lua";
+
+    static constexpr const char *kTouchLua = R"lua(
+local route_ttl = tonumber(ARGV[1])
+local device_ttl = tonumber(ARGV[2])
+if not route_ttl or route_ttl <= 0 or not device_ttl or device_ttl <= 0 then
+    return redis.error_reply('invalid ttl')
+end
+redis.call('EXPIRE', KEYS[1], route_ttl)
+redis.call('EXPIRE', KEYS[2], device_ttl)
+return 1
+)lua";
+
+    static constexpr const char *kUnbindLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local rt = key_type(KEYS[1])
+local dt = key_type(KEYS[2])
+if rt ~= 'none' and rt ~= 'hash' then return redis.error_reply('route key wrong type') end
+if dt ~= 'none' and dt ~= 'set' then return redis.error_reply('device key wrong type') end
+local removed = 0
+if ARGV[1] == '' then
+    local entries = redis.call('HGETALL', KEYS[1])
+    for i = 1, #entries, 2 do
+        if entries[i + 1] == ARGV[2] then
+            redis.call('HDEL', KEYS[1], entries[i])
+            redis.call('SREM', KEYS[2], entries[i])
+            removed = removed + 1
+        end
+    end
+elseif redis.call('HGET', KEYS[1], ARGV[1]) == ARGV[2] then
+    redis.call('HDEL', KEYS[1], ARGV[1])
+    redis.call('SREM', KEYS[2], ARGV[1])
+    removed = 1
+end
+return removed
+)lua";
+
     RedisClient::ptr _c;
 };
 
@@ -878,21 +1606,25 @@ public:
      *   - 命中限制返回 false（业务可返回 429 / RATE_LIMITED）
      */
     bool allow(const std::string &key_full, int max_count, int window_sec) {
+        std::vector<std::string> keys = {key_full};
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        std::vector<std::string> args = {
+            std::to_string(max_count),
+            std::to_string(window_sec),
+            std::to_string(now_ms)
+        };
         try {
-            std::vector<std::string> keys = {key_full};
-            auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::system_clock::now().time_since_epoch()).count();
-            std::vector<std::string> args = {
-                std::to_string(max_count),
-                std::to_string(window_sec),
-                std::to_string(now_ms)
-            };
             long long cur = _c->eval<long long>(kRateLimitScript, keys.begin(), keys.end(),
                                                 args.begin(), args.end());
             return cur == 1;
-        } catch(std::exception &e) {
-            LOG_ERROR("RateLimiter.allow {}: {}", key_full, e.what());
-            return true;
+        } catch (const RedisCircuitOpen &) {
+            return allow_local_(key_full, max_count, window_sec);
+        } catch (const sw::redis::Error &e) {
+            if (should_log_redis_error_()) {
+                LOG_WARN("RateLimiter Redis unavailable; using local fallback: {}", e.what());
+            }
+            return allow_local_(key_full, max_count, window_sec);
         }
     }
     bool allow_user(const std::string &uid, int max_count, int window_sec) {
@@ -902,7 +1634,23 @@ public:
         return allow(key::kRateSsid + ssid, max_count, window_sec);
     }
 private:
+    bool should_log_redis_error_() noexcept {
+        const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        auto previous = _last_redis_error_log_sec.load(std::memory_order_relaxed);
+        return now > previous && _last_redis_error_log_sec.compare_exchange_strong(
+            previous, now, std::memory_order_relaxed, std::memory_order_relaxed);
+    }
+    bool allow_local_(const std::string &key_full, int max_count, int window_sec) {
+        metrics::g_rate_limit_local_fallback_total << 1;
+        const bool allowed = _local.allow(key_full, max_count, window_sec);
+        if (!allowed) metrics::g_rate_limit_local_rejected_total << 1;
+        return allowed;
+    }
+
     RedisClient::ptr _c;
+    LocalRateLimiter _local;
+    std::atomic<int64_t> _last_redis_error_log_sec{0};
     static const std::string kRateLimitScript;
 };
 
@@ -1070,22 +1818,26 @@ public:
     static std::string idx_key_for(const std::string &uid, const std::string &device_id) {
         return std::string(key::kUnacked) + "idx:{" + uid + ":" + device_id + "}";
     }
+    // HSCAN continuation for bounded HASH-only orphan repair. HASH mutations
+    // (push/ack) delete it; score-only bump preserves and renews it.
+    static std::string repair_key_for(const std::string &uid, const std::string &device_id) {
+        return std::string(key::kUnacked) + "repair:{" + uid + ":" + device_id + "}";
+    }
 
     /* brief: 入待重传队列（per-device，存 payload_b64 直接用） */
     void push(const std::string &uid, const std::string &device_id,
               unsigned long user_seq, const std::string &payload_b64,
               long long score_ts, std::chrono::seconds ttl = kUnackedTtl) {
-        try {
-            std::string k = key_for(uid, device_id);
-            std::string ik = idx_key_for(uid, device_id);
-            std::string member = std::to_string(user_seq) + ":" + payload_b64;
-            _c->zadd(k, member, static_cast<double>(score_ts));
-            _c->hset(ik, std::to_string(user_seq), payload_b64);
-            _c->expire(k, ttl);
-            _c->expire(ik, ttl);
-        } catch(std::exception &e) {
-            LOG_ERROR("UnackedPush.push 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
-        }
+        std::string k = key_for(uid, device_id);
+        std::string ik = idx_key_for(uid, device_id);
+        std::string rk = repair_key_for(uid, device_id);
+        const auto effective_ttl = randomized_ttl(ttl);
+        std::vector<std::string> keys = {k, ik, rk};
+        std::vector<std::string> args = {
+            std::to_string(score_ts), std::to_string(user_seq), payload_b64,
+            std::to_string(effective_ttl.count())};
+        _c->eval<long long>(kPushLua, keys.begin(), keys.end(),
+                            args.begin(), args.end());
     }
     /* brief: 客户端 ACK 后移除（per-device，O(1) via HASH index） */
     void ack(const std::string &uid, const std::string &device_id,
@@ -1093,12 +1845,11 @@ public:
         try {
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
-            auto payload = _c->hget(ik, std::to_string(user_seq));
-            if (payload) {
-                std::string member = std::to_string(user_seq) + ":" + *payload;
-                _c->zrem(k, member);
-                _c->hdel(ik, std::to_string(user_seq));
-            }
+            std::string rk = repair_key_for(uid, device_id);
+            std::vector<std::string> keys = {k, ik, rk};
+            std::vector<std::string> args = {std::to_string(user_seq)};
+            _c->eval<long long>(kAckLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.ack 失败 {}-{}-{}: {}", uid, device_id, user_seq, e.what());
         }
@@ -1111,19 +1862,17 @@ public:
         if(limit <= 0) return res;
         try {
             std::string k = key_for(uid, device_id);
+            std::string ik = idx_key_for(uid, device_id);
+            std::string rk = repair_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
-            using namespace sw::redis;
             std::vector<std::string> raw;
-            _c->zrangebyscore(k,
-                              BoundedInterval<double>(0, static_cast<double>(now - max_age_sec),
-                                                       BoundType::CLOSED),
-                              LimitOptions{0, limit},
-                              std::back_inserter(raw));
-            for (const auto &s : raw) {
-                auto pos = s.find(':');
-                if (pos == std::string::npos) continue;
-                unsigned long seq = std::stoull(s.substr(0, pos));
-                res.emplace_back(seq, s.substr(pos + 1));
+            std::vector<std::string> keys = {k, ik, rk};
+            std::vector<std::string> args = {
+                std::to_string(now - max_age_sec), std::to_string(limit)};
+            _c->eval(kPeekDueLua, keys.begin(), keys.end(),
+                     args.begin(), args.end(), std::back_inserter(raw));
+            for (size_t i = 0; i + 1 < raw.size(); i += 2) {
+                res.emplace_back(std::stoull(raw[i]), std::move(raw[i + 1]));
             }
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.peek_due 失败 {}-{}-{}: {}", uid, device_id, e.what());
@@ -1138,22 +1887,160 @@ public:
         try {
             std::string k = key_for(uid, device_id);
             std::string ik = idx_key_for(uid, device_id);
+            std::string rk = repair_key_for(uid, device_id);
             long long now = static_cast<long long>(time(nullptr));
+            const auto effective_ttl = randomized_ttl(ttl);
+            std::vector<std::string> keys = {k, ik, rk};
+            std::vector<std::string> args = {
+                std::to_string(effective_ttl.count()), std::to_string(now)};
+            args.reserve(2 + user_seqs.size());
             for (unsigned long seq : user_seqs) {
-                auto payload = _c->hget(ik, std::to_string(seq));
-                if (payload) {
-                    std::string member = std::to_string(seq) + ":" + *payload;
-                    _c->zadd(k, member, static_cast<double>(now), sw::redis::UpdateType::EXIST);
-                }
+                args.push_back(std::to_string(seq));
             }
-            _c->expire(k, ttl);
-            _c->expire(ik, ttl);
+            _c->eval<long long>(kBumpScoreLua, keys.begin(), keys.end(),
+                                args.begin(), args.end());
         } catch(std::exception &e) {
             LOG_ERROR("UnackedPush.bump_score 失败 {}-{}-{}: {}", uid, device_id, e.what());
         }
     }
 
 private:
+    static constexpr const char *kPushLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local score = tonumber(ARGV[1])
+local ttl = tonumber(ARGV[4])
+if not score or not ttl or ttl <= 0 then return redis.error_reply('invalid arguments') end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+redis.call('ZADD', KEYS[1], score, ARGV[2])
+redis.call('HSET', KEYS[2], ARGV[2], ARGV[3])
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
+redis.call('DEL', KEYS[3])
+return 1
+)lua";
+
+    static constexpr const char *kPeekDueLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local cutoff = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+if not cutoff or not limit or limit <= 0 then return redis.error_reply('invalid arguments') end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+local rt = key_type(KEYS[3])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+local cursor = '0'
+if rt == 'string' then
+    cursor = redis.call('GET', KEYS[3]) or '0'
+    if not string.match(cursor, '^%d+$') then
+        redis.call('DEL', KEYS[3])
+        cursor = '0'
+    end
+elseif rt ~= 'none' then
+    redis.call('DEL', KEYS[3])
+end
+local scan = redis.pcall('HSCAN', KEYS[2], cursor, 'COUNT', limit)
+if type(scan) == 'table' and scan.err then
+    redis.call('DEL', KEYS[3])
+    scan = redis.call('HSCAN', KEYS[2], 0, 'COUNT', limit)
+end
+local result = {}
+local due = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', cutoff, 'LIMIT', 0, limit)
+for _, seq in ipairs(due) do
+    local payload = redis.call('HGET', KEYS[2], seq)
+    if payload then
+        table.insert(result, seq)
+        table.insert(result, payload)
+    else
+        redis.call('ZREM', KEYS[1], seq)
+    end
+end
+local fields = scan[2]
+for i = 1, #fields, 2 do
+    local seq = fields[i]
+    if not redis.call('ZSCORE', KEYS[1], seq) then
+        redis.call('HDEL', KEYS[2], seq)
+    end
+end
+local next_cursor = scan[1]
+if next_cursor == '0' then
+    redis.call('DEL', KEYS[3])
+else
+    -- The cursor describes the HASH iteration, so it may never outlive that HASH.
+    local httl = redis.call('PTTL', KEYS[2])
+    if httl > 0 then
+        redis.call('SET', KEYS[3], next_cursor, 'PX', httl)
+    elseif httl == -1 then
+        -- Corrupt persistent ledgers still make progress without leaking metadata forever.
+        redis.call('SET', KEYS[3], next_cursor, 'PX', 300000)
+    else
+        redis.call('DEL', KEYS[3])
+    end
+end
+return result
+)lua";
+
+    static constexpr const char *kBumpScoreLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local ttl = tonumber(ARGV[1])
+local score = tonumber(ARGV[2])
+if not ttl or ttl <= 0 or not score then return redis.error_reply('invalid arguments') end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+local updated = 0
+for i = 3, #ARGV do
+    local payload = redis.call('HGET', KEYS[2], ARGV[i])
+    if payload then
+        if redis.call('ZSCORE', KEYS[1], ARGV[i]) then
+            redis.call('ZADD', KEYS[1], 'XX', score, ARGV[i])
+            updated = updated + 1
+        end
+    else
+        redis.call('ZREM', KEYS[1], ARGV[i])
+    end
+end
+redis.call('EXPIRE', KEYS[1], ttl)
+redis.call('EXPIRE', KEYS[2], ttl)
+if redis.call('EXISTS', KEYS[3]) == 1 then
+    redis.call('EXPIRE', KEYS[3], ttl)
+end
+return updated
+)lua";
+
+    static constexpr const char *kAckLua = R"lua(
+local function key_type(k)
+    local t = redis.call('TYPE', k)
+    if type(t) == 'table' then return t.ok end
+    return t
+end
+local zt = key_type(KEYS[1])
+local ht = key_type(KEYS[2])
+if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
+if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+removed = removed + redis.call('HDEL', KEYS[2], ARGV[1])
+-- HASH mutation invalidates an in-progress HSCAN continuation.
+redis.call('DEL', KEYS[3])
+return removed
+)lua";
+
     RedisClient::ptr _c;
 };
 
@@ -1201,7 +2088,7 @@ public:
         try {
             auto k = key::presence_device_key(uid, device_id);
             _r->hset(k, "state", "ONLINE");
-            _r->expire(k, std::chrono::seconds(120));
+            _r->expire(k, randomized_ttl(std::chrono::seconds(120)));
         } catch(std::exception &e) {
             LOG_ERROR("PresenceRedis.add_device 失败 {}-{}: {}", uid, device_id, e.what());
         }
@@ -1233,7 +2120,7 @@ public:
         try {
             auto k = key::kPresenceTyping + uid;
             _r->sadd(k, conv_id);
-            _r->expire(k, std::chrono::seconds(10));
+            _r->expire(k, randomized_ttl(std::chrono::seconds(10)));
         } catch(std::exception &e) {
             LOG_ERROR("PresenceRedis.set_typing 失败 {}-{}: {}", uid, conv_id, e.what());
         }

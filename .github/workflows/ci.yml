@@ -22,6 +22,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Validate CI gate contracts
+        run: cd tests && go test ./pkg/contracts -count=1
       - name: Go vet
         run: cd tests && go vet ./...
       - name: Go fmt check
@@ -33,8 +41,40 @@ jobs:
             exit 1
           fi
 
+  service-artifacts:
+    runs-on: ubuntu-22.04
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build native-service builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/ci/Dockerfile
+          load: true
+          tags: chatnow-ci-builder:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Build all Compose services once
+        run: |
+          docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
+          '
+      - name: Package Compose service artifacts
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts
+      - name: Validate Compose service artifacts
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/validate_compose_artifacts.sh compose-artifacts
+      - name: Upload Compose service artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: compose-service-artifacts
+          path: compose-artifacts
+          if-no-files-found: error
+
   bvt:
-    needs: build
+    needs: service-artifacts
     runs-on: ubuntu-22.04
     if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     steps:
@@ -46,6 +86,32 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - &download-compose-artifacts
+        name: Download Compose service artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: compose-service-artifacts
+          path: compose-artifacts
+      - &restore-compose-artifacts
+        name: Restore Compose build contexts
+        run: |
+          for service in conversation gateway identity media message presence push relationship transmite; do
+            rm -rf "$service/build" "$service/depends"
+            cp -a "compose-artifacts/$service/build" "$service/build"
+            cp -a "compose-artifacts/$service/depends" "$service/depends"
+          done
+      - &chmod-compose-artifacts
+        name: Restore service executable modes
+        run: |
+          for service in conversation gateway identity media message presence push relationship transmite; do
+            chmod +x "compose-artifacts/$service/build/${service}_server"
+            chmod +x "$service/build/${service}_server"
+          done
+      - &validate-compose-artifacts
+        name: Validate downloaded Compose service artifacts
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 ./scripts/validate_compose_artifacts.sh compose-artifacts
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -61,7 +127,7 @@ jobs:
         run: docker compose down -v
 
   func:
-    needs: bvt
+    needs: [service-artifacts, bvt]
     runs-on: ubuntu-22.04
     if: github.event_name == 'pull_request' || github.event_name == 'schedule'
     steps:
@@ -73,6 +139,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - *download-compose-artifacts
+      - *restore-compose-artifacts
+      - *chmod-compose-artifacts
+      - *validate-compose-artifacts
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -83,6 +155,76 @@ jobs:
         run: cd tests && go mod download
       - name: Run functional tests
         run: cd tests && make test-func
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  reliability:
+    needs: service-artifacts
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - *download-compose-artifacts
+      - *restore-compose-artifacts
+      - *chmod-compose-artifacts
+      - *validate-compose-artifacts
+      - name: Start full stack
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run cache reliability gate
+        run: cd tests && make test-reliability
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  perf-cache:
+    needs: service-artifacts
+    runs-on: ubuntu-22.04
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - *download-compose-artifacts
+      - *restore-compose-artifacts
+      - *chmod-compose-artifacts
+      - *validate-compose-artifacts
+      - name: Start full stack with PF-09 rate limits
+        env:
+          # Transmite flags are int32; use the maximum valid value for gate-only headroom.
+          TRANSMITE_RATE_LIMIT_USER_MAX: '2147483647'
+          TRANSMITE_RATE_LIMIT_SESSION_MAX: '2147483647'
+        run: docker compose up -d --build
+      - name: Wait for services
+        run: ./scripts/wait_for_services.sh
+      - name: Generate Go protobuf
+        run: cd tests && make proto
+      - name: Download Go deps
+        run: cd tests && go mod download
+      - name: Run cache performance gate
+        run: cd tests && make test-perf-cache-gate
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -100,6 +242,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler netcat-openbsd
+      - name: Install Go protobuf generator
+        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services

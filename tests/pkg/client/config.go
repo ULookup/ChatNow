@@ -2,6 +2,7 @@ package client
 
 import (
 	"os"
+	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
@@ -11,6 +12,7 @@ type Config struct {
 	Timeout  TimeoutConfig  `yaml:"timeout"`
 	Database DatabaseConfig `yaml:"database"`
 	Log      LogConfig      `yaml:"log"`
+	Infra    InfraConfig    `yaml:"infra"`
 }
 
 type TargetConfig struct {
@@ -31,6 +33,15 @@ type DatabaseConfig struct {
 
 type LogConfig struct {
 	Level string `yaml:"level"`
+}
+
+type InfraConfig struct {
+	RedisContainer    string `yaml:"redis_container"`
+	PushContainer     string `yaml:"push_container"`
+	PushVars          string `yaml:"push_vars"`
+	PushRouteL1TTLSec int    `yaml:"push_route_l1_ttl_sec"`
+	ComposeDir        string `yaml:"compose_dir"`
+	TransmiteVars     string `yaml:"transmite_vars"`
 }
 
 func LoadConfig(path string) *Config {
@@ -57,6 +68,28 @@ func LoadConfig(path string) *Config {
 	}
 	if v := os.Getenv("ES_URL"); v != "" {
 		cfg.Database.ESURL = v
+	}
+	if v := os.Getenv("REDIS_CONTAINER"); v != "" {
+		cfg.Infra.RedisContainer = v
+	}
+	if v := os.Getenv("PUSH_CONTAINER"); v != "" {
+		cfg.Infra.PushContainer = v
+	}
+	if v := os.Getenv("PUSH_VARS"); v != "" {
+		cfg.Infra.PushVars = v
+	}
+	if v := os.Getenv("PUSH_ROUTE_L1_TTL_SEC"); v != "" {
+		ttl, err := strconv.Atoi(v)
+		if err != nil {
+			panic("invalid PUSH_ROUTE_L1_TTL_SEC: " + err.Error())
+		}
+		cfg.Infra.PushRouteL1TTLSec = ttl
+	}
+	if v := os.Getenv("COMPOSE_DIR"); v != "" {
+		cfg.Infra.ComposeDir = v
+	}
+	if v := os.Getenv("TRANSMITE_VARS"); v != "" {
+		cfg.Infra.TransmiteVars = v
 	}
 	return cfg
 }

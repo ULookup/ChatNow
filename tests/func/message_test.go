@@ -4,6 +4,7 @@ package func_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -443,10 +444,13 @@ func TestFN_MS_SelectByClientMsgId_NotFound(t *testing.T) {
 	assert.Nil(t, rsp.Message, "不存在的 client_msg_id 应返回 nil message")
 }
 
-// FN-MS (untested) | P0 | UpdateReadAck 更新 last_read_msg_id
+// FN-MS | P0 | UpdateReadAck advances the conversation delivery ACK watermark.
 func TestFN_MS_UpdateReadAck_Success(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	_, seqID := fixture.SendTextMessage(t, alice, convID, "ack-test-msg")
+	messageID, seqID := fixture.SendTextMessage(t, alice, convID, "ack-test-msg")
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, messageID, 10*time.Second)
 
 	req := &msg.UpdateReadAckReq{
 		RequestId:      client.NewRequestID(),
@@ -458,17 +462,19 @@ func TestFN_MS_UpdateReadAck_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, rsp.Header.Success, "update_read_ack 失败: %s", rsp.Header.ErrorMessage)
 
-	// 直查 DB 验证 last_read_seq 更新
-	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
-	defer verifier.Close()
-	verifier.LastReadSeq(t, bob.UserID, convID, seqID)
+	// 直查 DB 验证 last_ack_seq 更新。
+	verifier.LastAckSeq(t, bob.UserID, convID, seqID)
 }
 
-// FN-MS (untested) | P0 | UpdateReadAck 幂等（重复 ACK 不回退）
+// FN-MS | P0 | UpdateReadAck is idempotent and never moves backwards.
 func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	_, seq1 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-1")
-	_, seq2 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-2")
+	messageID1, seq1 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-1")
+	messageID2, seq2 := fixture.SendTextMessage(t, alice, convID, "ack-idempotent-2")
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, messageID1, 10*time.Second)
+	verifier.WaitMessageExists(t, messageID2, 10*time.Second)
 
 	// ACK 到 seq2
 	ackReq := &msg.UpdateReadAckReq{
@@ -476,18 +482,22 @@ func TestFN_MS_UpdateReadAck_Idempotent(t *testing.T) {
 		ConversationId: convID,
 		SeqId:          seq2,
 	}
-	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq, &msg.UpdateReadAckRsp{}))
+	ackRsp := &msg.UpdateReadAckRsp{}
+	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq, ackRsp))
+	require.True(t, ackRsp.GetHeader().GetSuccess(),
+		"newer delivery ACK watermark failed: %s", ackRsp.GetHeader().GetErrorMessage())
 
-	// 再 ACK 到 seq1（小于 seq2），last_read_seq 不应回退
+	// 再 ACK 较早消息，last_ack_seq 不应回退。
 	ackReq2 := &msg.UpdateReadAckReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
 		SeqId:          seq1,
 	}
-	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq2, &msg.UpdateReadAckRsp{}))
+	ackRsp2 := &msg.UpdateReadAckRsp{}
+	require.NoError(t, bob.DoAuth("/service/message/update_read_ack", ackReq2, ackRsp2))
+	require.True(t, ackRsp2.GetHeader().GetSuccess(),
+		"backward delivery ACK watermark must be idempotent: %s", ackRsp2.GetHeader().GetErrorMessage())
 
-	// 直查 DB 验证 last_read_seq 仍为 seq2
-	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
-	defer verifier.Close()
-	verifier.LastReadSeq(t, bob.UserID, convID, seq2)
+	// 直查 DB 验证 last_ack_seq 仍为 seq2。
+	verifier.LastAckSeq(t, bob.UserID, convID, seq2)
 }

@@ -74,6 +74,7 @@ public:
                         const Members::ptr &members_cache,
                         const RateLimiter::ptr &rate_limiter,
                         const RedisClient::ptr &redis,
+                        const UserInfoCache::ptr &user_info_cache,
                         LocalCache<MembersCacheEntry>::ptr local_members_cache = nullptr,
                         LocalCache<std::string>::ptr local_user_cache = nullptr,
                         InflightRegistry::ptr inflight_registry = nullptr,
@@ -92,6 +93,7 @@ public:
                         _members_cache(members_cache),
                         _rate_limiter(rate_limiter),
                         _redis(redis),
+                        _user_info_cache(user_info_cache),
                         _local_members_cache(std::move(local_members_cache)),
                         _local_user_cache(std::move(local_user_cache)),
                         _inflight_registry(std::move(inflight_registry)),
@@ -237,23 +239,17 @@ public:
             }
         }
 
-        // ⑤ 并行 RPC：Identity.GetProfile（sender 信息）+ Conversation.GetMemberIds（收件人列表）
-        auto identity_channel = _mm_channels->choose(_identity_service_name);
-        if (!identity_channel) {
-            LOG_ERROR("请求ID: {} - identity_service 节点缺失", rid);
-            return err_response(rid, chatnow::error::kSystemUnavailable, "依赖服务暂不可用");
+        // ⑤ sender 资料：L1 → uid singleflight → L2 → Identity RPC。
+        auto serialized_user_info = resolve_user_info(
+            uid, rid, static_cast<brpc::Controller*>(controller));
+        chatnow::common::UserInfo sender_info;
+        if (!serialized_user_info || serialized_user_info->empty() ||
+            !sender_info.ParseFromString(*serialized_user_info)) {
+            LOG_ERROR("请求ID: {} - 获取用户信息失败 uid={}", rid, uid);
+            return err_response(rid, chatnow::error::kSystemUnavailable, "获取用户信息失败");
         }
 
         // 成员列表：L1 → InflightRegistry → L2 Redis → RedisMutex → RPC (内置 warm)
-        // 先发起 profile RPC（异步），与成员解析并行
-        chatnow::identity::IdentityService_Stub identity_stub(identity_channel.get());
-        chatnow::identity::GetProfileReq profile_req;
-        chatnow::identity::GetProfileRsp profile_rsp;
-        brpc::Controller profile_cntl;
-        profile_req.set_request_id(rid);
-        profile_req.set_user_id(uid);
-        chatnow::auth::forward_auth_metadata(static_cast<brpc::Controller*>(controller), &profile_cntl);
-        identity_stub.GetProfile(&profile_cntl, &profile_req, &profile_rsp, brpc::DoNothing());
 
         MembersResult members_result;
         for (int retry = 0; retry < 3; ++retry) {
@@ -264,11 +260,6 @@ public:
         }
         std::vector<std::string> member_id_list = std::move(members_result.members);
 
-        brpc::Join(profile_cntl.call_id());
-        if (profile_cntl.Failed() || !profile_rsp.header().success()) {
-            LOG_ERROR("请求ID: {} - 获取用户信息失败: {}", rid, profile_cntl.ErrorText());
-            return err_response(rid, chatnow::error::kSystemUnavailable, "获取用户信息失败");
-        }
         if (member_id_list.empty()) {
             LOG_ERROR("请求ID: {} - 会话成员为空 ssid={}", rid, chat_ssid);
             return err_response(rid, chatnow::error::kConversationNotFound, "会话已解散或不存在");
@@ -563,18 +554,120 @@ public:
     }
 }
 
-    std::string resolve_user_info(const std::string &uid) const {
-        if (!_local_user_cache) return "";
-        std::string ukey = key::local_user_info_cache_key(uid);
-        auto cached = _local_user_cache->get(ukey);
-        if (cached.has_value()) return *cached;
-        return "";
+    std::optional<std::string> resolve_user_info(const std::string &uid,
+                                                 const std::string &rid,
+                                                 brpc::Controller *caller) {
+        const auto lkey = key::local_user_info_cache_key(uid);
+        auto parseable = [](const std::string &bytes) {
+            chatnow::common::UserInfo info;
+            return !bytes.empty() && info.ParseFromString(bytes);
+        };
+        auto read_l1 = [&]() -> std::optional<std::string> {
+            if (!_local_user_cache) return std::nullopt;
+            auto local = _local_user_cache->get(lkey);
+            if (!local) return std::nullopt;
+            if (parseable(*local)) {
+                metrics::g_user_info_l1_hit_total << 1;
+                return local;
+            }
+            _local_user_cache->invalidate(lkey);
+            if (_user_info_cache) _user_info_cache->invalidate(uid);
+            return std::nullopt;
+        };
+
+        if (auto local = read_l1()) return local;
+
+        auto resolve_after_lock = [&]() -> std::optional<std::string> {
+            if (auto local = read_l1()) return local;
+            if (_user_info_cache) {
+                if (auto redis = _user_info_cache->get(uid)) {
+                    if (redis->empty()) return std::nullopt;  // confirmed-not-found sentinel
+                    if (parseable(*redis)) {
+                        metrics::g_user_info_l2_hit_total << 1;
+                        if (_local_user_cache) {
+                            _local_user_cache->set(
+                                lkey, *redis, randomized_ttl(std::chrono::seconds(45)));
+                        }
+                        return redis;
+                    }
+                    _user_info_cache->invalidate(uid);
+                }
+            }
+
+            const auto generation = _user_info_cache
+                ? _user_info_cache->generation(uid) : std::optional<uint64_t>{};
+            bool confirmed_not_found = false;
+            auto info = fetch_user_info_from_identity_(uid, rid, caller, &confirmed_not_found);
+            if (!info) {
+                if (confirmed_not_found && generation && _user_info_cache) {
+                    _user_info_cache->set_if_generation(uid, "", *generation);
+                }
+                return std::nullopt;
+            }
+            auto bytes = info->SerializeAsString();
+            auto write_result = GenerationWriteResult::Unavailable;
+            if (generation && _user_info_cache) {
+                write_result = _user_info_cache->set_if_generation(
+                    uid, bytes, *generation);
+            }
+            // A real generation conflict means invalidation won the race, so the
+            // stale Identity response is returned only to its current caller. If
+            // Redis was unavailable, retain the short-lived availability fallback.
+            publish_user_info_l1(write_result, [&](UserInfoL1Publication) {
+                if (!_local_user_cache) return;
+                _local_user_cache->set(
+                    lkey, bytes, randomized_ttl(std::chrono::seconds(45)));
+            });
+            return bytes;
+        };
+
+        if (!_inflight_registry) return resolve_after_lock();
+        auto guard = _inflight_registry->acquire("user:" + uid);
+        std::unique_lock lk(*guard.mu);
+        return resolve_after_lock();
     }
 
-    void warm_user_info(const std::string &uid, const std::string &serialized_info) {
-        if (_local_user_cache && !serialized_info.empty())
-            _local_user_cache->set(key::local_user_info_cache_key(uid), serialized_info,
-                                   randomized_ttl(std::chrono::seconds(45)));
+    std::optional<chatnow::common::UserInfo> fetch_user_info_from_identity_(
+        const std::string &uid, const std::string &rid, brpc::Controller *caller,
+        bool *confirmed_not_found) {
+        auto identity_channel = _mm_channels->choose(_identity_service_name);
+        if (!identity_channel) {
+            LOG_ERROR("identity_service 节点缺失 (user info {})", uid);
+            return std::nullopt;
+        }
+        chatnow::identity::IdentityService_Stub stub(identity_channel.get());
+        chatnow::identity::GetProfileReq req;
+        chatnow::identity::GetProfileRsp rsp;
+        brpc::Controller cntl;
+        req.set_request_id(rid);
+        req.set_user_id(uid);
+        if (caller) chatnow::auth::forward_auth_metadata(caller, &cntl);
+        stub.GetProfile(&cntl, &req, &rsp, nullptr);
+        metrics::g_user_info_rpc_total << 1;
+        if (cntl.Failed() || !rsp.header().success()) {
+            if (confirmed_not_found && !cntl.Failed() &&
+                rsp.header().error_code() == chatnow::error::kAuthUserNotFound) {
+                *confirmed_not_found = true;
+            }
+            LOG_ERROR("获取用户信息失败 uid={}: {} {}", uid, cntl.ErrorText(),
+                      rsp.header().error_message());
+            return std::nullopt;
+        }
+        if (!rsp.has_user_info()) {
+            LOG_ERROR("获取用户信息响应缺少 user_info uid={}", uid);
+            return std::nullopt;
+        }
+        auto bytes = rsp.user_info().SerializeAsString();
+        if (bytes.empty()) {
+            LOG_ERROR("获取用户信息响应序列化为空 uid={}", uid);
+            return std::nullopt;
+        }
+        chatnow::common::UserInfo info;
+        if (!info.ParseFromString(bytes)) {
+            LOG_ERROR("获取用户信息响应无法解析 uid={}", uid);
+            return std::nullopt;
+        }
+        return info;
     }
 
     std::optional<std::vector<std::string>> fetch_members_from_conversation_service_(
@@ -647,6 +740,7 @@ private:
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
     RedisClient::ptr _redis;
+    UserInfoCache::ptr _user_info_cache;
     LocalCache<MembersCacheEntry>::ptr _local_members_cache;
     LocalCache<std::string>::ptr _local_user_cache;
     InflightRegistry::ptr _inflight_registry;
@@ -823,6 +917,7 @@ public:
         }
         _seq_gen = std::make_shared<SeqGen>(_redis_client);
         _members_cache = std::make_shared<Members>(_redis_client);
+        _user_info_cache = std::make_shared<UserInfoCache>(_redis_client);
         _rate_limiter = std::make_shared<RateLimiter>(_redis_client);
     }
 
@@ -865,6 +960,7 @@ public:
                                                                         _members_cache,
                                                                         _rate_limiter,
                                                                         _redis_client,
+                                                                        _user_info_cache,
                                                                         _local_members_cache,
                                                                         _local_user_cache,
                                                                         _inflight_registry,
@@ -922,6 +1018,7 @@ private:
     SeqGen::ptr _seq_gen;
     Members::ptr _members_cache;
     RateLimiter::ptr _rate_limiter;
+    UserInfoCache::ptr _user_info_cache;
     LocalCache<MembersCacheEntry>::ptr _local_members_cache;
     LocalCache<std::string>::ptr _local_user_cache;
     InflightRegistry::ptr _inflight_registry;

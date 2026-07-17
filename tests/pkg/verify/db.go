@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -48,6 +49,24 @@ func (v *DBVerifier) MessageExists(t testing.TB, messageID int64) {
 	if cnt != 1 {
 		t.Fatalf("message %d 未落库，期望 1 行，实际 %d 行", messageID, cnt)
 	}
+}
+
+// WaitMessageExists waits for the asynchronous MQ consumer to persist a message.
+func (v *DBVerifier) WaitMessageExists(t testing.TB, messageID int64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var count int
+		err := v.db.QueryRow("SELECT COUNT(*) FROM message WHERE message_id = ?", messageID).Scan(&count)
+		if err == nil && count == 1 {
+			return
+		}
+		if err != nil {
+			t.Fatalf("query message %d while waiting: %v", messageID, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("message %d was not persisted within %s", messageID, timeout)
 }
 
 // MessageCount 验证某会话 message 表记录数。
@@ -120,6 +139,21 @@ func (v *DBVerifier) LastReadSeq(t testing.TB, userID, conversationID string, ex
 	}
 	if seq != expected {
 		t.Fatalf("last_read_seq user=%s conv=%s 期望 %d，实际 %d", userID, conversationID, expected, seq)
+	}
+}
+
+// LastAckSeq verifies the delivery acknowledgement cursor.
+func (v *DBVerifier) LastAckSeq(t testing.TB, userID, conversationID string, expected uint64) {
+	var seq uint64
+	err := v.db.QueryRow(
+		"SELECT last_ack_seq FROM conversation_member WHERE user_id = ? AND conversation_id = ?",
+		userID, conversationID,
+	).Scan(&seq)
+	if err != nil {
+		t.Fatalf("query last_ack_seq: %v", err)
+	}
+	if seq != expected {
+		t.Fatalf("last_ack_seq user=%s conv=%s 期望 %d，实际 %d", userID, conversationID, expected, seq)
 	}
 }
 

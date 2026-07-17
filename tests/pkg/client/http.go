@@ -57,13 +57,23 @@ func (c *HTTPClient) DoWithTrace(path string, req proto.Message, resp proto.Mess
 	return c.do(path, req, resp, accessToken, traceID)
 }
 
+// DoProtobufURL sends a protobuf request directly to an absolute service URL.
+func (c *HTTPClient) DoProtobufURL(endpoint string, req proto.Message, resp proto.Message) error {
+	_, err := c.doURL(endpoint, req, resp, "", "")
+	return err
+}
+
 func (c *HTTPClient) do(path string, req proto.Message, resp proto.Message, accessToken, traceID string) (http.Header, error) {
+	return c.doURL(c.baseURL+path, req, resp, accessToken, traceID)
+}
+
+func (c *HTTPClient) doURL(endpoint string, req proto.Message, resp proto.Message, accessToken, traceID string) (http.Header, error) {
 	body, err := proto.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", c.baseURL+path, bytes.NewReader(body))
+	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}

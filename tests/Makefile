@@ -1,4 +1,7 @@
-.PHONY: proto test-bvt test-func test-scenario test-perf test-agent-policy clean deps
+.PHONY: proto test-bvt test-func test-reliability test-scenario test-perf test-perf-cache test-perf-cache-gate test-agent-policy clean deps
+
+PF09_BASELINE_MSG_PER_SEC ?= 5000
+PF09_EXPECTED_TRANSMITE_INSTANCES ?= 1
 
 # Generate Go protobuf from proto/ definitions
 # NOTE: protoc-gen-go >= v1.35 requires go_package option or M flags to derive
@@ -35,6 +38,10 @@ test-bvt:
 test-func:
 	go test -tags=func ./func/... -v -count=1
 
+# Run reliability/chaos tests (requires the Docker Compose stack)
+test-reliability:
+	go test -tags=reliability ./reliability/... -v -count=1 -timeout=180s
+
 # Run scenario tests only (L3)
 test-scenario:
 	go test -tags=func ./func/... -run TestScenario -v -count=1
@@ -42,6 +49,21 @@ test-scenario:
 # Run performance benchmarks (L4)
 test-perf:
 	go test -tags=perf ./perf/... -bench=. -benchmem -count=3 -benchtime=10s
+
+# Compile/discover PF-09 locally. It skips unless the explicit full-stack gate is enabled.
+test-perf-cache:
+	go test -v -tags=perf ./perf/... -run '^$$' -bench '^BenchmarkPF09_UserInfoCache$$' -benchtime=1x
+
+# Real Linux full-stack gate. The deployment must raise Transmite's user/session
+# rate limits above the generated load; any rate_limited response fails PF-09.
+# Multi-instance stacks must set PF09_TRANSMITE_VARS_URLS to every bvar endpoint,
+# separated by commas, so the RPC-reduction snapshot cannot omit an instance.
+test-perf-cache-gate:
+	@test "$$(uname -s)" = Linux || (echo "PF-09 gate requires Linux" >&2; exit 1)
+	PF09_RUN_FULLSTACK=1 PF09_BASELINE_MSG_PER_SEC=$(PF09_BASELINE_MSG_PER_SEC) \
+	PF09_EXPECTED_TRANSMITE_INSTANCES=$(PF09_EXPECTED_TRANSMITE_INSTANCES) \
+		go test -tags=perf ./perf/... -run '^$$' -bench '^BenchmarkPF09_UserInfoCache$$' \
+		-benchmem -count=3 -benchtime=1x
 
 # Run repository Agent policy validator tests
 test-agent-policy:

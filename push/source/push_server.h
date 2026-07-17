@@ -41,6 +41,8 @@
 #include <thread>
 #include <chrono>
 #include <limits>
+#include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 
 namespace chatnow::push {
@@ -64,7 +66,8 @@ public:
                     const ServiceManager::ptr &channels,
                     LeaderElection::ptr cross_reaper_election = nullptr,
                     LocalCache<RouteEntry>::ptr local_route_cache = nullptr,
-                    InflightRegistry::ptr inflight_registry = nullptr)
+                    InflightRegistry::ptr inflight_registry = nullptr,
+                    std::chrono::seconds route_l1_ttl = std::chrono::seconds(2))
         : _connections(connections),
           _jwt_codec(jwt_codec),
           _redis(redis),
@@ -76,7 +79,12 @@ public:
           _mm_channels(channels),
           _cross_reaper_election(std::move(cross_reaper_election)),
           _local_route_cache(std::move(local_route_cache)),
-          _inflight_registry(std::move(inflight_registry)) {}
+          _inflight_registry(std::move(inflight_registry)),
+          _route_l1_ttl(route_l1_ttl) {
+        if (_route_l1_ttl.count() < 1 || _route_l1_ttl.count() > 300) {
+            throw std::invalid_argument("Push route L1 TTL must be within 1..300 seconds");
+        }
+    }
 
     void set_resend_params(long batch, long max_age_sec) {
         _resend_batch = batch;
@@ -124,24 +132,36 @@ public:
                 payload = notify.SerializeAsString();
             }
 
-            int delivered = 0;
             auto route = resolve_route(request->user_id());
+            // Persist before delivery. On failure the RPC is retryable and no
+            // client has observed a payload without durable retransmit state.
+            if (request->has_user_seq()) {
+                std::string payload_b64 = _utils_base64_encode(payload);
+                long long now_ts = static_cast<long long>(time(nullptr));
+                for (const auto &did : route.device_ids) {
+                    if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
+                    persist_unacked_(request->user_id(), did, request->user_seq(),
+                                     payload_b64, now_ts);
+                }
+            }
+
+            int delivered = 0;
             for (const auto &did : route.device_ids) {
                 if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
                 if (_local_send(request->user_id(), did, payload) > 0) ++delivered;
             }
 
-            if (request->has_user_seq() && _unacked) {
-                std::string payload_b64 = _utils_base64_encode(payload);
-                long long now_ts = static_cast<long long>(time(nullptr));
-                for (const auto &did : route.device_ids) {
-                    if (filter_devices && target_dids.find(did) == target_dids.end()) continue;
-                    _unacked->push(request->user_id(), did,
-                                   request->user_seq(), payload_b64, now_ts);
-                }
-            }
-
             response->set_online_device_count(delivered);
+        } catch (const RedisCircuitOpen& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
+        } catch (const sw::redis::Error& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
         } catch (const ::chatnow::ServiceError& e) {
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(e.code());
@@ -192,14 +212,24 @@ public:
                 }
 
                 for (const auto &did : route.device_ids) {
-                    if (_local_send(uid, did, payload) > 0) ++total;
-                    if (it != uid2seq.end() && _unacked) {
-                        _unacked->push(uid, did, it->second,
-                                       _utils_base64_encode(payload), now_ts);
+                    if (it != uid2seq.end()) {
+                        persist_unacked_(uid, did, it->second,
+                                         _utils_base64_encode(payload), now_ts);
                     }
+                    if (_local_send(uid, did, payload) > 0) ++total;
                 }
             }
             response->set_online_count(total);
+        } catch (const RedisCircuitOpen& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
+        } catch (const sw::redis::Error& e) {
+            response->mutable_header()->set_success(false);
+            response->mutable_header()->set_error_code(::chatnow::error::kSystemUnavailable);
+            response->mutable_header()->set_error_message("unacked persistence unavailable");
+            cntl->SetFailed(e.what());
         } catch (const ::chatnow::ServiceError& e) {
             response->mutable_header()->set_success(false);
             response->mutable_header()->set_error_code(e.code());
@@ -239,7 +269,16 @@ public:
         std::vector<std::string> remote_uids;
         remote_uids.reserve(internal_msg.member_id_list_size());
         for (const auto &uid : internal_msg.member_id_list()) {
-            auto route = resolve_route(uid);
+            RouteEntry route;
+            try {
+                route = resolve_route(uid);
+            } catch (const RedisCircuitOpen &e) {
+                LOG_WARN("Push-Consumer: route circuit unavailable: {}", e.what());
+                return requeue_();
+            } catch (const sw::redis::Error &e) {
+                LOG_WARN("Push-Consumer: route Redis unavailable: {}", e.what());
+                return requeue_();
+            }
             if (route.device_ids.empty()) { remote_uids.push_back(uid); continue; }
 
             auto itu = uid2seq.find(uid);
@@ -259,11 +298,23 @@ public:
                 std::string inst = (it != route.device_to_instance.end()) ? it->second : "";
                 if (inst == _instance_id) {
                     if (itu != uid2seq.end()) {
-                        if (_local_send(uid, did, user_payload) > 0) any_local = true;
-                        if (_unacked) {
-                            _unacked->push(uid, did, itu->second,
-                                           _utils_base64_encode(user_payload), now_ts);
+                        try {
+                            persist_unacked_(uid, did, itu->second,
+                                             _utils_base64_encode(user_payload), now_ts);
+                        } catch (const RedisCircuitOpen &e) {
+                            LOG_WARN("Push-Consumer: unacked circuit unavailable: {}", e.what());
+                            return requeue_();
+                        } catch (const sw::redis::Error &e) {
+                            LOG_WARN("Push-Consumer: unacked Redis unavailable: {}", e.what());
+                            return requeue_();
+                        } catch (const ::chatnow::ServiceError &e) {
+                            LOG_WARN("Push-Consumer: unacked unavailable: {}", e.what());
+                            return requeue_();
+                        } catch (const std::exception &e) {
+                            LOG_WARN("Push-Consumer: unacked persistence failed: {}", e.what());
+                            return requeue_();
                         }
+                        if (_local_send(uid, did, user_payload) > 0) any_local = true;
                     } else {
                         // 大群读扩散：无 user_seq，仅下发
                         _local_send(uid, did, notify_template.SerializeAsString());
@@ -279,7 +330,14 @@ public:
         // 2) 跨实例：按 Push 实例 ID 分组
         std::unordered_map<std::string, std::unordered_set<std::string>> peer_to_uids;
         for (const auto &uid : remote_uids) {
-            auto route = resolve_route(uid);
+            RouteEntry route;
+            try {
+                route = resolve_route(uid);
+            } catch (const RedisCircuitOpen &) {
+                return requeue_();
+            } catch (const sw::redis::Error &) {
+                return requeue_();
+            }
             for (const auto &did : route.device_ids) {
                 auto it = route.device_to_instance.find(did);
                 std::string peer = (it != route.device_to_instance.end()) ? it->second : "";
@@ -288,45 +346,37 @@ public:
             }
         }
 
-        // 3) 每个对端一次 PushBatch（异步 brpc::DoNothing）
-        std::string internal_b64 = _utils_base64_encode(internal_msg.SerializeAsString());
+        // 3) 每个对端一次 PushBatch。等待持久化结果后才能 ACK MQ；若后续
+        // peer 失败，MQ 重投可能重复前面的下发，但 Unacked ZADD/HSET 以 seq
+        // 幂等覆盖，提供明确的 at-least-once 语义。
         for (auto &kv : peer_to_uids) {
             const std::string &peer = kv.first;
             std::vector<std::string> uids(kv.second.begin(), kv.second.end());
             auto channel = _mm_channels->choose(peer);
             if (!channel) {
                 LOG_WARN("Push-Consumer: 对端 {} 不可达", peer);
-                for (const auto &u : uids)
-                    if (_online_route) _online_route->unbind(u, "", peer);
-                if (_cross_outbox) {
-                    _cross_outbox->enqueue(internal_b64, uids, peer, now_ts);
-                }
-                continue;
+                return requeue_();
             }
             PushService_Stub stub(channel.get());
-            auto *closure = new SelfDeleteRpcClosure<PushBatchReq, PushBatchRsp>();
-            closure->req.set_request_id(msg_info.client_msg_id());
-            for (const auto &u : uids) closure->req.add_user_id_list(u);
-            closure->req.mutable_notify()->CopyFrom(notify_template);
+            PushBatchReq req;
+            PushBatchRsp rsp;
+            brpc::Controller cntl;
+            req.set_request_id(msg_info.client_msg_id());
+            for (const auto &u : uids) req.add_user_id_list(u);
+            req.mutable_notify()->CopyFrom(notify_template);
             for (const auto &u : uids) {
                 auto it = uid2seq.find(u);
                 if (it == uid2seq.end()) continue;
-                auto *p = closure->req.add_user_seqs();
+                auto *p = req.add_user_seqs();
                 p->set_user_id(u);
                 p->set_user_seq(it->second);
             }
-            std::string peer_id = peer;
-            closure->on_done = [peer_id, uids, outbox = _cross_outbox,
-                                online = _online_route, internal_b64, now_ts]
-                (brpc::Controller *c, const PushBatchRsp &) {
-                if (c->Failed()) {
-                    LOG_WARN("PushBatch 跨实例失败 peer={}: {}", peer_id, c->ErrorText());
-                    for (const auto &u : uids)
-                        if (online) online->unbind(u, "", peer_id);
-                    if (outbox) outbox->enqueue(internal_b64, uids, peer_id, now_ts);
-                }
-            };
-            stub.PushBatch(&closure->cntl, &closure->req, &closure->rsp, closure);
+            stub.PushBatch(&cntl, &req, &rsp, nullptr);
+            if (cntl.Failed() || !rsp.header().success()) {
+                LOG_WARN("PushBatch persistence failed peer={}: {} {}", peer,
+                         cntl.ErrorText(), rsp.header().error_message());
+                return requeue_();
+            }
         }
         return ConsumeAction::Ack;
     }
@@ -338,7 +388,7 @@ public:
             const auto &ack = notify.msg_push_ack();
             if (!is_valid_push_ack_ids(ack.user_seq(), ack.message_id()) ||
                 ack.user_id().empty() ||
-                ack.conversation_id().empty() || ack.device_id().empty()) {
+                ack.device_id().empty()) {
                 LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={} message_id={}",
                          ack.user_id(), ack.device_id(), ack.user_seq(), ack.message_id());
                 return;
@@ -356,7 +406,11 @@ public:
             }
             if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
 
-            // 异步上报 UpdateReadAck（无入站 RPC context，需手动设置 auth metadata）
+            // Non-message pushes still ACK their Unacked entry but carry no
+            // conversation delivery ACK watermark.
+            if (!(ack.seq_id() > 0 && !ack.conversation_id().empty())) return;
+
+            // 异步上报会话 seq_id 水位（无入站 RPC context，需手动设置 auth metadata）
             auto channel = _mm_channels->choose(_message_service_name);
             if (!channel) {
                 LOG_WARN("UpdateReadAck: message service 不可达 uid={}", ack.user_id());
@@ -368,7 +422,7 @@ public:
                 chatnow::message::UpdateReadAckRsp>();
             closure->req.set_request_id(ack.user_id());
             closure->req.set_conversation_id(ack.conversation_id());
-            closure->req.set_message_id(static_cast<uint64_t>(ack.message_id()));
+            closure->req.set_seq_id(ack.seq_id());
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
             meta.set_user_id(conn_uid);
@@ -377,10 +431,10 @@ public:
             std::string data;
             meta.SerializeToString(&data);
             closure->cntl.request_attachment().append(data);
-            closure->on_done = [uid = ack.user_id(), mid = ack.message_id()]
+            closure->on_done = [uid = ack.user_id(), seq = ack.seq_id()]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
                 if (c->Failed()) {
-                    LOG_WARN("UpdateReadAck RPC 失败 uid={} message_id={}: {}", uid, mid, c->ErrorText());
+                    LOG_WARN("UpdateReadAck RPC 失败 uid={} seq_id={}: {}", uid, seq, c->ErrorText());
                 }
             };
             stub.UpdateReadAck(&closure->cntl, &closure->req, &closure->rsp, closure);
@@ -428,6 +482,27 @@ public:
     }
 
 private:
+    void persist_unacked_(const std::string &uid, const std::string &did,
+                          unsigned long user_seq, const std::string &payload_b64,
+                          long long score_ts) {
+        if (!_unacked) {
+            metrics::g_push_unacked_persist_failure_total << 1;
+            throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
+                                          "unacked persistence unavailable");
+        }
+        try {
+            _unacked->push(uid, did, user_seq, payload_b64, score_ts);
+        } catch (...) {
+            metrics::g_push_unacked_persist_failure_total << 1;
+            throw;
+        }
+    }
+
+    static ConsumeAction requeue_() {
+        metrics::g_push_message_requeue_total << 1;
+        return ConsumeAction::NackRequeue;
+    }
+
     void _handle_client_auth_(const NotifyClientAuth &auth,
                               server_t::connection_ptr conn) {
         if (auth.access_token().empty() || auth.device_id().empty()) {
@@ -503,12 +578,13 @@ private:
     void _write_presence_online_(const std::string &uid, const std::string &did) {
         try {
             std::string k = key::presence_device_key(uid, did);
+            const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
             auto pipe = _redis->pipeline();
             pipe.hset(k, "state", "ONLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
+            pipe.expire(k, effective_ttl);
             pipe.exec();
         } catch (std::exception &e) {
             LOG_WARN("Presence write failed uid={} did={}: {}", uid, did, e.what());
@@ -518,12 +594,13 @@ private:
     void _write_presence_offline_(const std::string &uid, const std::string &did) {
         try {
             std::string k = key::presence_device_key(uid, did);
+            const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
             auto pipe = _redis->pipeline();
             pipe.hset(k, "state", "OFFLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count()));
-            pipe.expire(k, std::chrono::seconds(kPresenceTtlSec));
+            pipe.expire(k, effective_ttl);
             pipe.exec();
         } catch (std::exception &e) {
             LOG_WARN("Presence offline write failed uid={} did={}: {}", uid, did, e.what());
@@ -533,7 +610,7 @@ private:
     void _refresh_presence_ttl_(const std::string &uid, const std::string &did) {
         try {
             std::string k = key::presence_device_key(uid, did);
-            _redis->expire(k, std::chrono::seconds(kPresenceTtlSec));
+            _redis->expire(k, randomized_ttl(std::chrono::seconds(kPresenceTtlSec)));
         } catch (std::exception &e) {
             LOG_WARN("Presence TTL refresh failed uid={} did={}: {}", uid, did, e.what());
         }
@@ -625,14 +702,14 @@ private:
 
         //  L2 Redis: hgetall + build RouteEntry
         RouteEntry route;
-        auto dmap = _online_route->device_instances_map(uid);
+        auto dmap = _online_route->device_instances_map_strict(uid);
         route.device_ids.reserve(dmap.size());
         for (const auto &[did, inst] : dmap) {
             route.device_ids.push_back(did);
             route.device_to_instance[did] = inst;
         }
         if (_local_route_cache) {
-            _local_route_cache->set(cache_key, route, randomized_ttl(std::chrono::seconds(2)));
+            _local_route_cache->set(cache_key, route, randomized_ttl(_route_l1_ttl));
         }
 
         lk.unlock();
@@ -809,7 +886,7 @@ public:
                 continue;
             }
 
-            std::vector<std::pair<std::string, std::string>> stale_entries;
+            std::vector<std::tuple<std::string, std::string, std::string>> stale_entries;
             // Cluster mode: for_each traverses all nodes via RedisClient::scan().
             long long cursor = 0;
             do {
@@ -824,14 +901,14 @@ public:
                     for (const auto &[did, instance] : device_map) {
                         if (std::find(online_instances.begin(), online_instances.end(), instance)
                             == online_instances.end()) {
-                            stale_entries.emplace_back(uid, did);
+                            stale_entries.emplace_back(uid, did, instance);
                         }
                     }
                 }
             } while (cursor != 0);
 
-            for (const auto &[uid, did] : stale_entries) {
-                _online_route->unbind(uid, did, "");
+            for (const auto &[uid, did, instance] : stale_entries) {
+                _online_route->unbind(uid, did, instance);
                 if (_local_route_cache) _local_route_cache->invalidate(key::local_route_cache_key(uid));
             }
             if (!stale_entries.empty())
@@ -913,6 +990,7 @@ private:
     LeaderElection::ptr _cross_reaper_election;
     LocalCache<RouteEntry>::ptr _local_route_cache;
     InflightRegistry::ptr _inflight_registry;
+    std::chrono::seconds _route_l1_ttl{2};
     std::mutex _dummy_mu_;
 };
 
@@ -1116,6 +1194,12 @@ public:
         _resend_batch = batch;
         _resend_max_age_sec = max_age_sec;
     }
+    void set_route_l1_ttl(int ttl_sec) {
+        if (ttl_sec < 1 || ttl_sec > 300) {
+            throw std::invalid_argument("Push route L1 TTL must be within 1..300 seconds");
+        }
+        _route_l1_ttl = std::chrono::seconds(ttl_sec);
+    }
     void set_reaper_owner(const std::string &owner) { _reaper_owner = owner; }
     void set_etcd_client(std::shared_ptr<etcd::Client> etcd) { _etcd_client = etcd; }
 
@@ -1154,7 +1238,7 @@ public:
         _push_service = new PushServiceImpl(
             _connections, _jwt_codec, _redis_client, _online_route, _unacked, _cross_outbox,
             _instance_id, _message_service_name, _mm_channels,
-            _cross_reaper_election, _local_route_cache, _inflight_registry);
+            _cross_reaper_election, _local_route_cache, _inflight_registry, _route_l1_ttl);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
         int ret = _rpc_server->AddService(_push_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
         if (ret == -1) { LOG_ERROR("Push: AddService 失败"); abort(); }
@@ -1242,6 +1326,7 @@ private:
     LeaderElection::ptr _cross_reaper_election;
     LocalCache<RouteEntry>::ptr _local_route_cache;
     InflightRegistry::ptr _inflight_registry;
+    std::chrono::seconds _route_l1_ttl{2};
     std::string _push_service_dir;
     LeaderElection::ptr _stale_reaper_election;
     std::thread _stale_reaper_thread;

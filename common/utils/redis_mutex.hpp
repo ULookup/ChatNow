@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <random>
@@ -8,6 +9,7 @@
 #include <vector>
 #include "dao/data_redis.hpp"
 #include "infra/logger.hpp"
+#include "infra/metrics.hpp"
 
 namespace chatnow {
 
@@ -30,11 +32,19 @@ public:
 
     bool try_lock(std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
         auto deadline = std::chrono::steady_clock::now() + timeout;
+        int backoff_ms = 5;
         while (std::chrono::steady_clock::now() < deadline) {
             bool ok = _redis->set(_key, _token, std::chrono::milliseconds(_ttl_ms),
                                   sw::redis::UpdateType::NOT_EXIST);
             if (ok) { _locked = true; return true; }
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            metrics::g_redis_mutex_retry_total << 1;
+            std::uniform_int_distribution<int> jitter(0, backoff_ms / 2);
+            auto delay = std::chrono::milliseconds(backoff_ms + jitter(rng_()));
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining <= std::chrono::milliseconds::zero()) break;
+            std::this_thread::sleep_for(std::min(delay, remaining));
+            backoff_ms = std::min(backoff_ms * 2, 20);
         }
         return false;
     }
@@ -58,6 +68,11 @@ public:
     }
 
 private:
+    static std::mt19937 &rng_() {
+        static thread_local std::mt19937 rng(std::random_device{}());
+        return rng;
+    }
+
     static std::string generate_token_() {
         static thread_local std::mt19937_64 rng(std::random_device{}());
         std::uniform_int_distribution<unsigned long long> dist;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <cstdint>
 #include <string>
 
 namespace chatnow::key {
@@ -65,12 +66,44 @@ inline std::string local_user_info_cache_key(const std::string &uid) {
     return std::string("local:user:") + hash_tag(uid);
 }
 
+inline uint32_t fnv1a_32(const std::string &value) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : value) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+inline uint32_t user_info_bucket(const std::string &uid) {
+    return fnv1a_32(uid) % 64u;
+}
+
+inline std::string user_info_key(const std::string &uid) {
+    auto bucket = std::to_string(user_info_bucket(uid));
+    return "im:user:{" + bucket + "}:" + uid;
+}
+
+inline std::string user_info_generation_key(const std::string &uid) {
+    auto bucket = std::to_string(user_info_bucket(uid));
+    return "im:user-gen:{" + bucket + "}:" + uid;
+}
+
 inline std::string local_route_cache_key(const std::string &uid) {
     return std::string("local:route:") + hash_tag(uid);
 }
 
 inline std::string online_key(const std::string &uid) {
     return std::string(kOnline) + hash_tag(uid);
+}
+
+inline std::string device_set_key(const std::string &uid) {
+    return std::string(kDeviceSet) + hash_tag(uid);
+}
+
+// Pre-3.0 key retained only for bounded lazy migration during rolling upgrades.
+inline std::string legacy_device_set_key(const std::string &uid) {
+    return std::string(kDeviceSet) + uid;
 }
 
 inline std::string online_scan_pattern() {

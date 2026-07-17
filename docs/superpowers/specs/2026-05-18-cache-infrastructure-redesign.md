@@ -457,6 +457,21 @@ if (members.size() == 1 && members[0] == "__sentinel__") {
 }
 ```
 
+### 4.2.1 UserInfo 回填代际栅栏
+
+UserInfo miss 读取必须同时取得该 uid 的 `observed_generation`，并在调用
+Identity 之前固定下来；RPC 返回后的正值或空标记回填都必须携带这个令牌，
+禁止在数据源读取完成后重新读取 generation。单 uid 使用同槽 Lua 比较
+generation 后写入，避免并发资料更新被旧快照覆盖。
+
+批量路径按 64 个虚拟 bucket 分组，每组用一次同槽 MGET 同时读取
+`value + generation`。`batch_get` 对每个 miss 返回独立的 observed token，
+`batch_set` 接受 `{serialized, observed_generation}`，每个 bucket 用一次 Lua
+逐项 CAS 回填。Lua 在任何写入前完整校验所有 key 类型和参数，避免后段
+确定性错误造成同 bucket 部分回填（Redis OOM 等运行时错误不提供事务回滚）。
+单批最多 2000 项，正值和空标记均使用随机 TTL；Redis
+不可用或令牌缺失时只返回源数据，不写 L2。
+
 ### 4.3 防雪崩（Cache Avalanche）
 
 **已有设计**：`randomized_ttl()`，见 `2026-05-13-cache-strategy-redesign.md` §2。
@@ -471,6 +486,9 @@ if (members.size() == 1 && members[0] == "__sentinel__") {
 | L1 OnlineRoute | 2s | 1.6-2.4s |
 | L1 Members | 8s | 6.4-9.6s |
 | L1 UserInfo | 45s | 36-54s |
+
+Push OnlineRoute L1 通过 gflag/Builder 注入，生产默认保持 2s；仅 Compose
+可靠性测试栈配置为 30s，以便暂停唯一 Push 实例时稳定复现 Redis 故障。
 
 ---
 

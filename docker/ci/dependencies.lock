@@ -1,0 +1,10 @@
+# Base image and source dependency revisions used by docker/ci/Dockerfile.
+# Git dependencies are full commit IDs; do not replace them with branches or tags.
+UBUNTU_IMAGE=ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90
+BRPC_REV=041cec5fb84a5b4458bac6275ea7d34e048bc3f1
+ETCD_CPP_APIV3_REV=ba6216385fc332b23d95683966824c2b86c2474e
+REDIS_PLUS_PLUS_REV=a63ac43bf192772910b52e27cd2b42a6098a0071
+CPR_REV=fe29aee4ca4bfc9d17802e7623c2ee574b1d1e9b
+ELASTICLIENT_REV=d68e30e382b5f2817be8cd901494736b26d4896e
+AMQP_CPP_REV=ca49382bfc5bc165dfb7988b891bb010a939a786
+AWS_SDK_CPP_REV=2cde9b1786bdbb3182faa93ce28d6e44ac2fe7e0
