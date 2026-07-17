@@ -154,6 +154,7 @@ jobs:
       - name: Restore Compose build contexts
         run: |
           for service in conversation gateway identity media message presence push relationship transmite; do
+            chmod +x "compose-artifacts/$service/build/${service}_server"
             rm -rf "$service/build" "$service/depends"
             cp -a "compose-artifacts/$service/build" "$service/build"
             cp -a "compose-artifacts/$service/depends" "$service/depends"
@@ -197,6 +198,7 @@ jobs:
       - name: Restore Compose build contexts
         run: |
           for service in conversation gateway identity media message presence push relationship transmite; do
+            chmod +x "compose-artifacts/$service/build/${service}_server"
             rm -rf "$service/build" "$service/depends"
             cp -a "compose-artifacts/$service/build" "$service/build"
             cp -a "compose-artifacts/$service/depends" "$service/depends"

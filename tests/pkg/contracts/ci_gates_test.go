@@ -171,9 +171,18 @@ cmake --build build --parallel "$(nproc)" --target conversation_server gateway_s
 	packageCommand  = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts`
 	validateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/validate_compose_artifacts.sh compose-artifacts`
 	restoreCommand  = `for service in conversation gateway identity media message presence push relationship transmite; do
+  chmod +x "compose-artifacts/$service/build/${service}_server"
   rm -rf "$service/build" "$service/depends"
   cp -a "compose-artifacts/$service/build" "$service/build"
   cp -a "compose-artifacts/$service/depends" "$service/depends"
+done`
+	restoreWithoutChmodCommand = `for service in conversation gateway identity media message presence push relationship transmite; do
+  rm -rf "$service/build" "$service/depends"
+  cp -a "compose-artifacts/$service/build" "$service/build"
+  cp -a "compose-artifacts/$service/depends" "$service/depends"
+done`
+	chmodArtifactsCommand = `for service in conversation gateway identity media message presence push relationship transmite; do
+  chmod +x "compose-artifacts/$service/build/${service}_server"
 done`
 )
 
@@ -344,6 +353,13 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 		},
 		"restore allowed to fail": func(job *workflowJob) {
 			job.Steps[restore].ContinueOnError = true
+		},
+		"restore without executable mode repair": func(job *workflowJob) {
+			job.Steps[restore].Run = restoreWithoutChmodCommand
+		},
+		"executable mode repair after validation": func(job *workflowJob) {
+			job.Steps[restore].Run = restoreWithoutChmodCommand
+			insertWorkflowStep(job, validate+1, workflowStep{Run: chmodArtifactsCommand})
 		},
 		"artifact validation allowed to fail": func(job *workflowJob) {
 			job.Steps[validate].ContinueOnError = true
