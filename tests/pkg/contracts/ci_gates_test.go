@@ -86,6 +86,27 @@ func TestGoCacheRegressionsReplaceTemporaryCPP(t *testing.T) {
 		"the Go functional suite must own the same-user_seq latest-payload/ACK regression")
 }
 
+func TestReadAckUsesConversationSequenceWatermark(t *testing.T) {
+	root := repositoryRoot(t)
+	serviceProto, err := os.ReadFile(filepath.Join(root, "proto/message/message_service.proto"))
+	require.NoError(t, err)
+	require.Contains(t, string(serviceProto), "uint64 seq_id = 3;")
+	require.NotContains(t, string(serviceProto), "uint64 message_id = 3;")
+
+	server, err := os.ReadFile(filepath.Join(root, "message/source/message_server.h"))
+	require.NoError(t, err)
+	updateReadAck := string(server)
+	start := strings.Index(updateReadAck, "void UpdateReadAck(")
+	require.GreaterOrEqual(t, start, 0)
+	end := strings.Index(updateReadAck[start:], "\n    // ====== MQ consumer")
+	require.Greater(t, end, 0)
+	updateReadAck = updateReadAck[start : start+end]
+	require.Contains(t, updateReadAck, "req->seq_id()")
+	require.Contains(t, updateReadAck, "update_last_ack_seq(")
+	require.NotContains(t, updateReadAck, "req->message_id()")
+	require.NotContains(t, updateReadAck, "select_by_id(")
+}
+
 type workflowContract struct {
 	On struct {
 		PullRequest map[string]any   `yaml:"pull_request"`
