@@ -388,7 +388,7 @@ public:
             const auto &ack = notify.msg_push_ack();
             if (!is_valid_push_ack_ids(ack.user_seq(), ack.message_id()) ||
                 ack.user_id().empty() ||
-                ack.conversation_id().empty() || ack.device_id().empty()) {
+                ack.device_id().empty()) {
                 LOG_WARN("MSG_PUSH_ACK: invalid fields uid={} did={} seq={} message_id={}",
                          ack.user_id(), ack.device_id(), ack.user_seq(), ack.message_id());
                 return;
@@ -406,7 +406,11 @@ public:
             }
             if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
 
-            // 异步上报 UpdateReadAck（无入站 RPC context，需手动设置 auth metadata）
+            // Non-message pushes still ACK their Unacked entry but carry no
+            // conversation read watermark.
+            if (!(ack.seq_id() > 0 && !ack.conversation_id().empty())) return;
+
+            // 异步上报会话 seq_id 水位（无入站 RPC context，需手动设置 auth metadata）
             auto channel = _mm_channels->choose(_message_service_name);
             if (!channel) {
                 LOG_WARN("UpdateReadAck: message service 不可达 uid={}", ack.user_id());
@@ -418,7 +422,7 @@ public:
                 chatnow::message::UpdateReadAckRsp>();
             closure->req.set_request_id(ack.user_id());
             closure->req.set_conversation_id(ack.conversation_id());
-            closure->req.set_message_id(static_cast<uint64_t>(ack.message_id()));
+            closure->req.set_seq_id(ack.seq_id());
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
             meta.set_user_id(conn_uid);
@@ -427,10 +431,10 @@ public:
             std::string data;
             meta.SerializeToString(&data);
             closure->cntl.request_attachment().append(data);
-            closure->on_done = [uid = ack.user_id(), mid = ack.message_id()]
+            closure->on_done = [uid = ack.user_id(), seq = ack.seq_id()]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
                 if (c->Failed()) {
-                    LOG_WARN("UpdateReadAck RPC 失败 uid={} message_id={}: {}", uid, mid, c->ErrorText());
+                    LOG_WARN("UpdateReadAck RPC 失败 uid={} seq_id={}: {}", uid, seq, c->ErrorText());
                 }
             };
             stub.UpdateReadAck(&closure->cntl, &closure->req, &closure->rsp, closure);

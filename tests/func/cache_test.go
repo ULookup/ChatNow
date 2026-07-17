@@ -401,7 +401,7 @@ func TestFN_CA_UnackedSameUserSeqLatestPayloadAndAck(t *testing.T) {
 		NotifyType: push.NotifyType_MSG_PUSH_ACK,
 		NotifyRemarks: &push.NotifyMessage_MsgPushAck{MsgPushAck: &push.NotifyMsgPushAck{
 			UserId: recipient.UserID, DeviceId: deviceID, MessageId: 1,
-			UserSeq: userSeq, ConversationId: "unacked-contract",
+			UserSeq: userSeq, ConversationId: "unacked-contract", SeqId: 0, // typing push has no conversation watermark
 		}},
 	})
 	require.NoError(t, err)

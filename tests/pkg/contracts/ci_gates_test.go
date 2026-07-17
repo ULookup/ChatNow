@@ -105,6 +105,22 @@ func TestReadAckUsesConversationSequenceWatermark(t *testing.T) {
 	require.Contains(t, updateReadAck, "update_last_ack_seq(")
 	require.NotContains(t, updateReadAck, "req->message_id()")
 	require.NotContains(t, updateReadAck, "select_by_id(")
+
+	pushProto, err := os.ReadFile(filepath.Join(root, "proto/push/notify.proto"))
+	require.NoError(t, err)
+	require.Contains(t, string(pushProto), "uint64 seq_id = 6;")
+
+	pushServer, err := os.ReadFile(filepath.Join(root, "push/source/push_server.h"))
+	require.NoError(t, err)
+	clientNotify := string(pushServer)
+	start = strings.Index(clientNotify, "void onClientNotify(")
+	require.GreaterOrEqual(t, start, 0)
+	end = strings.Index(clientNotify[start:], "\n    void shutdown_cleanup()")
+	require.Greater(t, end, 0)
+	clientNotify = clientNotify[start : start+end]
+	require.Contains(t, clientNotify, "closure->req.set_seq_id(ack.seq_id())")
+	require.NotContains(t, clientNotify, "closure->req.set_message_id(")
+	require.Contains(t, clientNotify, "ack.seq_id() > 0 && !ack.conversation_id().empty()")
 }
 
 type workflowContract struct {
