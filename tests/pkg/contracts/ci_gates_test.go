@@ -160,10 +160,11 @@ func TestCIGates(t *testing.T) {
 }
 
 const (
-	artifactName       = "compose-service-artifacts"
-	artifactPath       = "compose-artifacts"
-	builderImage       = "chatnow-ci-builder:ci"
-	nativeBuildCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
+	artifactName            = "compose-service-artifacts"
+	artifactPath            = "compose-artifacts"
+	builderImage            = "chatnow-ci-builder:ci"
+	consumerValidateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 ./scripts/validate_compose_artifacts.sh compose-artifacts`
+	nativeBuildCommand      = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
 '`
@@ -317,7 +318,7 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 	setupGo := exactUsesStepIndex(valid, "actions/setup-go@v5")
 	download := exactUsesStepIndex(valid, "actions/download-artifact@v4")
 	restore := exactRunStepIndex(valid, restoreCommand)
-	validate := exactRunStepIndex(valid, "./scripts/validate_compose_artifacts.sh compose-artifacts")
+	validate := exactRunStepIndex(valid, consumerValidateCommand)
 	start := exactRunStepIndex(valid, "docker compose up -d --build")
 	wait := exactRunStepIndex(valid, "./scripts/wait_for_services.sh")
 	proto := exactRunStepIndex(valid, "cd tests && make proto")
@@ -346,6 +347,12 @@ func assertInvalidGateJobsRejected(t *testing.T, valid workflowJob, target strin
 		},
 		"artifact validation allowed to fail": func(job *workflowJob) {
 			job.Steps[validate].ContinueOnError = true
+		},
+		"artifact validation on consumer host": func(job *workflowJob) {
+			job.Steps[validate].Run = "./scripts/validate_compose_artifacts.sh compose-artifacts"
+		},
+		"artifact validation with mutable Ubuntu tag": func(job *workflowJob) {
+			job.Steps[validate].Run = `docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04 ./scripts/validate_compose_artifacts.sh compose-artifacts`
 		},
 		"gate disabled by if": func(job *workflowJob) {
 			job.Steps[gate].If = "${{ false }}"
@@ -452,7 +459,7 @@ func validateFullStackGateJob(job workflowJob, target string) error {
 		{"protoc generator install", exactRunStepIndex(job, "go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11")},
 		{"artifact download", exactUsesStepIndex(job, "actions/download-artifact@v4")},
 		{"artifact restore", exactRunStepIndex(job, restoreCommand)},
-		{"artifact validation", exactRunStepIndex(job, "./scripts/validate_compose_artifacts.sh compose-artifacts")},
+		{"artifact validation", exactRunStepIndex(job, consumerValidateCommand)},
 		{"full-stack startup", exactRunStepIndex(job, "docker compose up -d --build")},
 		{"service wait", exactRunStepIndex(job, "./scripts/wait_for_services.sh")},
 		{"protobuf generation", exactRunStepIndex(job, "cd tests && make proto")},
