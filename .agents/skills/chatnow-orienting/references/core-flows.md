@@ -42,10 +42,10 @@ These are current-state flows for the `3.0-dev` line. Re-verify affected symbols
 
 - Entry/contracts: `proto/identity/identity_service.proto`; `identity/source/identity_server.h`; `common/auth/jwt_codec.hpp`; `common/auth/jwt_store.hpp`; `gateway/source/gateway_auth.hpp`; `push/source/push_server.h`.
 - Stores: Identity uses MySQL for users/devices and Redis for active refresh tokens, rotation/reuse detection, and revocation state.
-- Trust: Gateway validates Bearer access tokens and revocation before deriving metadata. Push verifies WS `CLIENT_AUTH` and binds claim identity to the connection. Downstream handlers use `common/auth/auth_context.hpp`; service-to-service forwarding uses `common/auth/forward_auth.hpp` where required.
-- Sync/retry: Login and refresh are synchronous; refresh rotation detects reuse. Cache/store failure behavior must be inspected before changing fail-open/fail-closed semantics.
-- Tests: `tests/bvt/auth_test.go`, `tests/func/identity_test.go`, `tests/func/auth_middleware_test.go`, `tests/func/security_test.go`, `tests/func/scenarios_test.go`.
-- Invariants: only Identity issues/refreshes tokens; access and refresh token purposes remain distinct; downstream identity comes from verified claims and forwarded metadata, not request bodies.
+- Trust: Gateway validates Bearer access tokens and revocation before deriving metadata. Push verifies WS `CLIENT_AUTH`, queries revocation once at admission, and binds claim identity only after a `kNotRevoked` result. Revoked tokens and unavailable revocation state are rejected before connection, route, presence, or resend side effects. Downstream handlers use `common/auth/auth_context.hpp`; service-to-service forwarding uses `common/auth/forward_auth.hpp` where required.
+- Sync/retry: Login and refresh are synchronous; refresh rotation detects reuse. Push performs no revocation lookup per message or heartbeat. Its admission boundary fails closed on Redis errors, while the legacy `JwtStore::is_revoked` bool API retains fail-open compatibility for unchanged callers.
+- Tests: `tests/bvt/auth_test.go`, `tests/func/identity_test.go`, `tests/func/auth_middleware_test.go`, `tests/func/security_test.go`, `tests/func/scenarios_test.go`, and `tests/func/ws_notify_test.go` (`FN-WS-09`).
+- Invariants: only Identity issues/refreshes tokens; access and refresh token purposes remain distinct; downstream identity comes from verified claims and forwarded metadata, not request bodies; Push admission must resolve revocation before publishing any authenticated-session side effect.
 
 ## Media upload and download
 

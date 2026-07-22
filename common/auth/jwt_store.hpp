@@ -7,9 +7,11 @@
  *   im:jwt:rt:{user_id}:{device_id}       -> refresh_jti  TTL = refresh 寿命
  *   im:jwt:rt_chain:{old_jti}             -> "rotated"    TTL = 24h
  *
- * 失败模式：底层 redis 抛异常时函数自身吞掉 + LOG_ERROR + 返回保守值
- *   - is_revoked 失败 → false（不阻断业务，避免雪崩）
- *   - 写失败 → 仅日志，调用方按业务决定
+ * Failure modes:
+ *   - query_revocation_status exposes Redis failures as kUnavailable so
+ *     security boundaries can fail closed.
+ *   - is_revoked preserves its legacy fail-open bool contract.
+ *   - write failures are logged and left to the caller's policy.
  *
  * 重放检测：rotate_refresh_or_detect_reuse 用 SET NX 原子保护链节点。
  */
@@ -34,8 +36,11 @@ public:
     using ptr = std::shared_ptr<JwtStore>;
     explicit JwtStore(chatnow::RedisClient::ptr c) : _c(std::move(c)) {}
 
+    enum class RevocationStatus { kNotRevoked, kRevoked, kUnavailable };
+
     void revoke(const std::string& jti, int ttl_sec);
     bool is_revoked(const std::string& jti);
+    RevocationStatus query_revocation_status(const std::string& jti);
 
     void put_active_refresh(const std::string& user_id,
                             const std::string& device_id,
@@ -74,18 +79,26 @@ inline void JwtStore::revoke(const std::string& jti, int ttl_sec) {
         _c->set(std::string(jwt_key::kRevokedPrefix) + jti, "1",
                 std::chrono::seconds(ttl_sec));
     } catch (const std::exception& e) {
-        LOG_ERROR("JwtStore.revoke 失败 jti={}: {}", jti, e.what());
+        LOG_ERROR("JwtStore revoke failed: {}", e.what());
     }
 }
 
 inline bool JwtStore::is_revoked(const std::string& jti) {
     if (jti.empty()) return false;
+    // Preserve existing callers' fail-open bool semantics.
+    return query_revocation_status(jti) == RevocationStatus::kRevoked;
+}
+
+inline JwtStore::RevocationStatus JwtStore::query_revocation_status(
+        const std::string& jti) {
+    if (jti.empty()) return RevocationStatus::kUnavailable;
     try {
         auto v = _c->get(std::string(jwt_key::kRevokedPrefix) + jti);
-        return v.has_value();
+        return v.has_value() ? RevocationStatus::kRevoked
+                             : RevocationStatus::kNotRevoked;
     } catch (const std::exception& e) {
-        LOG_ERROR("JwtStore.is_revoked 失败 jti={}: {}", jti, e.what());
-        return false;
+        LOG_ERROR("JwtStore revocation query failed: {}", e.what());
+        return RevocationStatus::kUnavailable;
     }
 }
 
@@ -141,8 +154,7 @@ inline JwtStore::RotateResult JwtStore::rotate_refresh_or_detect_reuse(
             return RotateResult::kReuseDetected;
         }
     } catch (const std::exception& e) {
-        LOG_ERROR("JwtStore.rotate chain SET 失败 old_jti={}: {}",
-                  old_refresh_jti, e.what());
+        LOG_ERROR("JwtStore refresh rotation failed: {}", e.what());
         // 链路写失败：保守按"未被重放"放行，下次会再尝试
     }
     put_active_refresh(user_id, device_id, new_refresh_jti, new_refresh_ttl_sec);
