@@ -1296,7 +1296,7 @@ public:
                                             std::move(_mq_client),
                                             std::move(_push_subscriber),
                                             _push_service,
-                                            std::move(_stale_reaper_thread),
+                                            &_stale_reaper_thread,
                                             _stale_reaper_running);
     }
 
