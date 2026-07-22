@@ -1116,7 +1116,7 @@ public:
                         const std::string &queue,
                         const std::string &binding_key)
     {
-        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, password, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         _push_settings = {
             .exchange = exchange,

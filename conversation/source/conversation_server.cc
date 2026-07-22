@@ -34,7 +34,7 @@ DEFINE_string(mysql_cset, "utf8mb4", "MySQL客户端字符集");
 DEFINE_int32(mysql_port, 0, "MySQL服务器访问端口");
 DEFINE_int32(mysql_pool_count, 4, "MySQL连接池最大连接数量");
 
-DEFINE_string(public_url_prefix, "http://127.0.0.1:9000/chatnow-media-public",
+DEFINE_string(public_url_prefix, "http://127.0.0.1:19000/chatnow-media-public",
               "Media 公开 bucket URL 前缀（avatar_file_id → URL 转换用）");
 
 int main(int argc, char *argv[])
