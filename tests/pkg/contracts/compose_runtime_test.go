@@ -21,16 +21,16 @@ type composeRuntimeDocument struct {
 }
 
 type composeRuntimeService struct {
-	Build       any   `yaml:"build"`
-	Command     any   `yaml:"command"`
-	Entrypoint  any   `yaml:"entrypoint"`
-	DependsOn   any   `yaml:"depends_on"`
-	Environment any   `yaml:"environment"`
-	Healthcheck any   `yaml:"healthcheck"`
+	Build       any    `yaml:"build"`
+	Command     any    `yaml:"command"`
+	Entrypoint  any    `yaml:"entrypoint"`
+	DependsOn   any    `yaml:"depends_on"`
+	Environment any    `yaml:"environment"`
+	Healthcheck any    `yaml:"healthcheck"`
 	Hostname    string `yaml:"hostname"`
-	Ports       []any `yaml:"ports"`
-	Restart     any   `yaml:"restart"`
-	Volumes     []any `yaml:"volumes"`
+	Ports       []any  `yaml:"ports"`
+	Restart     any    `yaml:"restart"`
+	Volumes     []any  `yaml:"volumes"`
 }
 
 // Repository contract | P0 | The root Compose topology includes usable object storage.
