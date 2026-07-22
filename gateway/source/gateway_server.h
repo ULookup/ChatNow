@@ -476,8 +476,8 @@ public:
     void make_redis_object(const std::string& host, int port, int db, bool keep_alive, int pool_size = 16) {
         _redis_host = host; _redis_port = port; _redis_db = db; _redis_keep_alive = keep_alive; _redis_pool_size = pool_size;
     }
-    void make_jwt_object(const std::string& auth_config_path) {
-        _jwt_config = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
+    void make_jwt_object(const std::string& auth_config_json) {
+        _jwt_config = ::chatnow::auth::parse_jwt_config(auth_config_json);
     }
     void make_discovery_object(const std::string& reg_host, const std::string& base,
                                const std::string& identity, const std::string& relationship,

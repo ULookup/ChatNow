@@ -1,5 +1,6 @@
 #include "push_server.h"
 #include "auth/jwt_codec.hpp"
+#include "config/secret_resolver.hpp"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
@@ -26,7 +27,6 @@ DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
 DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
 DEFINE_string(mq_user, "root", "MQ 用户");
-DEFINE_string(mq_pswd, "", "MQ password");
 DEFINE_string(mq_host, "127.0.0.1:5672", "MQ 地址");
 DEFINE_string(mq_push_exchange, "chat_push_exchange", "推送交换机");
 DEFINE_string(mq_push_queue, "msg_push_queue", "推送队列");
@@ -37,21 +37,22 @@ DEFINE_int32(resend_batch, 50, "心跳触发未 ack 重传的批量上限");
 DEFINE_int32(resend_max_age_sec, 5, "未 ack 项入队后等待多少秒视为可重传");
 DEFINE_int32(route_l1_ttl_sec, 2, "Push 在线路由 L1 TTL（1-300 秒）");
 
-// JWT — 统一从 auth.json 加载（与 identity/gateway 共享密钥源）
-DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
-
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const auto jwt_config = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::JwtConfig);
+    const auto mq_password = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::PushMqPassword);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::push::PushServerBuilder psb;
-    psb.make_jwt_object(FLAGS_auth_config);
+    psb.make_jwt_object(jwt_config);
 
     psb.set_redis_seeds(FLAGS_redis_seeds);
     psb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
                           FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
-    psb.make_mq_object(FLAGS_mq_user, FLAGS_mq_pswd, FLAGS_mq_host,
+    psb.make_mq_object(FLAGS_mq_user, mq_password, FLAGS_mq_host,
                        FLAGS_mq_push_exchange, FLAGS_mq_push_queue, FLAGS_mq_push_binding_key);
     psb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service, FLAGS_message_service, FLAGS_push_service);
     psb.make_reg_object(FLAGS_registry_host, FLAGS_base_service + FLAGS_instance_name, FLAGS_access_host);

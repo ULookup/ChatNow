@@ -208,7 +208,8 @@ ChatNow/
 
 ## 安全
 
-⚠️ 仓库内样例配置含明文凭据，**切勿直接用于生产环境**。部署前请将密码 / 密钥迁移至安全的配置中心或环境变量。
+- [Runtime secret management](docs/operations/runtime-secrets.md)
+- [JWT key rotation](docs/operations/jwt-key-rotation.md)
 
 ## License
 

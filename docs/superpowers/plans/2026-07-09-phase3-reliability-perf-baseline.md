@@ -17,7 +17,7 @@
 - 用例 ID 遵循主 spec §6：RL-NN（可靠性）、FN-QT-NN（限流配额）、PF-NN（性能）、FN-XX-NN（P2 边角）。
 - 每个测试函数顶部加 ID/优先级/验证点注释块（测试代码即权威）。
 - DRY/YAGNI/TDD：先写失败测试，再写实现，频繁提交。
-- MySQL 密码 `YHY060403`，DSN `root:YHY060403@tcp(127.0.0.1:3306)/chatnow`（与 conf/docker/*.conf 一致）。
+- MySQL 密码 `<synthetic-mysql-password>`，DSN `root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow`（与 conf/docker/*.conf 一致）。
 - docker-compose.yml 服务名：`rabbitmq`、`mysql`、`message_server`、`transmite_server`、`elasticsearch`；容器名带 `-service` 后缀（如 `rabbitmq-service`）。
 
 ---
@@ -365,7 +365,7 @@ import (
 // RL-01 | P0 | 可靠性 | MQ 重启后消息最终落库，client_msg_id 幂等去重
 func TestRL_MQRestart(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	dbVer := verify.NewDBVerifier("root:YHY060403@tcp(127.0.0.1:3306)/chatnow")
+	dbVer := verify.NewDBVerifier("root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow")
 
 	// Step 1: 停止 rabbitmq
 	require.NoError(t, chaos.StopService(t, "rabbitmq"))
@@ -488,7 +488,7 @@ import (
 // RL-02 | P1 | 可靠性 | message_server 重启后消费不丢
 func TestRL_ServiceRestart(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	dbVer := verify.NewDBVerifier("root:YHY060403@tcp(127.0.0.1:3306)/chatnow")
+	dbVer := verify.NewDBVerifier("root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow")
 
 	// Step 1: alice 发 3 条消息
 	var msgIDs []int64
@@ -613,7 +613,7 @@ import (
 // RL-03 | P1 | 可靠性 | MySQL 短暂断连后重连写入正常
 func TestRL_DBReconnect(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
-	dbVer := verify.NewDBVerifier("root:YHY060403@tcp(127.0.0.1:3306)/chatnow")
+	dbVer := verify.NewDBVerifier("root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow")
 
 	// Step 1: 先发 1 条消息确认链路正常
 	preReq := &transmite.SendMessageReq{
@@ -890,7 +890,7 @@ import (
 )
 
 // dbDSN 与 conf/docker/*.conf 中 -mysql_pswd 一致
-const dbDSN = "root:YHY060403@tcp(127.0.0.1:3306)/chatnow"
+const dbDSN = "root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow"
 
 // FN-QT-01 | P1 | 限流 | 短时间大量发消息触发限流
 //
@@ -2081,7 +2081,7 @@ func TestScenario_LargeGroupFanOut(t *testing.T) {
 	}
 
 	// 数据一致性 — 读扩散：message 表 1 条
-	dbVer := verify.NewDBVerifier("root:YHY060403@tcp(127.0.0.1:3306)/chatnow")
+	dbVer := verify.NewDBVerifier("root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow")
 	dbVer.MessageCount(t, convID, 1)
 }
 ```
@@ -2333,7 +2333,7 @@ Phase 3 完成后应满足：
 | RL-03 停止 MySQL 影响所有服务，可能导致服务崩溃不自动恢复 | 测试用宽松断言（GreaterOrEqual）；如果服务不自动重连，增加 `chaos.RestartService` 重启受影响服务 |
 | RL-04 RabbitMQ 未配置 DLQ，测试无法验证死信 | t.Skip 并记录日志，标注"配置 DLQ 后可完整验证" |
 | FN-QT-01 限流默认关闭（rate_limit_user_max=600 但可能被覆盖） | 测试记录日志不强制 fail |
-| FN-QT-02 需 DB 直改配额，依赖 MySQL 密码 | DSN 硬编码 `root:YHY060403@tcp(127.0.0.1:3306)/chatnow`，CI 中需一致 |
+| FN-QT-02 需 DB 直改配额，依赖 MySQL 密码 | DSN 硬编码 `root:<synthetic-mysql-password>@tcp(127.0.0.1:3306)/chatnow`，CI 中需一致 |
 | PF-03 仅 1000 条消息，非 100 万 | 标注 future enhancement（DB 批量插入）；P2 级别可接受 |
 | PF-01 200 成员注册耗时长（~60s） | benchmark setup 不计入计时（b.ResetTimer 之后才测） |
 | FN-WS-07 typing 通知可能未实现 WS 推送 | t.Skip 并记录 |

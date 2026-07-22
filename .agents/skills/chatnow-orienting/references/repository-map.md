@@ -1,5 +1,9 @@
 # Repository Map
 
+Target version: `3.0-dev`
+Status: Current
+Verified: 2026-07-22
+
 ## Ownership and first reads
 
 | Path | Ownership | First-read files |
@@ -16,13 +20,13 @@
 | `presence/` | Presence aggregation, subscriptions, and typing coordination | `presence/source/presence_server.h`, `presence/source/presence_server.cc`, `proto/presence/presence_service.proto` |
 | `push/` | WebSocket connections, routes, cross-instance delivery, resend, client ACK ingestion | `push/source/push_server.h`, `push/source/connection.hpp`, `push/source/push_server.cc`, `proto/push/notify.proto` |
 | `odb/` | ODB entity definitions and durable relational fields | Affected entity, especially `message.hxx`, `user_timeline.hxx`, `conversation_member.hxx`, and `media_*.hxx` |
-| `conf/` | Local/container flags and JSON configuration | `conf/local/`, `conf/docker/`, `conf/auth.json`, `conf/media.json` |
+| `conf/` | Non-secret local/container flags and JSON configuration; tracked files are not a runtime secret source | `conf/local/`, `conf/docker/`, `conf/auth.json`, `conf/media.json` |
 | `sql/` | Versioned schema migrations | `sql/V4__media.sql` and any migration matching affected ODB entities |
 | `docker/` | Separate MinIO topology and initialization; not wired into the root application network | `docker/docker-compose.yml`, `docker/minio-init/entrypoint.sh` |
 | `docker-compose.yml` | Application stack declaration; Media object-storage wiring is incomplete | Root `docker-compose.yml`, then affected `Dockerfile` and `conf/docker` file |
 | `scripts/` | Operational support and monitoring configuration | `scripts/install_aws_sdk_linux.sh`, `scripts/prometheus/redis_alerts.yml` |
-| `tests/` | Pure-Go L1-L4 framework, clients, fixtures, cleanup, and store verification | `tests/Makefile`, `tests/config.yaml`, affected `tests/bvt`, `tests/func`, `tests/perf`, `tests/pkg` |
-| `docs/` | Secondary architecture/API/operations context | Affected `docs/api/*.yaml`, `docs/operations/`, then relevant architecture documents |
+| `tests/` | Pure-Go L1-L4 plus Redis-focused Reliability framework, clients, fixtures, cleanup, and store verification | `tests/Makefile`, `tests/config.yaml`, affected `tests/bvt`, `tests/func`, `tests/perf`, `tests/reliability`, `tests/pkg` |
+| `docs/` | Secondary architecture/API context and canonical operations guidance | `docs/operations/runtime-secrets.md`, affected `docs/api/*.yaml`, then relevant architecture documents |
 
 ## Verified ports and infrastructure endpoints
 
@@ -51,6 +55,20 @@ Application ports come from `conf/local`, `conf/docker`, and root `docker-compos
 MySQL service configs set `mysql_port=0`, while root Compose exposes MySQL on `3306` and service entrypoints wait on `mysql:3306`; preserve that distinction when diagnosing driver defaults. Gateway's `websocket_listen_port=0` is not the client WebSocket endpoint; Push owns `ws_port=9001`.
 
 Root Compose mounts `conf/media.json` into Media, but `s3.endpoint=http://127.0.0.1:9000` addresses the Media container itself. Root Compose has no MinIO service/dependency, while the supplemental MinIO Compose project has no declared shared external network with the root project. Do not present these declarations as a working integrated Media topology or recommend their current commands as a functional Media runtime. Any repair must explicitly reconcile the network, endpoint, dependency, and `9000`/`9001` host-port conflicts, then be verified from the affected containers.
+
+## Runtime credential ownership
+
+Current consumers at the verified commit are:
+
+- Identity, Gateway, and Push resolve the complete JWT JSON document from `CHATNOW_JWT_CONFIG` or `CHATNOW_JWT_CONFIG_FILE` at startup. Identity signs and verifies tokens; Gateway and Push verify them.
+- Conversation, Identity, Media, Message, and Relationship resolve service-specific MySQL password inputs through `common/config/secret_resolver.hpp`.
+- Transmite, Message, and Push resolve service-specific RabbitMQ password inputs through the same resolver.
+- Identity resolves its SMTP password; Media resolves separate S3 access-key and secret-key inputs. Non-secret S3 settings remain in `conf/media.json`.
+- Root Compose requires MySQL, RabbitMQ, and supplemental MinIO bootstrap values through deployment environment references. These are separate from least-privileged application inputs. Redis has no configured password or ACL consumer.
+
+Tracked runtime credential literals have been removed from the scoped source, configuration, Compose, and test-runtime surfaces. Do not reintroduce values in documentation, logs, test output, Issues, or PRs. Synthetic test-only credentials and API examples require narrow scanner exemptions rather than broad path allowlists.
+
+The canonical current inventory and injection contract are in `docs/operations/runtime-secrets.md`. Reinspect the resolver and each consumer before extending the allowlist or claiming support for a credential not named there.
 
 ## State ownership
 

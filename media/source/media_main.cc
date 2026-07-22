@@ -1,11 +1,10 @@
 // MediaServer 启动入口
 //   1. 解析 gflags
 //   2. 初始化 logger
-//   3. 加载 conf/media.json 拿 s3 / media 段
+//   3. 解析 runtime secrets 并加载 conf/media.json 的非敏感配置
 //   4. Aws::InitAPI
 //   5. 用 Builder 组装 MediaServer 并 start
 
-#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -17,6 +16,7 @@
 #include <json/json.h>
 
 #include "media_server.h"
+#include "config/secret_resolver.hpp"
 #include "infra/logger.hpp"
 #include "utils/mime_whitelist.hpp"
 
@@ -35,7 +35,6 @@ DEFINE_int32(rpc_threads, 4, "RPC 的 IO 线程数");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL 地址");
 DEFINE_string(mysql_user, "root", "MySQL 用户名");
-DEFINE_string(mysql_pswd, "", "MySQL 密码 (通过 --mysql_pswd 或 MYSQL_PSWD 环境变量设置)");
 DEFINE_string(mysql_db,   "chatnow", "MySQL 库");
 DEFINE_string(mysql_cset, "utf8mb4", "MySQL 字符集");
 DEFINE_int32 (mysql_port, 0, "MySQL 端口");
@@ -56,8 +55,6 @@ struct LoadedMediaConf {
     std::shared_ptr<chatnow::MimeWhitelist>      mime;
     std::string s3_endpoint;
     std::string s3_region;
-    std::string s3_access_key;
-    std::string s3_secret_key;
 };
 
 LoadedMediaConf load_media_conf(const std::string& path) {
@@ -79,8 +76,6 @@ LoadedMediaConf load_media_conf(const std::string& path) {
     LoadedMediaConf out;
     out.s3_endpoint   = s3.get("endpoint",   "").asString();
     out.s3_region     = s3.get("region",     "us-east-1").asString();
-    out.s3_access_key = s3.get("access_key", "").asString();
-    out.s3_secret_key = s3.get("secret_key", "").asString();
 
     out.cfg.public_bucket     = md.get("public_bucket",     "").asString();
     out.cfg.private_bucket    = md.get("private_bucket",    "").asString();
@@ -102,17 +97,13 @@ LoadedMediaConf load_media_conf(const std::string& path) {
 
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const auto mysql_password = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::MediaMysqlPassword);
+    const auto s3_access_key = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::MediaS3AccessKey);
+    const auto s3_secret_key = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::MediaS3SecretKey);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
-
-    // 密码优先从环境变量读取，命令行参数次之
-    if (FLAGS_mysql_pswd.empty()) {
-        const char* env = std::getenv("MYSQL_PSWD");
-        if (env && *env) FLAGS_mysql_pswd = env;
-    }
-    if (FLAGS_mysql_pswd.empty()) {
-        std::cerr << "mysql_pswd 必须通过 --mysql_pswd 或环境变量 MYSQL_PSWD 设置" << std::endl;
-        return 1;
-    }
 
     LoadedMediaConf conf;
     try {
@@ -127,14 +118,14 @@ int main(int argc, char* argv[]) {
 
     {
         chatnow::MediaServerBuilder b;
-        b.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host,
+        b.make_mysql_object(FLAGS_mysql_user, mysql_password, FLAGS_mysql_host,
                             FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port,
                             FLAGS_mysql_pool_count);
         b.set_redis_seeds(FLAGS_redis_seeds);
         b.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
                             FLAGS_redis_keep_alive);
         b.make_s3_object(conf.s3_endpoint, conf.s3_region,
-                         conf.s3_access_key, conf.s3_secret_key);
+                         s3_access_key, s3_secret_key);
         b.set_media_config(conf.cfg, conf.mime);
         b.make_registry_object(FLAGS_registry_host,
                                FLAGS_base_service + FLAGS_instance_name,

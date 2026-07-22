@@ -7,7 +7,8 @@ timeout:
   ws_read_sec: 30
 
 database:
-  mysql_dsn: "root:YHY060403@tcp(localhost:3306)/chatnow?charset=utf8mb4&parseTime=true"
+  # Inject MYSQL_DSN from an isolated local or CI environment.
+  mysql_dsn: ""
   es_url: "http://localhost:9200"
   redis_nodes:
     - "localhost:6379"

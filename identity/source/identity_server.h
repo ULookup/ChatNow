@@ -714,12 +714,12 @@ public:
         _user_info_cache = std::make_shared<UserInfoCache>(_redis_client);
     }
     /* brief: 加载 JWT 配置并构造 codec / store（必须在 make_redis_object 之后） */
-    void make_jwt_object(const std::string &auth_config_path) {
+    void make_jwt_object(const std::string &auth_config_json) {
         if (!_redis_client) {
             LOG_ERROR("make_jwt_object 必须在 make_redis_object 之后调用");
             abort();
         }
-        auto cfg = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
+        auto cfg = ::chatnow::auth::parse_jwt_config(auth_config_json);
         _jwt_codec = std::make_shared<::chatnow::auth::JwtCodec>(std::move(cfg));
         _jwt_store = std::make_shared<::chatnow::auth::JwtStore>(_redis_client);
     }

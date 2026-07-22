@@ -767,7 +767,7 @@ Client ─┤          ├──────────────────
   using namespace chatnow;
 
   static bool minio_enabled() { auto* e = std::getenv("MINIO_TEST"); return e && std::string(e)=="1"; }
-  static S3Options opts() { return { "http://127.0.0.1:9000", "us-east-1", "minioadmin", "minioadmin", true }; }
+  static S3Options opts() { return { "http://127.0.0.1:9000", "us-east-1", "<synthetic-s3-access-key>", "<synthetic-s3-secret-key>", true }; }
 
   TEST(S3Integration, PutGetRoundtrip) {
       if (!minio_enabled()) GTEST_SKIP() << "MINIO_TEST!=1";
@@ -2377,8 +2377,8 @@ Client ─┤          ├──────────────────
       image: minio/minio:RELEASE.2024-10-13T13-34-11Z
       command: server /data --console-address ":9001"
       environment:
-        MINIO_ROOT_USER: minioadmin
-        MINIO_ROOT_PASSWORD: minioadmin
+        MINIO_ROOT_USER: <synthetic-minio-user>
+        MINIO_ROOT_PASSWORD: <synthetic-minio-password>
       volumes:
         - minio-data:/data
       ports:
@@ -2396,7 +2396,7 @@ Client ─┤          ├──────────────────
           condition: service_healthy
       entrypoint: ["/bin/sh", "/init/entrypoint.sh"]
       environment:
-        MC_HOST_local: http://minioadmin:minioadmin@minio:9000
+        MC_HOST_local: http://<synthetic-minio-user>:<synthetic-minio-password>@minio:9000
       volumes:
         - ./minio-init:/init:ro
   ```
@@ -2489,8 +2489,8 @@ Client ─┤          ├──────────────────
     "s3": {
       "endpoint":   "http://127.0.0.1:9000",
       "region":     "us-east-1",
-      "access_key": "minioadmin",
-      "secret_key": "minioadmin"
+      "access_key": "<synthetic-s3-access-key>",
+      "secret_key": "<synthetic-s3-secret-key>"
     },
     "media": {
       "public_bucket":     "chatnow-media-public",
@@ -2733,4 +2733,3 @@ Client ─┤          ├──────────────────
 - 第 0 步：提交本节修订（plan 文件本身）。
 - 第 0.5 步：提交 `common/error/error_codes.hpp` 增 5001–5007，独立 commit。
 - §1–§31：按原顺序，commit 信息中如有偏离要在 body 里引用本节具体条款（"see Adapter notes §C 第 N 行"）。
-

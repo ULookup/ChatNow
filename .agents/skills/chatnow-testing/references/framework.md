@@ -1,5 +1,9 @@
 # ChatNow Test Framework
 
+Target version: `3.0-dev`
+Status: Current
+Verified: 2026-07-22
+
 Read this reference before selecting, implementing, running, or reporting a test. Reinspect `tests/Makefile`, `.github/workflows/ci.yml`, and the current `tests/` tree before relying on a path, target, or command; executable files are authoritative.
 
 ## Layers and executable surface
@@ -11,9 +15,11 @@ Read this reference before selecting, implementing, running, or reporting a test
 | L2 Functional | `tests/func`, `func` | Service APIs, errors, boundaries | `make -C tests test-func` |
 | L3 Scenario | `tests/func`, `func`; `TestScenario` filter | Cross-service workflows and store consistency | `make -C tests test-scenario` |
 | L4 Performance | `tests/perf`, `perf` | Throughput and latency baselines | `make -C tests test-perf` |
-| Reliability | Reserved `reliability` tag and distinct layer | Failure injection, recovery, durability, and convergence | No current directory or Make target. Inspect the executable surface; do not invent a command or claim a run. |
+| Reliability | `tests/reliability`, `reliability` | Redis failure injection, recovery, and Push unacked convergence | `make -C tests test-reliability` |
 
-The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content.
+The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, `make -C tests test-agent-policy`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content. Repository policy checks are static evidence and never substitute for a behavior RED or runtime gate.
+
+The Reliability target runs the complete tagged package and does not consume `TEST_RUN`. For an exact test, invoke the same tagged Go package with an anchored `-run` expression, then run `make -C tests test-reliability` for the layer regression. The current fault controller is Redis-only; there is no RabbitMQ, MySQL, arbitrary-service, or general-network controller.
 
 The L0 commands currently encoded in `.github/workflows/ci.yml` are:
 
@@ -32,7 +38,9 @@ These are Linux workflow commands. On another platform, report the workflow as n
 
 ## Gate order
 
-CI orders `build` -> `bvt` -> `func`; a failed BVT prevents Functional and Scenario execution. Scheduled runs continue from `func` to `perf`. Preserve BVT short-circuit behavior when changing workflows or selecting local risk checks.
+CI runs `build` independently and builds reusable service artifacts. BVT needs `service-artifacts`; Functional needs both `service-artifacts` and BVT; Reliability needs `service-artifacts` but does not wait for BVT. Scheduled Performance runs after Functional, while the cache-performance job depends directly on `service-artifacts`. Preserve each gate's actual dependency when changing workflows or selecting local risk checks.
+
+The dedicated Reliability job exists, but the inspected PR run was skipped after an upstream failure. Its existence is executable-surface evidence, not a successful runtime result.
 
 ## Shared framework
 
@@ -58,7 +66,8 @@ Assign exactly one owner for each created resource. Prefer suite-level cleanup t
 | One service API, authorization rule, validation, boundary, or error path | L2 Functional | Add L3 when other services or stores participate. |
 | Cross-service flow, MQ/WebSocket delivery, idempotency, ordering, or MySQL/Elasticsearch/MinIO consistency | L3 Scenario | Also run affected L2 and L1 gates. |
 | Throughput, latency, allocation, or benchmark threshold | L4 Performance | Also run correctness layers for behavior used by the benchmark. |
-| Failure injection, restart recovery, durability, or degraded convergence | Reliability | Treat as reserved until an executable surface exists; add the necessary architecture only when the scoped change authorizes it, and run lower correctness layers meanwhile. |
+| Redis failure injection, restart recovery, or Push unacked convergence | Reliability | Run the exact tagged test, then `make -C tests test-reliability`; also run lower correctness layers selected by the affected behavior. |
+| RabbitMQ/MySQL/service/network fault behavior | Reliability | No current controller exists for these faults. Do not expand the framework unless the scoped Issue authorizes it; use the nearest executable correctness layer and report the gap. |
 
 Choose the lowest layer that can fail for the required behavior, not the cheapest layer that happens to run. Run the target test first, its same-layer regressions second, and broader layers according to risk.
 

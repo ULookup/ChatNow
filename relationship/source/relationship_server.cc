@@ -1,4 +1,5 @@
 #include "relationship_server.h"
+#include "config/secret_resolver.hpp"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
@@ -20,7 +21,6 @@ DEFINE_string(es_host, "http://127.0.0.1:9200/", "ES搜索引擎服务器URL");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
 DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
-DEFINE_string(mysql_pswd, "", "MySQL服务器访问密码");
 DEFINE_string(mysql_db, "chatnow", "MySQL默认库名称");
 DEFINE_string(mysql_cset, "utf8mb4", "MySQL客户端字符集");
 DEFINE_int32(mysql_port, 0, "MySQL服务器访问端口");
@@ -29,11 +29,13 @@ DEFINE_int32(mysql_pool_count, 4, "MySQL连接池最大连接数量");
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const auto mysql_password = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::RelationshipMysqlPassword);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::RelationshipServerBuilder rsb;
     rsb.make_es_object({FLAGS_es_host});
-    rsb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host,
+    rsb.make_mysql_object(FLAGS_mysql_user, mysql_password, FLAGS_mysql_host,
                           FLAGS_mysql_db, FLAGS_mysql_cset,
                           FLAGS_mysql_port, FLAGS_mysql_pool_count);
     rsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service,
