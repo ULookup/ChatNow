@@ -112,34 +112,6 @@ jobs:
       - &validate-compose-artifacts
         name: Validate downloaded Compose service artifacts
         run: docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 ./scripts/validate_compose_artifacts.sh compose-artifacts
-      - &inject-runtime-secrets
-        name: Create synthetic runtime secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          shared_password="$(openssl rand -hex 24)"
-          jwt_key="$(openssl rand -hex 32)"
-          jwt_config="$(printf '{\"auth\":{\"jwt\":{\"current_kid\":\"ci-v1\",\"keys\":{\"ci-v1\":\"%s\"},\"access_ttl_sec\":7200,\"refresh_ttl_sec\":2592000}}}' "$jwt_key")"
-          {
-            printf 'CHATNOW_MYSQL_ROOT_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_RABBITMQ_BOOTSTRAP_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_IDENTITY_MYSQL_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_CONVERSATION_MYSQL_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_RELATIONSHIP_MYSQL_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_MESSAGE_MYSQL_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_MEDIA_MYSQL_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_TRANSMITE_MQ_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_MESSAGE_MQ_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_PUSH_MQ_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_IDENTITY_SMTP_PASSWORD=%s\n' "$shared_password"
-            printf 'CHATNOW_MEDIA_S3_ACCESS_KEY=%s\n' 'ci-synthetic-access'
-            printf 'CHATNOW_MEDIA_S3_SECRET_KEY=%s\n' "$shared_password"
-            printf 'CHATNOW_JWT_CONFIG=%s\n' "$jwt_config"
-            printf 'MYSQL_DSN=root:%s@tcp(localhost:3306)/chatnow?charset=utf8mb4&parseTime=true\n' "$shared_password"
-            printf 'MINIO_ACCESS_KEY=%s\n' 'ci-synthetic-access'
-            printf 'MINIO_SECRET_KEY=%s\n' "$shared_password"
-          } >> "$GITHUB_ENV"
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -173,7 +145,6 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
-      - *inject-runtime-secrets
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -207,7 +178,6 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
-      - *inject-runtime-secrets
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -241,7 +211,6 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
-      - *inject-runtime-secrets
       - name: Start full stack with PF-09 rate limits
         env:
           # Transmite flags are int32; use the maximum valid value for gate-only headroom.
@@ -275,7 +244,6 @@ jobs:
           sudo apt-get install -y protobuf-compiler netcat-openbsd
       - name: Install Go protobuf generator
         run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-      - *inject-runtime-secrets
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
