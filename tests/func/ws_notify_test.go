@@ -12,6 +12,7 @@ import (
 
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
+	identity "chatnow-tests/proto/chatnow/identity"
 	msg "chatnow-tests/proto/chatnow/message"
 	presence "chatnow-tests/proto/chatnow/presence"
 	push "chatnow-tests/proto/chatnow/push"
@@ -236,4 +237,45 @@ func TestFN_WS_MQTracePropagation(t *testing.T) {
 	notify, err := wsBob.WaitForNotify(ctx, int32(push.NotifyType_CHAT_MESSAGE_NOTIFY))
 	require.NoError(t, err)
 	assert.Equal(t, traceID, notify.GetTraceId())
+}
+
+// FN-WS-09 | P0 | authentication | A revoked access token cannot establish a WebSocket session.
+func TestFN_WS_RevokedTokenRejected(t *testing.T) {
+	revoked, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	observer, _, _ := fixture.RegisterAndLogin(t, HTTP)
+
+	logoutRsp := &identity.LogoutRsp{}
+	require.NoError(t, revoked.DoAuth("/service/identity/logout", &identity.LogoutReq{
+		RequestId: client.NewRequestID(),
+	}, logoutRsp))
+	require.True(t, logoutRsp.GetHeader().GetSuccess())
+
+	ws, err := client.NewWSClient(
+		revoked.Config(), revoked.AccessToken, revoked.UserID, revoked.DeviceID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ws.Close() })
+
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancelClose()
+	require.NoError(t, ws.WaitForClose(closeCtx), "Push must close a revoked WebSocket admission")
+
+	presenceRsp := &presence.GetPresenceRsp{}
+	require.NoError(t, observer.DoAuth("/service/presence/get", &presence.GetPresenceReq{
+		RequestId: client.NewRequestID(),
+		UserId:    revoked.UserID,
+	}, presenceRsp))
+	require.True(t, presenceRsp.GetHeader().GetSuccess())
+	assert.Equal(t, presence.PresenceState_OFFLINE,
+		presenceRsp.GetPresence().GetAggregatedState(),
+		"rejected admission must not publish online presence")
+
+	validWS, err := client.NewWSClient(
+		observer.Config(), observer.AccessToken, observer.UserID, observer.DeviceID)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = validWS.Close() })
+
+	validCtx, cancelValid := context.WithTimeout(context.Background(), time.Second)
+	defer cancelValid()
+	assert.ErrorIs(t, validWS.WaitForClose(validCtx), context.DeadlineExceeded,
+		"a valid access token must keep its WebSocket session open")
 }

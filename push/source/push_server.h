@@ -13,6 +13,7 @@
 #include "dao/data_redis.hpp"
 #include "auth/auth_context.hpp"
 #include "auth/forward_auth.hpp"
+#include "auth/jwt_store.hpp"
 #include "common/auth/metadata.pb.h"
 #include "auth/auth_config_loader.hpp"
 #include "error/error_codes.hpp"
@@ -57,6 +58,7 @@ class PushServiceImpl : public PushService
 public:
     PushServiceImpl(const Connection::ptr &connections,
                     const std::shared_ptr<chatnow::auth::JwtCodec> &jwt_codec,
+                    const chatnow::auth::JwtStore::ptr &jwt_store,
                     const RedisClient::ptr &redis,
                     const OnlineRoute::ptr &online_route,
                     const UnackedPush::ptr &unacked,
@@ -70,6 +72,7 @@ public:
                     std::chrono::seconds route_l1_ttl = std::chrono::seconds(2))
         : _connections(connections),
           _jwt_codec(jwt_codec),
+          _jwt_store(jwt_store),
           _redis(redis),
           _online_route(online_route),
           _unacked(unacked),
@@ -527,6 +530,20 @@ private:
         std::string did = claims.did;
         std::string jti = claims.jti;
 
+        const auto revocation_status = _jwt_store->query_revocation_status(jti);
+        if (revocation_status != chatnow::auth::JwtStore::RevocationStatus::kNotRevoked) {
+            if (revocation_status == chatnow::auth::JwtStore::RevocationStatus::kRevoked) {
+                metrics::g_push_auth_revoked_total << 1;
+                LOG_WARN("WS authentication rejected: token revoked");
+            } else {
+                metrics::g_push_auth_revocation_unavailable_total << 1;
+                LOG_WARN("WS authentication rejected: revocation state unavailable");
+            }
+            try { conn->close(websocketpp::close::status::policy_violation,
+                              "auth failed"); } catch (std::exception &e) { LOG_WARN("WS close failed: {}", e.what()); }
+            return;
+        }
+
         _connections->insert(conn, uid, did, jti);
         if (_online_route) _online_route->bind(uid, did, _instance_id);
 
@@ -975,6 +992,7 @@ private:
 
     Connection::ptr _connections;
     std::shared_ptr<chatnow::auth::JwtCodec> _jwt_codec;
+    chatnow::auth::JwtStore::ptr _jwt_store;
     RedisClient::ptr _redis;
     OnlineRoute::ptr _online_route;
     UnackedPush::ptr _unacked;
@@ -1079,6 +1097,7 @@ public:
             auto redis = RedisClientFactory::create(host, port, db, keep_alive, pool_size);
             _redis_client = std::make_shared<RedisClient>(redis);
         }
+        _jwt_store    = std::make_shared<chatnow::auth::JwtStore>(_redis_client);
         _online_route = std::make_shared<OnlineRoute>(_redis_client);
         _unacked      = std::make_shared<UnackedPush>(_redis_client);
         _cross_outbox = std::make_shared<CrossInstanceOutbox>(_redis_client);
@@ -1229,6 +1248,7 @@ public:
 
     void make_rpc_object(uint16_t port, uint32_t timeout, uint8_t num_threads, uint16_t ws_port) {
         if (!_redis_client) { LOG_ERROR("Push: Redis 未初始化"); abort(); }
+        if (!_jwt_store) { LOG_ERROR("Push: JWT store 未初始化"); abort(); }
         if (!_mm_channels) { LOG_ERROR("Push: 信道管理未初始化"); abort(); }
         if (port == ws_port) {
             LOG_WARN("Push: rpc_port and ws_port are both {}, may conflict", port);
@@ -1236,7 +1256,8 @@ public:
         _connections = std::make_shared<Connection>();
         _rpc_server = std::make_shared<brpc::Server>();
         _push_service = new PushServiceImpl(
-            _connections, _jwt_codec, _redis_client, _online_route, _unacked, _cross_outbox,
+            _connections, _jwt_codec, _jwt_store, _redis_client, _online_route,
+            _unacked, _cross_outbox,
             _instance_id, _message_service_name, _mm_channels,
             _cross_reaper_election, _local_route_cache, _inflight_registry, _route_l1_ttl);
         _push_service->set_resend_params(_resend_batch, _resend_max_age_sec);
@@ -1296,7 +1317,7 @@ public:
                                             std::move(_mq_client),
                                             std::move(_push_subscriber),
                                             _push_service,
-                                            std::move(_stale_reaper_thread),
+                                            &_stale_reaper_thread,
                                             _stale_reaper_running);
     }
 
@@ -1304,6 +1325,7 @@ private:
     std::string _redis_seeds;
     RedisClient::ptr _redis_client;
     std::shared_ptr<chatnow::auth::JwtCodec> _jwt_codec;
+    chatnow::auth::JwtStore::ptr _jwt_store;
     OnlineRoute::ptr _online_route;
     UnackedPush::ptr _unacked;
     CrossInstanceOutbox::ptr _cross_outbox;

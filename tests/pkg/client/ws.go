@@ -19,10 +19,12 @@ type WSClient struct {
 	userID      string
 	deviceID    string
 
-	mu       sync.Mutex
-	notifies []*push.NotifyMessage
-	notifyCh chan *push.NotifyMessage
-	closed   bool
+	mu        sync.Mutex
+	notifies  []*push.NotifyMessage
+	notifyCh  chan *push.NotifyMessage
+	closed    bool
+	closedCh  chan struct{}
+	closeOnce sync.Once
 }
 
 // NewWSClient 连接 gateway WS，发送 CLIENT_AUTH 鉴权帧，启动 readLoop。
@@ -39,6 +41,7 @@ func NewWSClient(cfg *Config, accessToken, userID, deviceID string) (*WSClient, 
 		userID:      userID,
 		deviceID:    deviceID,
 		notifyCh:    make(chan *push.NotifyMessage, 100),
+		closedCh:    make(chan struct{}),
 	}
 
 	// 发送 CLIENT_AUTH 鉴权帧
@@ -129,20 +132,39 @@ func (w *WSClient) WaitForNotifyCount(ctx context.Context, notifyType int32, n i
 
 // Close 关闭 WS 连接。
 func (w *WSClient) Close() error {
+	if !w.markClosed() {
+		return nil
+	}
+	return w.conn.Close()
+}
+
+// WaitForClose waits until the peer closes the WebSocket or the context expires.
+func (w *WSClient) WaitForClose(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.closedCh:
+		return nil
+	}
+}
+
+func (w *WSClient) markClosed() bool {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
-		return nil
+		return false
 	}
 	w.closed = true
 	w.mu.Unlock()
-	return w.conn.Close()
+	w.closeOnce.Do(func() { close(w.closedCh) })
+	return true
 }
 
 func (w *WSClient) readLoop() {
 	for {
 		_, data, err := w.conn.ReadMessage()
 		if err != nil {
+			w.markClosed()
 			return
 		}
 		notify := &push.NotifyMessage{}
