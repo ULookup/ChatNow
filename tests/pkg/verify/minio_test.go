@@ -10,6 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNewMinIOVerifierRequiresInjectedCredentials(t *testing.T) {
+	require.PanicsWithValue(t, "NewMinIOVerifier: endpoint is required", func() {
+		NewMinIOVerifier("", "", "")
+	})
+	require.PanicsWithValue(t, "NewMinIOVerifier: access key is required", func() {
+		NewMinIOVerifier("127.0.0.1:19000", "", "synthetic-secret")
+	})
+	require.PanicsWithValue(t, "NewMinIOVerifier: secret key is required", func() {
+		NewMinIOVerifier("127.0.0.1:19000", "synthetic-access", "")
+	})
+}
+
 func TestMinIOVerifier_ObjectExists(t *testing.T) {
 	endpoint := os.Getenv("MINIO_ENDPOINT")
 	if endpoint == "" {

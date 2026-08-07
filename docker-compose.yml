@@ -18,7 +18,7 @@ services:
     image: mysql:8.0.44
     container_name: mysql-service
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${CHATNOW_MYSQL_ROOT_PASSWORD:?CHATNOW_MYSQL_ROOT_PASSWORD is required}
     volumes:
       - ./sql:/docker-entrypoint-initdb.d/:rw
       - ./middle/data/mysql:/var/lib/mysql:rw
@@ -126,7 +126,7 @@ services:
     container_name: rabbitmq-service
     environment:
       RABBITMQ_DEFAULT_USER: root
-      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_PASS: ${CHATNOW_RABBITMQ_BOOTSTRAP_PASSWORD:?CHATNOW_RABBITMQ_BOOTSTRAP_PASSWORD is required}
     volumes:
       - ./middle/data/rabbitmq:/var/lib/rabbitmq:rw
     ports:
@@ -135,6 +135,10 @@ services:
   media_server:
     build: ./media
     container_name: media_server-service
+    environment:
+      CHATNOW_MEDIA_MYSQL_PASSWORD: ${CHATNOW_MEDIA_MYSQL_PASSWORD:?CHATNOW_MEDIA_MYSQL_PASSWORD is required}
+      CHATNOW_MEDIA_S3_ACCESS_KEY: ${CHATNOW_MEDIA_S3_ACCESS_KEY:?CHATNOW_MEDIA_S3_ACCESS_KEY is required}
+      CHATNOW_MEDIA_S3_SECRET_KEY: ${CHATNOW_MEDIA_S3_SECRET_KEY:?CHATNOW_MEDIA_S3_SECRET_KEY is required}
     volumes:
       - ./conf/docker/media_server.conf:/im/conf/media_server.conf
       - ./conf/media.json:/im/conf/media.json
@@ -153,6 +157,8 @@ services:
   relationship_server:
     build: ./relationship
     container_name: relationship_server-service
+    environment:
+      CHATNOW_RELATIONSHIP_MYSQL_PASSWORD: ${CHATNOW_RELATIONSHIP_MYSQL_PASSWORD:?CHATNOW_RELATIONSHIP_MYSQL_PASSWORD is required}
     volumes:
       - ./conf/docker/relationship_server.conf:/im/conf/relationship_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
@@ -170,6 +176,8 @@ services:
   conversation_server:
     build: ./conversation
     container_name: conversation_server-service
+    environment:
+      CHATNOW_CONVERSATION_MYSQL_PASSWORD: ${CHATNOW_CONVERSATION_MYSQL_PASSWORD:?CHATNOW_CONVERSATION_MYSQL_PASSWORD is required}
     volumes:
       - ./conf/docker/conversation_server.conf:/im/conf/conversation_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
@@ -188,9 +196,10 @@ services:
   gateway_server:
     build: ./gateway
     container_name: gateway_server-service
+    environment:
+      CHATNOW_JWT_CONFIG: ${CHATNOW_JWT_CONFIG:?CHATNOW_JWT_CONFIG is required}
     volumes:
       - ./conf/docker/gateway_server.conf:/im/conf/gateway_server.conf
-      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -205,9 +214,11 @@ services:
   push_server:
     build: ./push
     container_name: push_server-service
+    environment:
+      CHATNOW_JWT_CONFIG: ${CHATNOW_JWT_CONFIG:?CHATNOW_JWT_CONFIG is required}
+      CHATNOW_PUSH_MQ_PASSWORD: ${CHATNOW_PUSH_MQ_PASSWORD:?CHATNOW_PUSH_MQ_PASSWORD is required}
     volumes:
       - ./conf/docker/push_server.conf:/im/conf/push_server.conf
-      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh
@@ -224,6 +235,9 @@ services:
   message_server:
     build: ./message
     container_name: message_server-service
+    environment:
+      CHATNOW_MESSAGE_MYSQL_PASSWORD: ${CHATNOW_MESSAGE_MYSQL_PASSWORD:?CHATNOW_MESSAGE_MYSQL_PASSWORD is required}
+      CHATNOW_MESSAGE_MQ_PASSWORD: ${CHATNOW_MESSAGE_MQ_PASSWORD:?CHATNOW_MESSAGE_MQ_PASSWORD is required}
     volumes:
       - ./conf/docker/message_server.conf:/im/conf/message_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
@@ -243,6 +257,8 @@ services:
   transmite_server:
     build: ./transmite
     container_name: transmite_server-service
+    environment:
+      CHATNOW_TRANSMITE_MQ_PASSWORD: ${CHATNOW_TRANSMITE_MQ_PASSWORD:?CHATNOW_TRANSMITE_MQ_PASSWORD is required}
     volumes:
       - ./conf/docker/transmite_server.conf:/im/conf/transmite_server.conf
       - ./middle/data/logs:/var/lib/logs:rw
@@ -261,9 +277,12 @@ services:
   identity_server:
     build: ./identity
     container_name: identity_server-service
+    environment:
+      CHATNOW_IDENTITY_MYSQL_PASSWORD: ${CHATNOW_IDENTITY_MYSQL_PASSWORD:?CHATNOW_IDENTITY_MYSQL_PASSWORD is required}
+      CHATNOW_IDENTITY_SMTP_PASSWORD: ${CHATNOW_IDENTITY_SMTP_PASSWORD:?CHATNOW_IDENTITY_SMTP_PASSWORD is required}
+      CHATNOW_JWT_CONFIG: ${CHATNOW_JWT_CONFIG:?CHATNOW_JWT_CONFIG is required}
     volumes:
       - ./conf/docker/identity_server.conf:/im/conf/identity_server.conf
-      - ./conf/auth.json:/im/conf/auth.json
       - ./middle/data/logs:/var/lib/logs:rw
       - ./middle/data/data:/var/lib/data:rw
       - ./entrypoint.sh:/im/bin/entrypoint.sh

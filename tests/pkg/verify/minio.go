@@ -16,16 +16,16 @@ type MinIOVerifier struct {
 }
 
 // NewMinIOVerifier 创建 MinIO 验证器。
-// endpoint 例 "127.0.0.1:9000"（不含 scheme），accessKey/secretKey 默认 minioadmin。
+// Credentials must be supplied by the isolated test environment.
 func NewMinIOVerifier(endpoint, accessKey, secretKey string) *MinIOVerifier {
 	if endpoint == "" {
-		endpoint = "127.0.0.1:9000"
+		panic("NewMinIOVerifier: endpoint is required")
 	}
 	if accessKey == "" {
-		accessKey = "minioadmin"
+		panic("NewMinIOVerifier: access key is required")
 	}
 	if secretKey == "" {
-		secretKey = "minioadmin"
+		panic("NewMinIOVerifier: secret key is required")
 	}
 	cli, err := minio.New(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(accessKey, secretKey, ""),

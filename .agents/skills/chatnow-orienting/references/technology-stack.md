@@ -1,5 +1,9 @@
 # Technology Stack and Entry Points
 
+Target version: `3.0-dev`
+Status: Current
+Verified: 2026-07-22
+
 Use this reference for the `3.0-dev` architecture line, then verify task-sensitive details at the resolved commit.
 
 ## Stack
@@ -37,10 +41,15 @@ Inspect root `CMakeLists.txt`, the affected service's `CMakeLists.txt`, and its 
 
 - Local service flags: `conf/local/*_server.conf`.
 - Container service flags: `conf/docker/*_server.conf`.
-- JWT keys and TTLs: `conf/auth.json`.
-- Media S3, buckets, presign, and MIME policy: `conf/media.json` plus Media flags.
+- JWT keys and TTLs: Identity, Gateway, and Push resolve `CHATNOW_JWT_CONFIG` or `CHATNOW_JWT_CONFIG_FILE` at process startup. The value is the complete JSON document.
+- Media S3 application credentials are resolved through the common secret resolver. Buckets, endpoint, presign, and MIME policy remain in `conf/media.json` plus Media flags.
 - Example Transmite flags: `conf/transmite_server.conf.example`.
 - Service defaults and flag definitions: each `<service>/source/<service>_server.cc`.
+- MySQL passwords for Conversation, Identity, Media, Message, and Relationship use service-specific direct-environment or `_FILE` inputs through `common/config/secret_resolver.hpp`.
+- RabbitMQ passwords for Transmite, Message, and Push use the same resolver contract. Identity SMTP and Media S3 application credentials are also migrated.
+- The resolver accepts exactly one allowlisted direct environment variable or `_FILE` locator, fails closed on missing/conflicting input, and validates secret-file type, owner, mode, size, and content. It reads once at startup; there is no hot reload.
+- Bootstrap credentials in Compose remain deployment environment references rather than application resolver inputs. Redis has no configured password or ACL consumer.
+- The canonical names, consumers, deployment rules, and limitations are maintained in `docs/operations/runtime-secrets.md`.
 - Root `docker-compose.yml` declares the application stack used by CI, but it is not a complete integrated Media/MinIO topology: it starts Media without a MinIO service or dependency.
 - `docker/docker-compose.yml` separately declares MinIO and its initialization sidecar on a different default Compose network. Media mounts `conf/media.json`, whose `http://127.0.0.1:9000` endpoint resolves to the Media container itself, not to that separate MinIO container.
 
@@ -57,7 +66,10 @@ The current test framework is entirely Go. New or restored C++ test suites are p
 | L2 Functional | `tests/func`, `func` | `cd tests && make proto && make test-func` |
 | L3 Scenario | `tests/func`, `func` | `cd tests && make proto && make test-scenario` |
 | L4 Performance | `tests/perf`, `perf` | `cd tests && make proto && make test-perf` |
+| Reliability | `tests/reliability`, `reliability` | `cd tests && make proto && make test-reliability` |
 
-Reliability is a distinct framework layer with the reserved `reliability` build tag. There is currently no repository path or Make target for it, so do not claim a runnable Reliability command. Shared clients, fixtures, polling, cleanup, and direct store verification live under `tests/pkg`.
+Reliability is an executable, Redis-focused layer. Its current tests exercise Redis circuit recovery and Push unacked requeue behavior through `tests/pkg/chaos/redis.go`. The Make target runs the whole layer and does not consume `TEST_RUN`; use a direct tagged `go test ... -run` command when exact selection is required. No current controller covers RabbitMQ, MySQL, arbitrary services, or general network faults, so do not describe this as a broad chaos platform.
+
+The CI definition has a dedicated `reliability` job that depends on `service-artifacts`, independently of BVT. At this verification date the job exists, but the inspected PR run was skipped after an upstream failure; that is not green runtime evidence. Shared clients, fixtures, polling, cleanup, and direct store verification live under `tests/pkg`.
 
 The CI definition is `.github/workflows/ci.yml`; verify its commands against files present at the target commit before copying them into local instructions.

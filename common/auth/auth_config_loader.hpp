@@ -1,8 +1,8 @@
 #pragma once
 
 /**
- * 从 JSON 文件加载 JwtConfig — 横切 spec §2.2
- * 启动时 fail-fast：文件不存在 / JSON 解析失败 / validate 失败 → throw std::runtime_error
+ * Load JwtConfig from the unified runtime Secret resolver.
+ * Startup fails closed when the source is missing, malformed, or invalid.
  *
  * JSON shape:
  * {
@@ -23,39 +23,57 @@
 
 #include <json/json.h>
 
-#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
 namespace chatnow::auth {
 
-inline JwtConfig load_jwt_config_from_file(const std::string& path) {
-    std::ifstream ifs(path);
-    if (!ifs) {
-        throw std::runtime_error("auth_config: cannot open " + path);
-    }
+inline JwtConfig parse_jwt_config(const std::string& document) {
+    std::istringstream input(document);
     Json::Value root;
     Json::CharReaderBuilder b;
-    std::string err;
-    if (!Json::parseFromStream(b, ifs, &root, &err)) {
-        throw std::runtime_error("auth_config: parse failed: " + err);
+    std::string parse_errors;
+    if (!Json::parseFromStream(b, input, &root, &parse_errors)) {
+        throw std::runtime_error("auth_config: parse_failed");
     }
-    if (!root.isMember("auth") || !root["auth"].isMember("jwt")) {
-        throw std::runtime_error("auth_config: missing auth.jwt section in " + path);
+    if (!root.isObject() || !root.isMember("auth") || !root["auth"].isObject() ||
+        !root["auth"].isMember("jwt") || !root["auth"]["jwt"].isObject()) {
+        throw std::runtime_error("auth_config: schema_invalid");
     }
     const auto& j = root["auth"]["jwt"];
 
     JwtConfig cfg;
+    if (!j.isMember("current_kid") || !j["current_kid"].isString()) {
+        throw std::runtime_error("auth_config: schema_invalid");
+    }
     cfg.current_kid = j.get("current_kid", "").asString();
-    if (j.isMember("access_ttl_sec"))  cfg.access_ttl_sec  = j["access_ttl_sec"].asInt();
-    if (j.isMember("refresh_ttl_sec")) cfg.refresh_ttl_sec = j["refresh_ttl_sec"].asInt();
+    if (j.isMember("access_ttl_sec")) {
+        if (!j["access_ttl_sec"].isInt()) {
+            throw std::runtime_error("auth_config: schema_invalid");
+        }
+        cfg.access_ttl_sec = j["access_ttl_sec"].asInt();
+    }
+    if (j.isMember("refresh_ttl_sec")) {
+        if (!j["refresh_ttl_sec"].isInt()) {
+            throw std::runtime_error("auth_config: schema_invalid");
+        }
+        cfg.refresh_ttl_sec = j["refresh_ttl_sec"].asInt();
+    }
     if (!j.isMember("keys") || !j["keys"].isObject()) {
-        throw std::runtime_error("auth_config: missing auth.jwt.keys map");
+        throw std::runtime_error("auth_config: schema_invalid");
     }
     for (const auto& kid : j["keys"].getMemberNames()) {
+        if (!j["keys"][kid].isString()) {
+            throw std::runtime_error("auth_config: schema_invalid");
+        }
         cfg.keys[kid] = j["keys"][kid].asString();
     }
-    cfg.validate_or_throw();
+    try {
+        cfg.validate_or_throw();
+    } catch (const std::exception&) {
+        throw std::runtime_error("auth_config: validation_failed");
+    }
     return cfg;
 }
 

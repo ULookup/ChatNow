@@ -1,5 +1,9 @@
 # Core Flows
 
+Target version: `3.0-dev`
+Status: Current
+Verified: 2026-07-22
+
 These are current-state flows for the `3.0-dev` line. Re-verify affected symbols at the target commit and keep proposals in a separate section.
 
 ## HTTP request flow
@@ -41,11 +45,27 @@ These are current-state flows for the `3.0-dev` line. Re-verify affected symbols
 **Flow:** Identity registration/login/refresh -> JWT -> Gateway or Push verification -> server-derived context -> downstream brpc metadata.
 
 - Entry/contracts: `proto/identity/identity_service.proto`; `identity/source/identity_server.h`; `common/auth/jwt_codec.hpp`; `common/auth/jwt_store.hpp`; `gateway/source/gateway_auth.hpp`; `push/source/push_server.h`.
+- Key loading: Identity, Gateway, and Push each resolve the complete JWT JSON document from exactly one of `CHATNOW_JWT_CONFIG` or `CHATNOW_JWT_CONFIG_FILE` at process startup. Identity signs and verifies; Gateway and Push verify. The codec is not hot-reloaded, so a key-set or `current_kid` change requires a controlled rollout of all affected processes.
 - Stores: Identity uses MySQL for users/devices and Redis for active refresh tokens, rotation/reuse detection, and revocation state.
 - Trust: Gateway validates Bearer access tokens and revocation before deriving metadata. Push verifies WS `CLIENT_AUTH`, queries revocation once at admission, and binds claim identity only after a `kNotRevoked` result. Revoked tokens and unavailable revocation state are rejected before connection, route, presence, or resend side effects. Downstream handlers use `common/auth/auth_context.hpp`; service-to-service forwarding uses `common/auth/forward_auth.hpp` where required.
 - Sync/retry: Login and refresh are synchronous; refresh rotation detects reuse. Push performs no revocation lookup per message or heartbeat. Its admission boundary fails closed on Redis errors, while the legacy `JwtStore::is_revoked` bool API retains fail-open compatibility for unchanged callers.
 - Tests: `tests/bvt/auth_test.go`, `tests/func/identity_test.go`, `tests/func/auth_middleware_test.go`, `tests/func/security_test.go`, `tests/func/scenarios_test.go`, and `tests/func/ws_notify_test.go` (`FN-WS-09`).
 - Invariants: only Identity issues/refreshes tokens; access and refresh token purposes remain distinct; downstream identity comes from verified claims and forwarded metadata, not request bodies; Push admission must resolve revocation before publishing any authenticated-session side effect.
+
+## Runtime secrets
+
+### Current
+
+**Flow:** deployment environment or mounted secret file -> common resolver -> service startup -> dependency/auth client construction.
+
+- `common/config/secret_resolver.hpp` owns an allowlist of logical credentials and their direct-environment/`_FILE` names. It rejects missing or conflicting sources, invalid values, symlinks, non-regular files, unexpected owners, and group/other-accessible modes.
+- JWT (Identity, Gateway, Push), application MySQL (Conversation, Identity, Media, Message, Relationship), RabbitMQ (Transmite, Message, Push), SMTP (Identity), and S3 application credentials (Media) use the resolver.
+- Resolution happens once at startup. Missing or unsafe input prevents the service from accepting traffic; there is no hot reload or tracked/default fallback.
+- Real credential changes and production rotation require explicit human approval. Values and credential-derived fingerprints must never appear in logs or operational evidence.
+
+### Proposed
+
+Redis authentication, dynamic reload, automatic rotation, and additional credential classes are not implemented. They require their own scoped Issues and executable tests; do not infer them from the current resolver. See `docs/operations/runtime-secrets.md` for the exact current contract and rollback procedure.
 
 ## Media upload and download
 

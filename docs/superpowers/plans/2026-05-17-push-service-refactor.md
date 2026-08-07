@@ -1493,7 +1493,7 @@ git commit -m "refactor(push): 完整重写 PushServiceImpl — namespace chatno
 // JWT config（从配置文件 / gflags 读取，或硬编码开发 key）
 chatnow::auth::JwtConfig jwt_cfg;
 jwt_cfg.current_kid = "v1";
-jwt_cfg.keys["v1"] = "0123456789abcdef0123456789abcdef"; // >=32 字节
+jwt_cfg.keys["v1"] = "<synthetic-jwt-key-at-least-32-bytes>"; // >=32 字节
 jwt_cfg.access_ttl_sec = 7200;
 psb.make_jwt_object(jwt_cfg);
 ```
@@ -1538,7 +1538,7 @@ set(proto_files common/types.proto common/error.proto common/envelope.proto mess
 ```
 # JWT（开发阶段临时键，后续配置化）
 -jwt_current_kid=v1
--jwt_key_v1=0123456789abcdef0123456789abcdef
+-jwt_key_v1=<synthetic-jwt-key-at-least-32-bytes>
 ```
 
 - [ ] **Step 3: Commit**

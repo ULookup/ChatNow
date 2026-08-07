@@ -95,8 +95,8 @@ eval $command
 创建 `.env` 文件存储敏感信息：
 
 ```ini
-MYSQL_ROOT_PASSWORD=YHY060403
-RABBITMQ_DEFAULT_PASS=YHY060403
+MYSQL_ROOT_PASSWORD=<synthetic-mysql-password>
+RABBITMQ_DEFAULT_PASS=<synthetic-rabbitmq-password>
 ```
 
 docker-compose.yml 引用变量：
@@ -107,7 +107,7 @@ environment:
   RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
 ```
 
-`.env` 加入 `.gitignore`。配置文件中的 `-mysql_pswd=YHY060403` 等暂时保留（配置文件本身不提交到公开仓库）。
+`.env` 加入 `.gitignore`。配置文件中的 `-mysql_pswd=<synthetic-mysql-password>` 等暂时保留（配置文件本身不提交到公开仓库）。
 
 ### 6. 验证步骤
 

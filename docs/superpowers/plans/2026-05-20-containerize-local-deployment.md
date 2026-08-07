@@ -124,7 +124,7 @@ cat > /home/icepop/ChatNow/conf/docker/identity_server.conf << 'EOF'
 -es_host=http://elasticsearch:9200/
 -mysql_host=mysql
 -mysql_user=root
--mysql_pswd=YHY060403
+-mysql_pswd=<synthetic-mysql-password>
 -mysql_db=chatnow
 -mysql_cset=utf8
 -mysql_port=0
@@ -135,7 +135,7 @@ cat > /home/icepop/ChatNow/conf/docker/identity_server.conf << 'EOF'
 -redis_seeds=redis-node1:6379,redis-node2:6380,redis-node3:6381,redis-node4:6382,redis-node5:6383,redis-node6:6384
 -redis_keep_alive=true
 -mail_user=yhaoyang666@163.com
--mail_paswd=XKk5zvYwWKeB8xNk
+-mail_paswd=<synthetic-smtp-password>
 -mail_host=smtps://smtp.163.com:465
 -mail_from=yhaoyang666@163.com
 -auth_config=/im/conf/auth.json
@@ -212,13 +212,13 @@ cat > /home/icepop/ChatNow/conf/docker/message_server.conf << 'EOF'
 -media_service=/service/media_service
 -mysql_host=mysql
 -mysql_user=root
--mysql_pswd=YHY060403
+-mysql_pswd=<synthetic-mysql-password>
 -mysql_db=chatnow
 -mysql_cset=utf8
 -mysql_port=0
 -mysql_pool_count=4
 -mq_user=root
--mq_pswd=YHY060403
+-mq_pswd=<synthetic-rabbitmq-password>
 -mq_host=rabbitmq:5672
 -mq_msg_exchange=chat_msg_exchange
 -mq_msg_queue_db=msg_queue_db
@@ -267,7 +267,7 @@ cat > /home/icepop/ChatNow/conf/docker/conversation_server.conf << 'EOF'
 -redis_pool_size=4
 -mysql_host=mysql
 -mysql_user=root
--mysql_pswd=YHY060403
+-mysql_pswd=<synthetic-mysql-password>
 -mysql_db=chatnow
 -mysql_cset=utf8mb4
 -mysql_port=0
@@ -295,7 +295,7 @@ cat > /home/icepop/ChatNow/conf/docker/relationship_server.conf << 'EOF'
 -es_host=http://elasticsearch:9200/
 -mysql_host=mysql
 -mysql_user=root
--mysql_pswd=YHY060403
+-mysql_pswd=<synthetic-mysql-password>
 -mysql_db=chatnow
 -mysql_cset=utf8mb4
 -mysql_port=0
@@ -326,7 +326,7 @@ cat > /home/icepop/ChatNow/conf/docker/push_server.conf << 'EOF'
 -redis_keep_alive=true
 -redis_pool_size=16
 -mq_user=root
--mq_pswd=YHY060403
+-mq_pswd=<synthetic-rabbitmq-password>
 -mq_host=rabbitmq:5672
 -mq_push_exchange=chat_push_exchange
 -mq_push_queue=msg_push_queue
@@ -334,7 +334,7 @@ cat > /home/icepop/ChatNow/conf/docker/push_server.conf << 'EOF'
 -resend_batch=50
 -resend_max_age_sec=5
 -jwt_current_kid=v1
--jwt_key_v1=0123456789abcdef0123456789abcdef
+-jwt_key_v1=<synthetic-jwt-key-at-least-32-bytes>
 EOF
 ```
 
@@ -363,13 +363,13 @@ cat > /home/icepop/ChatNow/conf/docker/transmite_server.conf << 'EOF'
 -redis_pool_size=8
 -mysql_host=mysql
 -mysql_user=root
--mysql_pswd=YHY060403
+-mysql_pswd=<synthetic-mysql-password>
 -mysql_db=chatnow
 -mysql_cset=utf8
 -mysql_port=0
 -mysql_pool_count=4
 -mq_user=root
--mq_pswd=YHY060403
+-mq_pswd=<synthetic-rabbitmq-password>
 -mq_host=rabbitmq:5672
 -mq_msg_exchange=chat_msg_exchange
 -mq_msg_queue=
@@ -874,8 +874,8 @@ git commit -m "feat: update docker-compose for containerized deployment with ser
 
 ```bash
 cat > /home/icepop/ChatNow/.env << 'EOF'
-MYSQL_ROOT_PASSWORD=YHY060403
-RABBITMQ_DEFAULT_PASS=YHY060403
+MYSQL_ROOT_PASSWORD=<synthetic-mysql-password>
+RABBITMQ_DEFAULT_PASS=<synthetic-rabbitmq-password>
 EOF
 ```
 

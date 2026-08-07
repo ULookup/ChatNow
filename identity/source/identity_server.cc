@@ -1,4 +1,5 @@
 #include "identity_server.h"
+#include "config/secret_resolver.hpp"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
@@ -19,7 +20,6 @@ DEFINE_string(es_host, "http://127.0.0.1:9200/", "ES搜索引擎服务器URL");
 
 DEFINE_string(mysql_host, "127.0.0.1", "MySQL服务器访问地址");
 DEFINE_string(mysql_user, "root", "MySQL访问服务器用户名");
-DEFINE_string(mysql_pswd, "YHY060403", "MySQL服务器访问密码");
 DEFINE_string(mysql_db, "chatnow", "MySQL默认库名称");
 DEFINE_string(mysql_cset, "utf8mb4", "MySQL客户端字符集");
 DEFINE_int32(mysql_port, 0, "MySQL服务器访问端口");
@@ -33,24 +33,27 @@ DEFINE_bool(redis_keep_alive, true, "Redis长连接保活");
 DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
 DEFINE_string(mail_user, "yhaoyang666@163.com", "邮箱验证平台的用户名");
-DEFINE_string(mail_paswd, "XKk5zvYwWKeB8xNk", "邮箱验证平台的密码");
 DEFINE_string(mail_host, "smtps://smtp.163.com:465", "邮箱验证平台的URL");
 DEFINE_string(mail_from, "yhaoyang666@163.com", "邮箱验证平台的发送方");
-
-DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
 
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const auto mysql_password = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::IdentityMysqlPassword);
+    const auto smtp_password = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::IdentitySmtpPassword);
+    const auto jwt_config = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::JwtConfig);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::IdentityServerBuilder isb;
     isb.make_es_object({FLAGS_es_host});
-    isb.make_mysql_object(FLAGS_mysql_user, FLAGS_mysql_pswd, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
+    isb.make_mysql_object(FLAGS_mysql_user, mysql_password, FLAGS_mysql_host, FLAGS_mysql_db, FLAGS_mysql_cset, FLAGS_mysql_port, FLAGS_mysql_pool_count);
     isb.set_redis_seeds(FLAGS_redis_seeds);
     isb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
-    isb.make_jwt_object(FLAGS_auth_config);
-    isb.make_mail_object(FLAGS_mail_user, FLAGS_mail_paswd, FLAGS_mail_host, FLAGS_mail_from);
+    isb.make_jwt_object(jwt_config);
+    isb.make_mail_object(FLAGS_mail_user, smtp_password, FLAGS_mail_host, FLAGS_mail_from);
     isb.make_media_config(FLAGS_media_public_url_prefix);
     isb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service);
     isb.make_rpc_object(FLAGS_listen_port, FLAGS_rpc_timeout, FLAGS_rpc_threads);

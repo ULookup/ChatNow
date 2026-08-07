@@ -16,6 +16,8 @@ Thumbs.db
 
 # Environment secrets
 .env
+.secrets/
+
 
 # Runtime data
 logs/

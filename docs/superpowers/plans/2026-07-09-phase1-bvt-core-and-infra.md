@@ -16,7 +16,7 @@
 - 每 run 全量清理：TestMain 调 cleanup.CleanupAll，保证确定性状态（master spec §7）
 - tests/pkg/ 包无 build tag；tests/bvt/ 用 `//go:build bvt`；tests/func/ 用 `//go:build func`
 - 测试代码即权威：用例 ID 注释标注在测试函数顶部（master spec §6.3）
-- MySQL 连接：root:YHY060403@tcp(localhost:3306)/chatnow（从 conf/docker/*.conf 获取）
+- MySQL 连接：root:<synthetic-mysql-password>@tcp(localhost:3306)/chatnow（从 conf/docker/*.conf 获取）
 - ES 索引名：`message` 和 `chat_session`（从 common/dao/data_es.hpp 确认，非 chatnow_*）
 - Redis 集群：6 节点 localhost:6379-6384，FLUSHALL 需逐节点执行
 - WS 协议：binary frame = 序列化的 push.NotifyMessage，首帧发 CLIENT_AUTH 鉴权
@@ -132,7 +132,7 @@ timeout:
   ws_read_sec: 30
 
 database:
-  mysql_dsn: "root:YHY060403@tcp(localhost:3306)/chatnow?charset=utf8mb4&parseTime=true"
+  mysql_dsn: "root:<synthetic-mysql-password>@tcp(localhost:3306)/chatnow?charset=utf8mb4&parseTime=true"
   es_url: "http://localhost:9200"
   redis_nodes:
     - "localhost:6379"

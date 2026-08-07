@@ -815,7 +815,7 @@ Create `conf/relationship_server.conf` with:
 -es_host=http://10.0.4.10:9200/
 -mysql_host=10.0.4.10
 -mysql_user=root
--mysql_pswd=YHY060403
+-mysql_pswd=<synthetic-mysql-password>
 -mysql_db=chatnow
 -mysql_cset=utf8mb4
 -mysql_port=0

@@ -1080,8 +1080,8 @@ private:
 class PushServerBuilder
 {
 public:
-    void make_jwt_object(const std::string &auth_config_path) {
-        auto cfg = ::chatnow::auth::load_jwt_config_from_file(auth_config_path);
+    void make_jwt_object(const std::string &auth_config_json) {
+        auto cfg = ::chatnow::auth::parse_jwt_config(auth_config_json);
         _jwt_codec = std::make_shared<chatnow::auth::JwtCodec>(cfg);
     }
 

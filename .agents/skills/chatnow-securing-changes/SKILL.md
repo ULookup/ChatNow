@@ -5,6 +5,10 @@ description: Use when ChatNow work touches authentication, authorization, user i
 
 # Secure ChatNow Changes
 
+Target version: `3.0-dev`
+Status: Current
+Verified: 2026-07-22
+
 ## Core principle
 
 Treat every external value as untrusted until a named server boundary validates it. Minimize authority and exposed data, and fail securely when a high-impact decision cannot be made safely.
@@ -36,6 +40,9 @@ Stop when identity or ownership is ambiguous, authorization cannot be evaluated 
 ### Identity, credentials, and logs
 
 - Preserve server-derived identity across trusted metadata and validate it again at the receiving boundary. Never forward a client identity as authenticated context.
+- Treat `docs/operations/runtime-secrets.md` as the canonical credential inventory and runtime contract. Reinspect `common/config/secret_resolver.hpp` and the executable consumer before extending it; do not create a parallel loader.
+- For a migrated credential, accept exactly one of its allowlisted direct environment variable or `_FILE` companion. Reject a direct/file conflict, missing required input, an empty value, an unreadable file, a symlink, non-regular input, unexpected ownership, or permissions that grant access beyond the intended runtime identity. Do not fall back to tracked configuration or a compiled default.
+- Keep deployment bootstrap credentials separate from least-privileged application credentials. Local and CI values must be unique synthetic fixtures; never copy a real credential into a repository file, command line, workflow output, test failure, or artifact.
 - Never log or expose bearer tokens, authorization headers, passwords, signing keys, session secrets, cookies, presigned URLs, or real credentials. Do not create, log, or expose any credential-derived token fingerprint, including a hash, keyed HMAC, prefix, suffix, encoded value, or truncated derivative. Permit such a derivative only when an approved protocol explicitly requires it, constrain it to that protocol, and never repurpose it for diagnostics; prefer request or trace IDs.
 - Minimize personal data. Prefer a trace/request ID or purpose-specific opaque correlation ID. Redact or omit user identifiers, device identifiers, message content, contact data, object names, and search text unless the Issue documents necessity, access, retention, and a safe representation.
 - Write English structured logs with stable event and outcome fields. Avoid free-form concatenation of untrusted values and log injection; encode fields through the established logger.
@@ -55,7 +62,7 @@ Stop when identity or ownership is ambiguous, authorization cannot be evaluated 
 
 ## Human approval boundaries
 
-Obtain explicit human approval before using or changing real credentials, operating in production, performing irreversible migration or deletion, or intentionally changing public compatibility or settled product semantics. Approval must name the exact operation and scope. A deadline, temporary diagnostic, rollback plan, or existing access does not substitute for approval.
+Obtain explicit human approval before using, rotating, revoking, or changing real credentials; operating in production; performing irreversible migration or deletion; or intentionally changing public compatibility or settled product semantics. Approval must name the exact operation and scope. A deadline, temporary diagnostic, rollback plan, or existing access does not substitute for approval.
 
 ## Test contract
 
@@ -66,6 +73,7 @@ Add pure-Go adversarial and regression cases for every changed boundary. Include
 - SQL metacharacters and Elasticsearch field/operator/script/query-string injection, authorization-filter bypass, excessive limits, and expensive queries;
 - `..`, absolute, mixed-separator, percent-encoded, NUL, symlink, bucket/prefix, and cross-user object-key traversal;
 - secret and personal-data absence from logs, responses, traces, fixtures, failure output, and generated artifacts;
+- direct/file secret conflicts, missing/empty input, unsafe file ownership or permissions, symlinks, and proof that tracked/default values cannot silently take over;
 - dependency timeout/unavailability at a high-impact decision, proving a bounded secure failure with no partial privileged effect.
 
 Use unique synthetic identities and credentials only. Assign cleanup ownership for users, rows, indexes/documents, objects, keys, sockets, and temporary files.

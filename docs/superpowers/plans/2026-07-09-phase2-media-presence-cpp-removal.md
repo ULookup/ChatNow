@@ -17,7 +17,7 @@
 - Build tag 规则：`tests/func/` 下文件首行 `//go:build func`；`tests/pkg/` 下无 tag。
 - 用例 ID 注释：每个测试函数顶部加 `// FN-MD-01 | P0 | happy path | 说明` 注释块。
 - Fixture 不做断言（除 `t.Fatal`），返回关键 ID 供测试代码断言。
-- MinIO 端点通过环境变量 `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` 覆盖（默认 `http://127.0.0.1:9000` / `minioadmin` / `minioadmin`，与 `conf/media.json` 一致）。
+- MinIO 端点通过环境变量 `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` 覆盖（默认 `http://127.0.0.1:9000` / `<synthetic-s3-access-key>` / `<synthetic-s3-secret-key>`，与 `conf/media.json` 一致）。
 - MinIO bucket 名称：`chatnow-media-private`（会话媒体）+ `chatnow-media-public`（avatar/sticker）。
 - 假设 Phase 1 已完成：`cleanup` / `client/ws` / `verify/{db,es}` / `fixture/{group,message,ws}` 可直接引用。
 
@@ -164,16 +164,16 @@ type MinIOVerifier struct {
 }
 
 // NewMinIOVerifier 创建 MinIO 验证器。
-// endpoint 例 "127.0.0.1:9000"（不含 scheme），accessKey/secretKey 默认 minioadmin。
+// endpoint 例 "127.0.0.1:9000"（不含 scheme），accessKey/secretKey 默认 <synthetic-s3-access-key>/<synthetic-s3-secret-key>。
 func NewMinIOVerifier(endpoint, accessKey, secretKey string) *MinIOVerifier {
 	if endpoint == "" {
 		endpoint = "127.0.0.1:9000"
 	}
 	if accessKey == "" {
-		accessKey = "minioadmin"
+		accessKey = "<synthetic-s3-access-key>"
 	}
 	if secretKey == "" {
-		secretKey = "minioadmin"
+		secretKey = "<synthetic-s3-secret-key>"
 	}
 	cli, err := minio.New(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(accessKey, secretKey, ""),

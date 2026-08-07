@@ -1,4 +1,5 @@
 #include "gateway_server.h"
+#include "config/secret_resolver.hpp"
 
 DEFINE_bool(run_mode, false, "程序的运行模式 false-调试 ; true-发布");
 DEFINE_string(log_file, "", "发布模式下，用于指定日志的输出文件");
@@ -24,17 +25,17 @@ DEFINE_int32(redis_db, 0, "Redis默认库号");
 DEFINE_bool(redis_keep_alive, true, "Redis长连接保活");
 DEFINE_int32(redis_pool_size, 16, "Redis 连接池大小");
 
-DEFINE_string(auth_config, "/im/conf/auth.json", "JWT 鉴权配置文件路径(JSON)");
-
 int main(int argc, char *argv[])
 {
     google::ParseCommandLineFlags(&argc, &argv, true);
+    const auto jwt_config = chatnow::config::resolve_secret(
+        chatnow::config::SecretId::JwtConfig);
     chatnow::init_logger(FLAGS_run_mode, FLAGS_log_file, FLAGS_log_level);
 
     chatnow::GatewayServerBuilder gsb;
     gsb.set_redis_seeds(FLAGS_redis_seeds);
     gsb.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db, FLAGS_redis_keep_alive, FLAGS_redis_pool_size);
-    gsb.make_jwt_object(FLAGS_auth_config);
+    gsb.make_jwt_object(jwt_config);
     gsb.make_discovery_object(FLAGS_registry_host, FLAGS_base_service,
                               FLAGS_identity_service, FLAGS_relationship_service,
                               FLAGS_conversation_service, FLAGS_message_service,
