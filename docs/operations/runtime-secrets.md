@@ -17,8 +17,8 @@ The following behavior is implemented at the verified commit:
 | RabbitMQ password | Transmite, Message, and Push | Service-specific direct or `_FILE` input through the common resolver |
 | SMTP password | Identity | `CHATNOW_IDENTITY_SMTP_PASSWORD` or its `_FILE` companion |
 | S3 application access and secret keys | Media | Separate service-specific direct or `_FILE` inputs; non-secret S3 settings remain in `conf/media.json` |
-| MinIO bootstrap credential | Supplemental MinIO deployment | Required Compose deployment environment references |
-| MySQL root and RabbitMQ bootstrap passwords | Root Compose infrastructure | Required Compose deployment environment references |
+| MinIO bootstrap credential | Root Compose `minio` and `minio-init` services | Required Compose deployment environment references |
+| MySQL root and RabbitMQ bootstrap passwords | Root Compose infrastructure and one-shot initializers | Required Compose deployment environment references |
 
 Redis has no configured password or ACL consumer. The ASR helper can accept credentials, but Media startup does not currently wire them. The CI workflow does not pull real credentials; local and CI stack inputs must be synthetic.
 
@@ -41,7 +41,15 @@ Tracked runtime literals have been removed from the scoped source, configuration
 | Media S3 access key | `CHATNOW_MEDIA_S3_ACCESS_KEY` | `CHATNOW_MEDIA_S3_ACCESS_KEY_FILE` |
 | Media S3 secret key | `CHATNOW_MEDIA_S3_SECRET_KEY` | `CHATNOW_MEDIA_S3_SECRET_KEY_FILE` |
 
-Compose bootstrap variables (`CHATNOW_MYSQL_ROOT_PASSWORD`, `CHATNOW_RABBITMQ_BOOTSTRAP_PASSWORD`, `CHATNOW_MINIO_ROOT_USER`, and `CHATNOW_MINIO_ROOT_PASSWORD`) are required deployment inputs, not common-resolver inputs. Do not append `_FILE` and assume Compose supports it.
+Compose bootstrap variables (`CHATNOW_MYSQL_ROOT_PASSWORD`, `CHATNOW_RABBITMQ_BOOTSTRAP_PASSWORD`, `CHATNOW_MINIO_ROOT_USER`, and `CHATNOW_MINIO_ROOT_PASSWORD`) are required deployment inputs, not common-resolver inputs. `CHATNOW_RABBITMQ_BOOTSTRAP_USER` may override the synthetic local bootstrap user name. Do not append `_FILE` and assume Compose supports it.
+
+The root Compose one-shot initializers receive only the credentials they need to converge disposable local application identities:
+
+- `mysql-init` uses the MySQL root credential plus the five service-specific MySQL passwords to create or update table-scoped users and grants.
+- `rabbitmq-init` uses the RabbitMQ bootstrap credential plus the Transmite, Message, and Push passwords to create or update scoped users and permissions.
+- `minio-init` uses the MinIO root credential plus the Media S3 application credentials to create or update the two buckets, policies, and application identity.
+
+RabbitMQ secrets are sent in Management API JSON bodies rather than command arguments. MinIO feeds root and application secret material to `mc` through standard input, isolates `mc` state in a temporary configuration directory, and removes it on exit. These initialization boundaries do not make bootstrap credentials application inputs. Application containers continue to receive only their own direct or `_FILE` resolver inputs. See [Compose Runtime Operations](compose-runtime.md) for ordering and readiness; neither document is evidence that a cold start has passed.
 
 ## Current injection contract
 
@@ -76,6 +84,7 @@ Never reuse a bootstrap credential as an application credential. Never mount a f
 - Use unique synthetic values generated for the disposable environment. They must not be copied from staging or production and must carry no external privilege.
 - Inject them at runtime through ignored local environment files or ephemeral secret mounts. `.env` being ignored does not make it an approved production store.
 - CI must source synthetic values from ephemeral job setup or the CI secret mechanism, mask values, avoid command tracing, and tear down volumes and temporary files on every exit path.
+- The current runtime PR does not implement that CI workflow integration. Do not infer CI coverage or a clean-slate pass from the root Compose source.
 - Scanner exemptions must match exact synthetic fixtures or documented API examples. Do not exempt an entire `conf/`, `tests/`, `docs/`, Compose, or source subtree.
 - Tests may assert source selection and error categories, but must not print the resolved value or any derivative.
 

@@ -47,6 +47,7 @@ namespace chatnow {
 
 struct S3Options {
     std::string endpoint;
+    std::string public_endpoint;
     std::string region {"us-east-1"};
     std::string access_key;
     std::string secret_key;
@@ -56,17 +57,24 @@ struct S3Options {
 class S3Client {
 public:
     explicit S3Client(const S3Options& o) : _opt(o) {
-        Aws::Client::ClientConfiguration cfg;
-        cfg.endpointOverride = o.endpoint;
-        cfg.scheme = (o.endpoint.rfind("https", 0) == 0)
-                   ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
-        cfg.region = o.region;
-        cfg.verifySSL = false;
-        _client = std::make_shared<Aws::S3::S3Client>(
-            Aws::Auth::AWSCredentials(o.access_key, o.secret_key),
-            cfg,
-            Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
-            o.use_path_style);
+        auto make_client = [&o](const std::string& endpoint) {
+            Aws::Client::ClientConfiguration cfg;
+            cfg.endpointOverride = endpoint;
+            cfg.scheme = (endpoint.rfind("https", 0) == 0)
+                       ? Aws::Http::Scheme::HTTPS : Aws::Http::Scheme::HTTP;
+            cfg.region = o.region;
+            cfg.verifySSL = false;
+            return std::make_shared<Aws::S3::S3Client>(
+                Aws::Auth::AWSCredentials(o.access_key, o.secret_key),
+                cfg,
+                Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
+                o.use_path_style);
+        };
+
+        _client = make_client(o.endpoint);
+        _presign_client = o.public_endpoint.empty() || o.public_endpoint == o.endpoint
+                        ? _client
+                        : make_client(o.public_endpoint);
     }
 
     /* brief: 签发 PUT presigned URL，客户端按 headers 直传 */
@@ -75,7 +83,7 @@ public:
                               const std::map<std::string, std::string>& headers) const {
         Aws::Http::HeaderValueCollection h;
         for (const auto& kv : headers) h.emplace(kv.first, kv.second);
-        auto url = _client->GeneratePresignedUrlWithSSEC(
+        auto url = _presign_client->GeneratePresignedUrlWithSSEC(
             bucket, key, Aws::Http::HttpMethod::HTTP_PUT, h, /*sseKey*/"", seconds);
         if (url.empty()) throw_failed("presigned_put empty url");
         return url;
@@ -83,7 +91,7 @@ public:
 
     /* brief: 签发 GET presigned URL（公共/私密资源都用） */
     std::string presigned_get(const std::string& bucket, const std::string& key, int seconds) const {
-        auto url = _client->GeneratePresignedUrl(
+        auto url = _presign_client->GeneratePresignedUrl(
             bucket, key, Aws::Http::HttpMethod::HTTP_GET, seconds);
         if (url.empty()) throw_failed("presigned_get empty url");
         return url;
@@ -160,7 +168,7 @@ public:
     std::string presigned_part(const std::string& bucket, const std::string& key,
                                const std::string& upload_id, int part_number,
                                int seconds) const {
-        auto url = _client->GeneratePresignedUrl(
+        auto url = _presign_client->GeneratePresignedUrl(
             bucket, key, Aws::Http::HttpMethod::HTTP_PUT, seconds);
         if (url.empty()) throw_failed("presigned_part empty url");
         url += "&partNumber=" + std::to_string(part_number) +
@@ -241,6 +249,7 @@ protected:
 
     S3Options _opt;
     std::shared_ptr<Aws::S3::S3Client> _client;
+    std::shared_ptr<Aws::S3::S3Client> _presign_client;
 };
 
 }  // namespace chatnow

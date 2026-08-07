@@ -1,38 +1,41 @@
-#!/bin/bash
-# 端口检测函数：等待指定 host:port 可达
-wait_for() {
-    local host=$1
-    local port=$2
-    while ! nc -z $host $port
-    do
-        echo "$host:$port 端口连接失败，休眠等待";
-        sleep 1;
-    done
-    echo "$host:$port 检测成功";
-}
+#!/usr/bin/env bash
 
-# 解析参数
-declare deps
-declare command
-while getopts "d:c:" arg
-do
-    case $arg in
-        d)
-            deps=$OPTARG;;
-        c)
-            command=$OPTARG;;
-    esac
+set -euo pipefail
+
+DEPENDENCY_WAIT_TIMEOUT_SEC=${DEPENDENCY_WAIT_TIMEOUT_SEC:-120}
+deps=""
+command=""
+
+while getopts "d:c:" arg; do
+  case "$arg" in
+    d) deps=$OPTARG ;;
+    c) command=$OPTARG ;;
+    *) exit 2 ;;
+  esac
 done
 
-# 对每个 host:port 对进行端口检测
-for dep in ${deps//,/ }
-do
-    host=${dep%:*}
-    port=${dep#*:}
-    wait_for $host $port
+if [[ -z "$command" ]]; then
+  echo "entrypoint: service command is required" >&2
+  exit 2
+fi
+
+deadline=$((SECONDS + DEPENDENCY_WAIT_TIMEOUT_SEC))
+for dependency in ${deps//,/ }; do
+  host=${dependency%:*}
+  port=${dependency##*:}
+  if [[ -z "$host" || -z "$port" || "$host" == "$dependency" ]]; then
+    echo "entrypoint: invalid dependency locator" >&2
+    exit 2
+  fi
+
+  until nc -z -w 1 "$host" "$port"; do
+    if (( SECONDS >= deadline )); then
+      echo "entrypoint: dependency did not become reachable: ${host}:${port}" >&2
+      exit 1
+    fi
+    sleep 1
+  done
 done
 
-echo "端口检测完毕"
-
-# 执行命令
-eval $command
+echo "entrypoint: dependencies are reachable"
+exec /bin/bash -c "$command"

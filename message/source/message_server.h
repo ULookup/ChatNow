@@ -1000,7 +1000,7 @@ public:
             LOG_ERROR("Message MQ exchange 不能为空");
             abort();
         }
-        std::string amqp_url = "amqp://" + user + ":" + pwd + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, pwd, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         _db_queue_settings = {
             .exchange = exchange_name,

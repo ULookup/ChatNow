@@ -295,9 +295,11 @@ public:
         }
     }
 
-    void make_s3_object(const std::string& endpoint, const std::string& region,
+    void make_s3_object(const std::string& endpoint, const std::string& public_endpoint,
+                        const std::string& region,
                         const std::string& access_key, const std::string& secret_key) {
-        S3Options o{endpoint, region, access_key, secret_key, /*path_style*/true};
+        S3Options o{endpoint, public_endpoint, region, access_key, secret_key,
+                    /*path_style*/true};
         _s3 = std::make_shared<S3Client>(o);
     }
 

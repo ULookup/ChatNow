@@ -29,6 +29,7 @@
 #include <queue>
 #include <thread>
 #include "infra/logger.hpp"
+#include "mq/amqp_url.hpp"
 
 namespace chatnow
 {

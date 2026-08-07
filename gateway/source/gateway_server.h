@@ -57,6 +57,7 @@ public:
 
     GatewayServer(int http_port,
                   const ServiceManager::ptr &channels,
+                  const Discovery::ptr &discovery,
                   const std::shared_ptr<::chatnow::auth::JwtCodec> &jwt_codec,
                   const std::shared_ptr<::chatnow::auth::JwtStore> &jwt_store,
                   const std::string &identity_service_name,
@@ -68,7 +69,7 @@ public:
                   const std::string &presence_service_name,
                   const std::string &push_service_name)
         : _jwt_codec(jwt_codec), _jwt_store(jwt_store),
-          _channels(channels), _http_port(http_port),
+          _channels(channels), _discovery(discovery), _http_port(http_port),
           _identity_svc(identity_service_name),
           _relationship_svc(relationship_service_name),
           _conversation_svc(conversation_service_name),
@@ -194,6 +195,18 @@ private:
         matched->handler(req, res, a, _channels, matched->timeout_ms, dummy_cntl);
     }
 
+    bool dependencies_ready() const {
+        return _channels &&
+               _channels->available(_identity_svc) &&
+               _channels->available(_relationship_svc) &&
+               _channels->available(_conversation_svc) &&
+               _channels->available(_message_svc) &&
+               _channels->available(_transmite_svc) &&
+               _channels->available(_media_svc) &&
+               _channels->available(_presence_svc) &&
+               _channels->available(_push_svc);
+    }
+
     // ====== 路由注册 ======
 
     void register_routes();
@@ -210,6 +223,7 @@ private:
     std::shared_ptr<::chatnow::auth::JwtCodec> _jwt_codec;
     std::shared_ptr<::chatnow::auth::JwtStore> _jwt_store;
     ServiceManager::ptr _channels;
+    Discovery::ptr _discovery;
     int _http_port;
 
     std::string _identity_svc;
@@ -232,6 +246,18 @@ inline void GatewayServer::register_routes() {
     namespace tx = ::chatnow::transmite;
     namespace med = ::chatnow::media;
     namespace pres = ::chatnow::presence;
+
+    _http_server.Get("/health",
+        [this](const httplib::Request&, httplib::Response& res) {
+            res.set_header("Cache-Control", "no-store");
+            if (!dependencies_ready()) {
+                res.status = 503;
+                res.set_content("{\"status\":\"unavailable\"}", "application/json");
+                return;
+            }
+            res.status = 200;
+            res.set_content("{\"status\":\"ready\"}", "application/json");
+        });
 
     // ====== Identity (白名单) ======
     route<id::IdentityService_Stub, id::RegisterReq, id::RegisterRsp>(
@@ -521,7 +547,7 @@ public:
         auto discovery = std::make_shared<Discovery>(_reg_host, _base, put_cb, del_cb);
 
         return std::make_shared<GatewayServer>(
-            _http_port, channels, jwt_codec, jwt_store,
+            _http_port, channels, discovery, jwt_codec, jwt_store,
             _identity_svc, _relationship_svc, _conversation_svc,
             _message_svc, _transmite_svc, _media_svc,
             _presence_svc, _push_svc);
