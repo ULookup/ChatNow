@@ -149,6 +149,7 @@ RUN set -euo pipefail; \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DAMQP-CPP_BUILD_EXAMPLES=OFF \
+        -DAMQP-CPP_LINUX_TCP=ON \
         -DAMQP-CPP_BUILD_SHARED=ON; \
     cmake --build /tmp/amqp-cpp-build --parallel "$(nproc)"; \
     cmake --install /tmp/amqp-cpp-build; \
