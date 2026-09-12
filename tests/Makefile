@@ -14,7 +14,7 @@ PF09_EXPECTED_TRANSMITE_INSTANCES ?= 1
 # push_service.proto defines PushToUserReq/PushBatchReq etc. Both are needed.
 proto:
 	@echo "Generating protobuf..."
-	PROTO_BASE=../proto OUT_BASE=./proto; \
+	set -e; PROTO_BASE=../proto OUT_BASE=./proto; \
 	GO_OPTS="module=chatnow-tests/proto"; \
 	for p in $$PROTO_BASE/*/*.proto; do \
 		[ -f "$$p" ] || continue; \
@@ -26,7 +26,7 @@ proto:
 		mkdir -p "$$OUT_BASE/chatnow/$$dir"; \
 		for f in "$$PROTO_BASE/$$dir"/*.proto; do \
 			[ -f "$$f" ] || continue; \
-			protoc --proto_path="$$PROTO_BASE" --go_out="$$OUT_BASE" --go_opt=$$GO_OPTS "$$f"; \
+			protoc --experimental_allow_proto3_optional --proto_path="$$PROTO_BASE" --go_out="$$OUT_BASE" --go_opt=$$GO_OPTS "$$f"; \
 		done; \
 	done
 
