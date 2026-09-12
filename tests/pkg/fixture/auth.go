@@ -1,8 +1,11 @@
 package fixture
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"chatnow-tests/pkg/client"
@@ -37,7 +40,22 @@ func RegisterAndLogin(t testing.TB, c *client.HTTPClient) (*client.HTTPClient, s
 	authed.AccessToken = rsp.Tokens.AccessToken
 	authed.RefreshToken = rsp.Tokens.RefreshToken
 	authed.UserID = rsp.UserId
-	authed.DeviceID = client.NewDeviceID()
+	// Registration has no device input. ACKs must use the device Identity issued.
+	parts := strings.Split(authed.AccessToken, ".")
+	if len(parts) != 3 {
+		t.Fatal("registration returned malformed access token")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal("registration returned malformed token payload")
+	}
+	var claims struct {
+		DeviceID string `json:"did"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.DeviceID == "" {
+		t.Fatal("registration token has no device identity")
+	}
+	authed.DeviceID = claims.DeviceID
 	return authed, username, password
 }
 
