@@ -47,7 +47,7 @@ public:
             odb::transaction trans(_db->begin());
             using query = odb::query<Conversation>;
             std::shared_ptr<Conversation> c(_db->query_one<Conversation>(
-                query::conversation_id == cid));
+                (query::conversation_id == cid) + " FOR UPDATE"));
             if(!c) {
                 trans.commit();
                 return false;
@@ -116,6 +116,13 @@ public:
         try {
             c->update_time(boost::posix_time::microsec_clock::universal_time());
             odb::transaction trans(_db->begin());
+            using query = odb::query<Conversation>;
+            std::shared_ptr<Conversation> current(_db->query_one<Conversation>(
+                (query::conversation_id == c->conversation_id()) + " FOR UPDATE"));
+            if (!current) return false;
+            // Metadata was read before this transaction. Preserve the watermark
+            // committed by Message while this request was in flight.
+            if (c->max_seq() < current->max_seq()) c->max_seq(current->max_seq());
             _db->update(*c);
             trans.commit();
         } catch(std::exception &e) {

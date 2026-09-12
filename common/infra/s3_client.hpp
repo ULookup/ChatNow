@@ -168,11 +168,18 @@ public:
     std::string presigned_part(const std::string& bucket, const std::string& key,
                                const std::string& upload_id, int part_number,
                                int seconds) const {
-        auto url = _presign_client->GeneratePresignedUrl(
+        // Resolve the configured endpoint/bucket style with the S3 client, then
+        // sign the complete query. Adding upload parameters after signing invalidates SigV4.
+        auto resolved = _presign_client->GeneratePresignedUrl(
             bucket, key, Aws::Http::HttpMethod::HTTP_PUT, seconds);
+        if (resolved.empty()) throw_failed("presigned_part empty endpoint");
+        Aws::Http::URI uri(resolved);
+        uri.SetQueryString("");
+        uri.AddQueryStringParameter("partNumber", std::to_string(part_number));
+        uri.AddQueryStringParameter("uploadId", upload_id);
+        auto url = _presign_client->Aws::Client::AWSClient::GeneratePresignedUrl(
+            uri, Aws::Http::HttpMethod::HTTP_PUT, _opt.region.c_str(), "s3", seconds);
         if (url.empty()) throw_failed("presigned_part empty url");
-        url += "&partNumber=" + std::to_string(part_number) +
-               "&uploadId=" + upload_id;
         return url;
     }
 

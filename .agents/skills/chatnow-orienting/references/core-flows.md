@@ -23,13 +23,25 @@ The release contract confirmed on 2026-09-13 preserves concurrent authenticated 
 
 **Flow:** Client -> Gateway -> Transmite -> RabbitMQ message exchange -> Message/MySQL -> RabbitMQ push queue -> Push -> WebSocket.
 
-- Entry/contracts: Gateway `/service/message/send`; `proto/transmite/transmite_service.proto`; `proto/message/message_internal.proto`; `proto/push/notify.proto`.
+- Entry/contracts: Gateway `/service/transmite/send`; `proto/transmite/transmite_service.proto`; `proto/message/message_internal.proto`; `proto/push/notify.proto`.
 - Transmite: validates auth/membership and content, allocates conversation and per-user sequences in Redis, creates a Snowflake message ID, protects `client_msg_id` with a Redis idempotency key, and completes the brpc request after publisher confirm.
 - Message: consumes `InternalMessage`, persists the message then per-user timelines in MySQL, treats duplicate message inserts idempotently, publishes push only after persistence, and asynchronously indexes text in Elasticsearch.
 - Push: consumes the push event, resolves Redis/local routes, records per-device unacked payloads, sends locally or uses asynchronous cross-instance `PushBatch`, then WebSocket delivery reaches the client.
 - Async/recovery: RabbitMQ and WebSocket delivery are at-least-once. Message uses Redis Push/ES outboxes and reapers for publish failures; Push uses a cross-instance outbox. Consumer redelivery and duplicate delivery require idempotent effects.
 - Tests: `tests/bvt/message_test.go`, `tests/func/transmite_test.go`, `tests/func/message_test.go`, `tests/func/ws_notify_test.go`, `tests/func/scenarios_test.go`, `tests/perf/send_msg_test.go`, `tests/perf/sync_test.go`.
 - Invariants: Message/MySQL is the stored-message source of truth; persistence precedes normal push publication; `request_id`, `client_msg_id`, message ID, conversation sequence, and user sequence have distinct roles; do not claim exactly-once delivery.
+
+Message commits the conversation `max_seq` watermark in the same MySQL transaction as the message and timeline inserts. The watermark never decreases when deliveries arrive out of order; Conversation metadata writers preserve the latest committed value under a row lock. The Message database principal therefore needs `SELECT, UPDATE` on `conversation`.
+
+Log-context storage must initialize in Release builds as well as Debug; initialization cannot depend on assertions. Transmite copies the authenticated RPC trace into MQ headers at publish time. Push invalidates its local route cache while binding a newly authenticated device under the same per-user lock used by route fills; it does not cache empty routes. Dismissed conversations are rejected by `GetMemberIds` before consulting cached membership.
+
+Redis availability classification includes the pinned client's exhausted shard-refresh wrapper, while Redis command errors remain separate. An unavailable member snapshot has an unknown version: Transmite queries Conversation for that request and does not publish the result into L1/L2 without a version fence. Known-version races retain retry behavior. Sequence allocation and Unacked persistence remain Redis truth-source operations and fail unavailable during an outage.
+
+Both MQ consumer overloads translate `NackRequeue` and callback exceptions to `reject(deliveryTag, AMQP::requeue)`. The library parameter is a bitmask; passing a boolean does not request requeue. `NackDiscard` uses zero flags. Push must requeue on Unacked persistence failure and deliver only after durable persistence succeeds.
+
+## Business notifications
+
+Relationship emits friend-request and accepted-request notifications, and Conversation emits creation notifications through a bounded Push `PushBatch` RPC after the domain write commits. Auth metadata and trace are forwarded. These online notifications are best effort, with no new durable retry guarantee. A creation broadcast omits the creator's `self` member state; each recipient obtains its own state through Conversation APIs. Tests: FN-WS-02/03/04.
 
 ## Delivery ACK convergence
 
@@ -84,6 +96,12 @@ Ordinary PUT URLs use the standard S3 presigner with the headers returned to the
 - Invariants: service processes metadata rather than normal file bytes; only committed objects are downloadable; MySQL metadata/quota and MinIO object state must converge; preserve dedup and completion idempotency.
 - Deduplication shares the stored object, not the file identifier: repeated uploads receive distinct metadata references to the same bucket/object key. Functional checks must validate both the distinct references and shared bytes.
 
+Multipart routes require the same JWT boundary as single uploads. `partNumber` and `uploadId` are included before SigV4 signing. Test content follows the MIME allowlist and uses non-final parts of at least 5 MiB; FN-MD-07 verifies the downloaded bytes, and FN-MD-21 verifies signature tampering is rejected.
+
+Media `FileInfo.public_url` is additive field 6: it contains the canonical configured public prefix plus the committed object's key, and stays empty for private objects. Identity discovers Media and resolves stored avatar file IDs through authenticated `GetFileInfo`; it returns an empty avatar URL when resolution is unavailable. Media configuration is authoritative for the public prefix. FN-ID-08 checks an actual HTTP GET and persisted profile reads.
+
+Speech recognition rejects empty/unaligned PCM16 input. Until an ASR backend is integrated, valid input returns an explicit unavailable error rather than empty success (FN-MD-17/18/23).
+
 ## Presence and typing
 
 **Flow:** Push WebSocket lifecycle -> Redis presence/routes -> Presence aggregation/subscriptions -> Presence or Push notification -> WebSocket.
@@ -103,3 +121,7 @@ Any change to these paths, ownership boundaries, stores, protocols, topology, or
 ## Disposable CI startup
 
 CI builds the nine native services once in the pinned Ubuntu builder, restores that artifact into each fresh test checkout, generates synthetic credentials, and runs Compose initialization before semantic readiness. MySQL, Redis Cluster, RabbitMQ, and MinIO initialization must converge before application services and runtime tests proceed. Existing environment files or persisted data cause test bootstrap to fail closed. Runtime results must be reported separately from static contracts.
+
+Reliability RL-05 runs in its own disposable stack with Transmite user/session limits of 8/40 per minute. Its bounded outage burst exercises local fallback without depending on exhausting production defaults (600/3000). Push outage tests use the authenticated device ID and prohibit delivery of the particular unpersisted marker, while allowing redelivery of older durable messages. Multi-device login and caller-only deletion semantics remain unchanged.
+
+The Redis fault pauses processes without withdrawing container DNS. Its recovery evidence does not cover stop/recreate, resolver failure or topology changes; those remain separate from the tested circuit behavior.

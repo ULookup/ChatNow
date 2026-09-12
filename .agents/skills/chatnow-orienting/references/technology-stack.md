@@ -73,6 +73,6 @@ The current test framework is entirely Go. New or restored C++ test suites are p
 
 Reliability is an executable, Redis-focused layer. Its current tests exercise Redis circuit recovery and Push unacked requeue behavior through `tests/pkg/chaos/redis.go`. The Make target runs the whole layer and does not consume `TEST_RUN`; use a direct tagged `go test ... -run` command when exact selection is required. No current controller covers RabbitMQ, MySQL, arbitrary services, or general network faults, so do not describe this as a broad chaos platform.
 
-The CI definition has a dedicated `reliability` job that depends on `service-artifacts`, independently of BVT. At this verification date the job exists, but the inspected PR run was skipped after an upstream failure; that is not green runtime evidence. Shared clients, fixtures, polling, cleanup, and direct store verification live under `tests/pkg`.
+The CI definition has a dedicated `reliability` job that depends on `service-artifacts`, independently of BVT. The job uses a dedicated test stack with bounded RL-05 limits. Report the actual current-head runtime result; the existence of a job is not green runtime evidence. Shared clients, fixtures, polling, cleanup, and direct store verification live under `tests/pkg`.
 
 The CI definition is `.github/workflows/ci.yml`; verify its commands against files present at the target commit before copying them into local instructions.

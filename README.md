@@ -55,11 +55,11 @@ docker compose up -d --build
 ./scripts/wait_for_services.sh
 ```
 
-The commands above are the implemented interface, but a fresh full-stack cold start and the Go runtime gates have not yet been recorded for this change. Treat the Compose runtime as **Unverified** and consult [Compose Runtime Operations](docs/operations/compose-runtime.md) for topology, readiness, persistence, and evidence boundaries. CI workflow integration remains a separate follow-up PR.
+Compose expects the nine service binaries and their dependency directories to be prepared first, as described in [Compose Runtime Operations](docs/operations/compose-runtime.md). CI builds and restores those artifacts into each disposable test job. Consult PR #89 for current gate results; this local profile is not a production deployment.
 
 ### 3. Optional native build
 
-Root Compose already builds and starts the application services. Use the native build only for host-side development:
+The CI builder compiles the services before Compose packages their runtime images. For host-side development, build the native targets first:
 
 ```bash
 mkdir build && cd build

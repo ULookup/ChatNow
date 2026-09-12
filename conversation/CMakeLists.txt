@@ -10,7 +10,8 @@ set(proto_files common/types.proto common/error.proto common/envelope.proto
                 message/message_types.proto
                 message/message_service.proto
                 identity/identity_service.proto
-                conversation/conversation_service.proto)
+                conversation/conversation_service.proto
+                push/notify.proto push/push_service.proto)
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
     string(REPLACE ".proto" ".pb.cc" proto_cc ${proto_file})

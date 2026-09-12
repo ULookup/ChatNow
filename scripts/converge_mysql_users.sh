@@ -77,6 +77,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON chatnow.`message_reaction` TO 'chatnow_m
 GRANT SELECT, INSERT, UPDATE, DELETE ON chatnow.`message_read` TO 'chatnow_message'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON chatnow.`user_timeline` TO 'chatnow_message'@'%';
 GRANT SELECT, UPDATE ON chatnow.`conversation_member` TO 'chatnow_message'@'%';
+GRANT SELECT, UPDATE ON chatnow.`conversation` TO 'chatnow_message'@'%';
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON chatnow.`media_file` TO 'chatnow_media'@'%';
 GRANT SELECT, INSERT, UPDATE, DELETE ON chatnow.`media_blob_ref` TO 'chatnow_media'@'%';

@@ -1,13 +1,7 @@
 #pragma once
 
-/**
- * SpeechHandler —— 短音频 ASR 占位
- * ---
- * P4 v1 仅保留 RPC + bytes 字段，转发到 ASR 引擎的实际实现
- * 在 P7 完成（spec §3.8）。本类做：
- *   - bytes 长度上限 2MB（speech_content > 2MB 直接拒）
- *   - 返回空 recognition_result
- */
+// The ASR backend is not wired yet. Validate the PCM16 payload and report
+// unavailability instead of acknowledging audio that was never processed.
 
 #include <cstdint>
 #include <string>
@@ -28,8 +22,13 @@ public:
         if (req.speech_content().size() > 2 * 1024 * 1024) {
             throw ServiceError(::chatnow::error::kMediaFileTooLarge, "speech > 2MB");
         }
-        // P7：调真实 ASR endpoint；当前仅返回空字符串
-        rsp->set_recognition_result("");
+        if (req.speech_content().empty() || req.speech_content().size() % 2 != 0) {
+            throw ServiceError(::chatnow::error::kSystemInvalidArgument,
+                               "non-empty PCM16 content required");
+        }
+        // No ASR engine is wired. Do not acknowledge unprocessed audio as success.
+        throw ServiceError(::chatnow::error::kSystemUnavailable,
+                           "speech recognition unavailable");
     }
 
 private:

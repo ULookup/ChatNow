@@ -221,15 +221,15 @@ public:
                         ConsumeAction action = callback(message.body(), message.bodySize(), redelivered);
                         switch(action) {
                         case ConsumeAction::Ack:         _channel.ack(deliveryTag); break;
-                        case ConsumeAction::NackRequeue: _channel.reject(deliveryTag, true);  break;
-                        case ConsumeAction::NackDiscard: _channel.reject(deliveryTag, false); break;
+                        case ConsumeAction::NackRequeue: _channel.reject(deliveryTag, AMQP::requeue);  break;
+                        case ConsumeAction::NackDiscard: _channel.reject(deliveryTag, 0); break;
                         }
                     } catch(const std::exception &e) {
                         LOG_ERROR("消费回调异常: {}", e.what());
-                        _channel.reject(deliveryTag, true);
+                        _channel.reject(deliveryTag, AMQP::requeue);
                     } catch(...) {
                         LOG_ERROR("消费回调发生未知异常");
-                        _channel.reject(deliveryTag, true);
+                        _channel.reject(deliveryTag, AMQP::requeue);
                     }
                 })
                 .onError([&promise, queue](const char *message) {
@@ -271,15 +271,15 @@ public:
                                                         redelivered, headers);
                         switch(action) {
                         case ConsumeAction::Ack:         _channel.ack(deliveryTag); break;
-                        case ConsumeAction::NackRequeue: _channel.reject(deliveryTag, true);  break;
-                        case ConsumeAction::NackDiscard: _channel.reject(deliveryTag, false); break;
+                        case ConsumeAction::NackRequeue: _channel.reject(deliveryTag, AMQP::requeue);  break;
+                        case ConsumeAction::NackDiscard: _channel.reject(deliveryTag, 0); break;
                         }
                     } catch(const std::exception &e) {
                         LOG_ERROR("消费回调异常: {}", e.what());
-                        _channel.reject(deliveryTag, true);
+                        _channel.reject(deliveryTag, AMQP::requeue);
                     } catch(...) {
                         LOG_ERROR("消费回调发生未知异常");
-                        _channel.reject(deliveryTag, true);
+                        _channel.reject(deliveryTag, AMQP::requeue);
                     }
                 })
                 .onError([&promise, queue](const char *message) {

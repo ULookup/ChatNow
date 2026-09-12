@@ -19,6 +19,12 @@ Read this reference before selecting, implementing, running, or reporting a test
 
 The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, `make -C tests test-agent-policy`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content. Repository policy checks and `tests/pkg/contracts` Compose/runtime contracts are static evidence and never substitute for a behavior RED or runtime gate. Repository contracts do not consume a BVT/Functional case ID namespace.
 
+RL-05 requires a dedicated disposable stack started with `TRANSMITE_RATE_LIMIT_USER_MAX=8 TRANSMITE_RATE_LIMIT_SESSION_MAX=40 docker compose up -d --build`. These values make the fallback burst deterministic; they are not production recommendations. Run Functional/BVT on their separate default-limit stacks. The Push test uses its issued device ID and restores Redis/paused containers on failure.
+
+The executable RL-05 cases use Redis pause/unpause to retain DNS while Redis stops responding. They prove process-stall circuit/recovery behavior and Unacked ordering, not container stop/recreate, DNS withdrawal, cluster topology changes or rolling recovery. Compose fault commands have a 20-second execution limit.
+
+Measure the Open-state fast-failure request immediately after the bounded outage burst. Unrelated faulted RPCs can cross the one-second recovery-probe deadline; a HalfOpen socket probe is a different phase and must not be mistaken for an Open-state rejection.
+
 The Reliability target runs the complete tagged package and does not consume `TEST_RUN`. For an exact test, invoke the same tagged Go package with an anchored `-run` expression, then run `make -C tests test-reliability` for the layer regression. The current fault controller is Redis-only; there is no RabbitMQ, MySQL, arbitrary-service, or general-network controller.
 
 The L0 commands currently encoded in `.github/workflows/ci.yml` are:
@@ -68,7 +74,7 @@ Use unique IDs for every request and collision-prone resource. Do not rely on a 
 
 Poll the externally observable condition with a bounded deadline and useful failure message. Suitable conditions include service reachability, a WebSocket event, a database row/state, an Elasticsearch hit, a MinIO object, or an API state transition. A polling interval is allowed; a fixed delay used as proof of readiness or convergence is not.
 
-Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. Root Compose persists infrastructure through bind mounts under `middle/data`; `docker compose down -v` does not remove that state. A clean-slate test must use an explicitly disposable storage path or the separate CI override and must never delete a shared tree.
+Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. Root Compose persists infrastructure through bind mounts under `middle/data`; `docker compose down -v` does not remove that state. A clean-slate test must use a fresh CI checkout or another explicitly disposable storage path and must never delete a shared tree.
 
 ## Change-to-layer matrix
 

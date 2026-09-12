@@ -545,7 +545,14 @@ private:
         }
 
         _connections->insert(conn, uid, did, jti);
-        if (_online_route) _online_route->bind(uid, did, _instance_id);
+        {
+            const auto cache_key = key::local_route_cache_key(uid);
+            auto guard = _inflight_registry ? _inflight_registry->acquire(cache_key)
+                                           : InflightRegistry::Guard{};
+            std::unique_lock<std::mutex> lock(guard.mu ? *guard.mu : _dummy_mu_);
+            if (_online_route) _online_route->bind(uid, did, _instance_id);
+            if (_local_route_cache) _local_route_cache->invalidate(cache_key);
+        }
 
         // 写 Presence（Push 为写入端）
         _write_presence_online_(uid, did);
@@ -725,7 +732,7 @@ private:
             route.device_ids.push_back(did);
             route.device_to_instance[did] = inst;
         }
-        if (_local_route_cache) {
+        if (_local_route_cache && !route.device_ids.empty()) {
             _local_route_cache->set(cache_key, route, randomized_ttl(_route_l1_ttl));
         }
 

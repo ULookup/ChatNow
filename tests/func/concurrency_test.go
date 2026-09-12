@@ -15,6 +15,7 @@ import (
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	"chatnow-tests/pkg/verify"
+	conversation "chatnow-tests/proto/chatnow/conversation"
 	media "chatnow-tests/proto/chatnow/media"
 	msg "chatnow-tests/proto/chatnow/message"
 	relationship "chatnow-tests/proto/chatnow/relationship"
@@ -77,7 +78,7 @@ func TestFN_CC_SendMessage_SameClientMsgId(t *testing.T) {
 
 // FN-CC-02 | P1 | concurrency | 10 goroutine 并发发消息，全部落库，seq 不重复
 func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
-	a, _, convID := setupConv(t)
+	a, recipient, convID := setupConv(t)
 
 	var wg sync.WaitGroup
 	msgIDs := make([]int64, 10)
@@ -147,6 +148,19 @@ func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
 		dbV.WaitMessageExists(t, id, 10*time.Second)
 	}
 	dbV.MessageCount(t, convID, 10)
+	// Every persisted concurrent message contributes to the conversation watermark.
+	list := &conversation.ListConversationsRsp{}
+	require.NoError(t, recipient.DoAuth("/service/conversation/list",
+		&conversation.ListConversationsReq{RequestId: client.NewRequestID()}, list))
+	require.True(t, list.GetHeader().GetSuccess())
+	found := false
+	for _, item := range list.Conversations {
+		if item.ConversationId == convID {
+			found = true
+			require.Equal(t, uint64(10), item.GetSelf().GetUnreadCount())
+		}
+	}
+	require.True(t, found)
 }
 
 // FN-CC-03 | P1 | concurrency | 好友通过瞬间并发发消息，不丢

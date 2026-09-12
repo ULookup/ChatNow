@@ -72,7 +72,8 @@ public:
         _multi    = std::make_unique<MultipartHandler>(
                        s3, mime, files, blobs, quota,
                        cfg.public_bucket, cfg.private_bucket, cfg.presign_seconds);
-        _download = std::make_unique<DownloadHandler>(s3, files, cfg.presign_seconds);
+        _download = std::make_unique<DownloadHandler>(s3, files, cfg.presign_seconds,
+                                                      cfg.public_bucket, cfg.public_url_prefix);
         _speech   = std::make_unique<SpeechHandler>(cfg.asr_endpoint);
     }
 

@@ -16,7 +16,20 @@ The root profile owns the integrated application topology. Do not combine it wit
 
 ## Startup and convergence
 
-The intended operator sequence is:
+On a fresh checkout, restore the `compose-service-artifacts` CI artifact under `compose-artifacts`, validate it, and populate the runtime build contexts before starting Compose:
+
+```bash
+./scripts/validate_compose_artifacts.sh compose-artifacts
+for service in conversation gateway identity media message presence push relationship transmite; do
+  mkdir -p "$service/build" "$service/depends"
+  cp -a "compose-artifacts/$service/build/." "$service/build/"
+  cp -a "compose-artifacts/$service/depends/." "$service/depends/"
+done
+```
+
+Alternatively compile those nine service targets in the pinned CI builder and run `./scripts/package_compose_artifacts.sh build compose-artifacts`. The runtime Dockerfiles package binaries; they do not compile C++ from a source-only checkout.
+
+The startup sequence is:
 
 ```bash
 docker compose config
@@ -24,7 +37,7 @@ docker compose up -d --build
 ./scripts/wait_for_services.sh
 ```
 
-These commands describe the implemented interface, not a recorded successful cold start. `docker compose config` validates interpolation and topology only. `scripts/wait_for_services.sh` is the cross-stack readiness gate; container creation or a successful TCP connection alone is insufficient.
+Each intended checkout and environment requires its own cold-start evidence. `docker compose config` validates interpolation and topology only. `scripts/wait_for_services.sh` is the cross-stack readiness gate; container creation or a successful TCP connection alone is insufficient.
 
 The root topology uses bounded health checks and one-shot convergence services:
 
@@ -110,7 +123,7 @@ Stop the profile with:
 docker compose down
 ```
 
-The root profile persists infrastructure under `middle/data` through bind mounts. `docker compose down -v` does not remove bind-mounted state and therefore does not prove a clean-slate restart. Do not delete a shared `middle/data` tree or claim repeatable cold-start behavior without an explicitly disposable path, the separate CI storage override, and fresh dynamic evidence.
+The root profile persists infrastructure under `middle/data` through bind mounts. `docker compose down -v` does not remove bind-mounted state and therefore does not prove a clean-slate restart. Do not delete a shared `middle/data` tree or claim repeatable cold-start behavior without an explicitly disposable path, a fresh CI checkout, and fresh dynamic evidence.
 
 ## Evidence required before a readiness claim
 

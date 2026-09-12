@@ -397,12 +397,9 @@ func TestScenario_MediaUploadFullFlow(t *testing.T) {
 	defer mediaDB.Close()
 	assert.Equal(t, mediaDB.MediaFile(t, fileID).ObjectKey, mediaDB.MediaFile(t, applyRsp2.FileId).ObjectKey)
 
-	// Step 6: 大文件 multipart（6MB -> 3 parts @ 2MB）
-	bigContent := make([]byte, 6*1024*1024)
-	for i := range bigContent {
-		bigContent[i] = byte(i % 256)
-	}
-	bigFileID := fixture.UploadLargeFile(t, user, bigContent, "application/octet-stream", 2*1024*1024)
+	// Step 6: Multipart PDF, 6 MiB split into 5 MiB + 1 MiB.
+	bigContent := fixture.MultipartPDFContent(6 * 1024 * 1024)
+	bigFileID := fixture.UploadLargeFile(t, user, bigContent, "application/pdf", 5*1024*1024)
 	require.NotEmpty(t, bigFileID)
 
 	// 下载大文件验证

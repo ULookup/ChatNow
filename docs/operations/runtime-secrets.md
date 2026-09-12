@@ -84,7 +84,7 @@ Never reuse a bootstrap credential as an application credential. Never mount a f
 - Use unique synthetic values generated for the disposable environment. They must not be copied from staging or production and must carry no external privilege.
 - Inject them at runtime through ignored local environment files or ephemeral secret mounts. `.env` being ignored does not make it an approved production store.
 - CI must source synthetic values from ephemeral job setup or the CI secret mechanism, mask values, avoid command tracing, and tear down volumes and temporary files on every exit path.
-- The current runtime PR does not implement that CI workflow integration. Do not infer CI coverage or a clean-slate pass from the root Compose source.
+- CI generates disposable values with `scripts/create_test_env.py --github-env`, registers masks, and injects them into each job. The generator refuses an existing `.env` or `middle/data`; gate results must still be verified for the current commit.
 - Scanner exemptions must match exact synthetic fixtures or documented API examples. Do not exempt an entire `conf/`, `tests/`, `docs/`, Compose, or source subtree.
 - Tests may assert source selection and error categories, but must not print the resolved value or any derivative.
 

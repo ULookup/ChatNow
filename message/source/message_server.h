@@ -32,6 +32,7 @@
 #include "dao/mysql_message.hpp"
 #include "dao/mysql_user_timeline.hpp"
 #include "dao/mysql_conversation_member.hpp"
+#include "conversation-odb.hxx"
 #include "dao/mysql_message_reaction.hpp"
 #include "dao/mysql_message_pin.hpp"
 #include "dao/data_es.hpp"
@@ -558,6 +559,17 @@ public:
             _mysql_msg->insert(msg);
             if (!timeline_list.empty()) {
                 _mysql_user_timeline->insert(timeline_list);
+            }
+            // Commit the conversation watermark with the message and timelines.
+            // A row lock and monotonic update make duplicate/reordered delivery safe.
+            using conversation_query = odb::query<::chatnow::Conversation>;
+            std::shared_ptr<::chatnow::Conversation> conversation(
+                _odb_db->query_one<::chatnow::Conversation>(
+                    (conversation_query::conversation_id == msg_pb.conversation_id()) + " FOR UPDATE"));
+            if (!conversation) throw std::runtime_error("conversation missing during persistence");
+            if (conversation->max_seq() < session_seq) {
+                conversation->max_seq(session_seq);
+                _odb_db->update(*conversation);
             }
             if (trans) trans->commit();
             mark_idempotency_persisted_(msg_pb.sender_id(), client_msg_id, msg_pb.message_id());

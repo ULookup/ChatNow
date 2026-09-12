@@ -440,6 +440,19 @@ inline void GatewayServer::register_routes() {
     route<med::MediaService_Stub, med::GetFileInfoReq, med::GetFileInfoRsp>(
         "/service/media/get_file_info", _media_svc, GatewayAuth::JWT_REQUIRED,
         &med::MediaService_Stub::GetFileInfo);
+    route<med::MediaService_Stub, med::InitMultipartReq, med::InitMultipartRsp>(
+        "/service/media/init_multipart", _media_svc, GatewayAuth::JWT_REQUIRED,
+        &med::MediaService_Stub::InitMultipartUpload);
+    route<med::MediaService_Stub, med::ApplyPartReq, med::ApplyPartRsp>(
+        "/service/media/apply_part_upload", _media_svc, GatewayAuth::JWT_REQUIRED,
+        &med::MediaService_Stub::ApplyPartUpload);
+    route<med::MediaService_Stub, med::CompleteMultipartReq, med::CompleteMultipartRsp>(
+        "/service/media/complete_multipart", _media_svc, GatewayAuth::JWT_REQUIRED,
+        &med::MediaService_Stub::CompleteMultipartUpload);
+    route<med::MediaService_Stub, med::AbortMultipartReq, med::AbortMultipartRsp>(
+        "/service/media/abort_multipart", _media_svc, GatewayAuth::JWT_REQUIRED,
+        &med::MediaService_Stub::AbortMultipartUpload);
+
     route<med::MediaService_Stub, med::SpeechRecognitionReq, med::SpeechRecognitionRsp>(
         "/service/media/speech_recognition", _media_svc, GatewayAuth::JWT_REQUIRED,
         &med::MediaService_Stub::SpeechRecognition);

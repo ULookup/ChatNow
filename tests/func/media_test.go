@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
@@ -92,17 +94,6 @@ func TestGetFileInfo_NotFound(t *testing.T) {
 	assert.False(t, rsp.Header.Success)
 }
 
-func TestSpeechRecognition_Success(t *testing.T) {
-	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	req := &media.SpeechRecognitionReq{
-		RequestId: client.NewRequestID(), SpeechContent: []byte("fake-audio-data"),
-	}
-	rsp := &media.SpeechRecognitionRsp{}
-	err := authed.DoAuth("/service/media/speech_recognition", req, rsp)
-	require.NoError(t, err)
-	assert.True(t, rsp.Header.Success)
-}
-
 // FN-MD-01 | P0 | happy path | 三步上传全链路：apply -> PUT -> complete，验证 file_id 可用 + MinIO 落对象
 func TestFN_MD_CompleteUpload_Success(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
@@ -117,6 +108,11 @@ func TestFN_MD_CompleteUpload_Success(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/get_file_info", infoReq, infoRsp))
 	require.True(t, infoRsp.Header.Success)
 	require.Equal(t, int64(len(content)), infoRsp.FileInfo.FileSize)
+	download := &media.ApplyDownloadRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_download",
+		&media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: fileID}, download))
+	require.True(t, download.GetHeader().GetSuccess())
+	verify.FileURLContentEquals(t, download.DownloadUrl, content)
 }
 
 // FN-MD-02 | P0 | error path | 未 PUT 到 MinIO 就 complete，应失败
@@ -159,11 +155,11 @@ func TestFN_MD_CompleteUpload_AlreadyCompleted(t *testing.T) {
 // FN-MD-04 | P0 | happy path | 大文件 InitMultipart，返回 upload_id + 推荐 part_size
 func TestFN_MD_InitMultipart_Success(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	content := make([]byte, 3*1024*1024) // 3MB
+	content := fixture.MultipartPDFContent(3 * 1024 * 1024) // 3MB
 	hash := sha256.Sum256(content)
 	req := &media.InitMultipartReq{
 		RequestId: client.NewRequestID(), FileName: "big.bin",
-		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		FileSize: int64(len(content)), MimeType: "application/pdf",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	rsp := &media.InitMultipartRsp{}
@@ -194,11 +190,11 @@ func TestFN_MD_InitMultipart_FileTooLarge(t *testing.T) {
 // FN-MD-06 | P0 | happy path | ApplyPartUpload 获取分片 presigned URL
 func TestFN_MD_ApplyPartUpload_Success(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	content := make([]byte, 3*1024*1024)
+	content := fixture.MultipartPDFContent(3 * 1024 * 1024)
 	hash := sha256.Sum256(content)
 	initReq := &media.InitMultipartReq{
 		RequestId: client.NewRequestID(), FileName: "parts.bin",
-		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		FileSize: int64(len(content)), MimeType: "application/pdf",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	initRsp := &media.InitMultipartRsp{}
@@ -214,14 +210,11 @@ func TestFN_MD_ApplyPartUpload_Success(t *testing.T) {
 	assert.NotEmpty(t, rsp.UploadUrl)
 }
 
-// FN-MD-07 | P0 | happy path | init -> upload 3 parts -> complete，验证合并后 file_id 可查
+// FN-MD-07 | P0 | happy path | init -> upload 2 parts -> complete，验证合并后 file_id 可查
 func TestFN_MD_CompleteMultipart_FullFlow(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	content := make([]byte, 6*1024*1024) // 6MB -> 3 parts @ 2MB
-	for i := range content {
-		content[i] = byte(i % 256)
-	}
-	fileID := fixture.UploadLargeFile(t, authed, content, "application/octet-stream", 2*1024*1024)
+	content := fixture.MultipartPDFContent(6 * 1024 * 1024) // 6MB -> 2 parts @ 5MB + 1MB
+	fileID := fixture.UploadLargeFile(t, authed, content, "application/pdf", 5*1024*1024)
 	require.NotEmpty(t, fileID)
 
 	// 验证 file_info
@@ -230,16 +223,21 @@ func TestFN_MD_CompleteMultipart_FullFlow(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/get_file_info", infoReq, infoRsp))
 	require.True(t, infoRsp.Header.Success)
 	require.Equal(t, int64(len(content)), infoRsp.FileInfo.FileSize)
+	download := &media.ApplyDownloadRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_download",
+		&media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: fileID}, download))
+	require.True(t, download.GetHeader().GetSuccess())
+	verify.FileURLContentEquals(t, download.DownloadUrl, content)
 }
 
 // FN-MD-08 | P1 | error path | 缺少某个 part number，CompleteMultipart 拒绝
 func TestFN_MD_CompleteMultipart_MissingPart(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	content := make([]byte, 6*1024*1024)
+	content := fixture.MultipartPDFContent(6 * 1024 * 1024)
 	hash := sha256.Sum256(content)
 	initReq := &media.InitMultipartReq{
 		RequestId: client.NewRequestID(), FileName: "missing.bin",
-		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		FileSize: int64(len(content)), MimeType: "application/pdf",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	initRsp := &media.InitMultipartRsp{}
@@ -253,7 +251,7 @@ func TestFN_MD_CompleteMultipart_MissingPart(t *testing.T) {
 	partRsp := &media.ApplyPartRsp{}
 	require.NoError(t, authed.DoAuth("/service/media/apply_part_upload", partReq, partRsp))
 
-	partContent := content[:2*1024*1024]
+	partContent := content[:5*1024*1024]
 	httpReq, err := http.NewRequest("PUT", partRsp.UploadUrl, bytes.NewReader(partContent))
 	require.NoError(t, err)
 	putResp, err := http.DefaultClient.Do(httpReq)
@@ -273,11 +271,11 @@ func TestFN_MD_CompleteMultipart_MissingPart(t *testing.T) {
 // FN-MD-09 | P1 | happy path | init -> abort，验证 upload_id 失效
 func TestFN_MD_AbortMultipart_Success(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	content := make([]byte, 3*1024*1024)
+	content := fixture.MultipartPDFContent(3 * 1024 * 1024)
 	hash := sha256.Sum256(content)
 	initReq := &media.InitMultipartReq{
 		RequestId: client.NewRequestID(), FileName: "abort.bin",
-		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		FileSize: int64(len(content)), MimeType: "application/pdf",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	initRsp := &media.InitMultipartRsp{}
@@ -299,11 +297,11 @@ func TestFN_MD_AbortMultipart_Success(t *testing.T) {
 // FN-MD-10 | P2 | idempotent | 重复 abort 幂等
 func TestFN_MD_AbortMultipart_AlreadyAborted(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	content := make([]byte, 3*1024*1024)
+	content := fixture.MultipartPDFContent(3 * 1024 * 1024)
 	hash := sha256.Sum256(content)
 	initReq := &media.InitMultipartReq{
 		RequestId: client.NewRequestID(), FileName: "abort2.bin",
-		FileSize: int64(len(content)), MimeType: "application/octet-stream",
+		FileSize: int64(len(content)), MimeType: "application/pdf",
 		ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
 	}
 	initRsp := &media.InitMultipartRsp{}
@@ -383,6 +381,11 @@ func TestFN_MD_ApplyUpload_QuotaRemaining(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/get_file_info", infoReq, infoRsp))
 	require.True(t, infoRsp.Header.Success)
 	require.Equal(t, int64(len(content)), infoRsp.FileInfo.FileSize)
+	download := &media.ApplyDownloadRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_download",
+		&media.ApplyDownloadReq{RequestId: client.NewRequestID(), FileId: fileID}, download))
+	require.True(t, download.GetHeader().GetSuccess())
+	verify.FileURLContentEquals(t, download.DownloadUrl, content)
 }
 
 // FN-MD-14 | P0 | happy path | 上传后下载，验证内容一致
@@ -510,4 +513,73 @@ func TestFN_MD_MagicMismatchQuarantined(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/apply_download", req, rsp))
 	assert.False(t, rsp.Header.Success)
 	assert.Equal(t, int32(5008), rsp.Header.ErrorCode)
+}
+
+// FN-MD-21 | P0 | Multipart signatures bind the part number as well as the upload ID.
+func TestFN_MD_MultipartSignatureBindsPart(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	content := fixture.MultipartPDFContent(128)
+	hash := sha256.Sum256(content)
+	init := &media.InitMultipartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/init_multipart", &media.InitMultipartReq{
+		RequestId: client.NewRequestID(), FileName: "signed.pdf", FileSize: int64(len(content)),
+		MimeType: "application/pdf", ContentHash: fmt.Sprintf("sha256:%x", hash), Purpose: media.MediaPurpose_CHAT,
+	}, init))
+	require.True(t, init.GetHeader().GetSuccess())
+	t.Cleanup(func() {
+		_ = authed.DoAuth("/service/media/abort_multipart", &media.AbortMultipartReq{
+			RequestId: client.NewRequestID(), UploadId: init.UploadId,
+		}, &media.AbortMultipartRsp{})
+	})
+	part := &media.ApplyPartRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/apply_part_upload", &media.ApplyPartReq{
+		RequestId: client.NewRequestID(), UploadId: init.UploadId, PartNumber: 1,
+	}, part))
+	require.True(t, part.GetHeader().GetSuccess())
+	parsed, err := url.Parse(part.UploadUrl)
+	require.NoError(t, err)
+	query := parsed.Query()
+	query.Set("partNumber", "2")
+	parsed.RawQuery = query.Encode()
+	put := func(target string) int {
+		request, err := http.NewRequest(http.MethodPut, target, bytes.NewReader(content))
+		require.NoError(t, err)
+		response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+		if err != nil {
+			t.Fatal("multipart PUT transport failed")
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	require.Equal(t, http.StatusForbidden, put(parsed.String()))
+	require.Equal(t, http.StatusOK, put(part.UploadUrl))
+}
+
+// FN-MD-22 | P0 | Every multipart route rejects missing authentication before RPC dispatch.
+func TestFN_MD_MultipartRequiresAuthentication(t *testing.T) {
+	for _, test := range []struct {
+		path              string
+		request, response proto.Message
+	}{
+		{"init_multipart", &media.InitMultipartReq{}, &media.InitMultipartRsp{}},
+		{"apply_part_upload", &media.ApplyPartReq{}, &media.ApplyPartRsp{}},
+		{"complete_multipart", &media.CompleteMultipartReq{}, &media.CompleteMultipartRsp{}},
+		{"abort_multipart", &media.AbortMultipartReq{}, &media.AbortMultipartRsp{}},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			err := HTTP.DoNoAuth("/service/media/"+test.path, test.request, test.response)
+			require.ErrorContains(t, err, "http status 401")
+		})
+	}
+}
+
+// FN-MD-23 | P1 | Valid PCM16 must report unavailable until an ASR engine processes it.
+func TestFN_MD_SpeechRecognition_BackendUnavailable(t *testing.T) {
+	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	response := &media.SpeechRecognitionRsp{}
+	require.NoError(t, authed.DoAuth("/service/media/speech_recognition", &media.SpeechRecognitionReq{
+		RequestId: client.NewRequestID(), SpeechContent: []byte{0, 0},
+	}, response))
+	require.False(t, response.GetHeader().GetSuccess())
+	require.Equal(t, "speech recognition unavailable", response.GetHeader().GetErrorMessage())
 }

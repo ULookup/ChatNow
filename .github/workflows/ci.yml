@@ -182,7 +182,10 @@ jobs:
       - *validate-compose-artifacts
       - name: Initialize synthetic test environment
         run: python3 scripts/create_test_env.py --github-env
-      - name: Start full stack
+      - name: Start full stack with RL-05 rate limits
+        env:
+          TRANSMITE_RATE_LIMIT_USER_MAX: '8'
+          TRANSMITE_RATE_LIMIT_SESSION_MAX: '40'
         run: docker compose up -d --build
       - name: Wait for services
         run: ./scripts/wait_for_services.sh

@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include "infra/etcd.hpp"
 #include "mq/channel.hpp"
+#include "mq/business_notify.hpp"
 #include "infra/logger.hpp"
 #include "utils/utils.hpp"
 #include "dao/data_es.hpp"
@@ -228,6 +229,16 @@ public:
                 throw ServiceError(::chatnow::error::kSystemInternalError,
                                    "insert friend_apply failed");
             rsp->set_notify_event_id(eid);
+            ::chatnow::push::NotifyMessage notification;
+            notification.set_notify_event_id(eid);
+            notification.set_notify_type(::chatnow::push::FRIEND_ADD_APPLY_NOTIFY);
+            notification.set_trace_id(auth.trace_id);
+            auto* applicant = notification.mutable_friend_add_apply()->mutable_user_info();
+            applicant->set_user_id(uid);
+            UserInfoMap users;
+            if (fetch_users(cntl, req->request_id(), {uid}, users) && users.count(uid))
+                applicant->CopyFrom(users.at(uid));
+            notify_online_users(_mm_channels, cntl, req->request_id(), {pid}, notification);
         });
     }
 
@@ -366,6 +377,17 @@ public:
             if (ca.has_conversation()) {
                 rsp->set_new_conversation_id(ca.conversation().conversation_id());
             }
+            ::chatnow::push::NotifyMessage notification;
+            notification.set_notify_event_id(eid);
+            notification.set_notify_type(::chatnow::push::FRIEND_ADD_PROCESS_NOTIFY);
+            notification.set_trace_id(auth.trace_id);
+            auto* result = notification.mutable_friend_process_result();
+            result->set_agree(true);
+            result->mutable_user_info()->set_user_id(peer_uid);
+            UserInfoMap users;
+            if (fetch_users(cntl, req->request_id(), {peer_uid}, users) && users.count(peer_uid))
+                result->mutable_user_info()->CopyFrom(users.at(peer_uid));
+            notify_online_users(_mm_channels, cntl, req->request_id(), {apply_uid}, notification);
         });
     }
 
@@ -460,6 +482,7 @@ public:
         _mm_channels = std::make_shared<ServiceManager>();
         _mm_channels->declared(_identity_service_name);
         _mm_channels->declared(_conversation_service_name);
+        _mm_channels->declared(kBusinessPushService);
 
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(),
                                 std::placeholders::_1, std::placeholders::_2);
