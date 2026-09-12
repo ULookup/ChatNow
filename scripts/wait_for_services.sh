@@ -83,8 +83,8 @@ probe_minio() {
 
 probe_etcd_registrations() {
   local keys service count
-  keys=$(compose exec -T etcd sh -ec \
-    'ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 get /service --prefix --keys-only' \
+  keys=$(compose exec -T -e ETCDCTL_API=3 etcd \
+    etcdctl --endpoints=http://127.0.0.1:2379 get /service --prefix --keys-only \
     2>/dev/null) || return 1
   for service in identity media transmite message relationship conversation presence push; do
     count=$(grep -c "^/service/${service}_service/instance$" <<<"$keys" || true)
