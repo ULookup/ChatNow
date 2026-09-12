@@ -66,7 +66,7 @@ target_link_libraries(${target} jsoncpp_lib -lgflags -lspdlog
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
     -lhiredis -lredis++ -lcpr -lelasticlient
-    -lamqpcpp -lev -lmysqlclient)
+    -lamqpcpp -lev -lmysqlclient -lglog)
 
 set(test_client "message_client")
 # 4. 获取源码目录下的所有源码文件
