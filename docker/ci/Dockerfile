@@ -116,6 +116,8 @@ RUN set -euo pipefail; \
     cmake --install /tmp/cpr-build; \
     rm -rf /tmp/cpr /tmp/cpr-build
 
+COPY docker/ci/elasticlient-jsoncpp.cmake /tmp/elasticlient-jsoncpp.cmake
+
 RUN set -euo pipefail; \
     . /tmp/dependencies.lock; \
     git init /tmp/elasticlient; \
@@ -124,6 +126,7 @@ RUN set -euo pipefail; \
     git -C /tmp/elasticlient checkout --detach FETCH_HEAD; \
     test "$(git -C /tmp/elasticlient rev-parse HEAD)" = "$ELASTICLIENT_REV"; \
     cmake -S /tmp/elasticlient -B /tmp/elasticlient-build -G Ninja \
+        -DCMAKE_PROJECT_Elasticlient_INCLUDE=/tmp/elasticlient-jsoncpp.cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DBUILD_ELASTICLIENT_EXAMPLE=OFF \

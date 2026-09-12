@@ -1,4 +1,4 @@
-FROM minio/mc:RELEASE.2024-10-08T09-37-26Z AS mc
+FROM quay.io/minio/mc:RELEASE.2024-10-08T09-37-26Z AS mc
 
 FROM busybox:1.36.1-musl
 

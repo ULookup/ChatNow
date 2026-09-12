@@ -217,7 +217,7 @@ services:
     entrypoint: python3 /init/init_rabbitmq.py
     restart: "no"
   minio:
-    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    image: quay.io/minio/minio:RELEASE.2024-10-13T13-34-11Z@sha256:9535594ad4122b7a78c6632788a989b96d9199b483d3bd71a5ceae73a922cdfa
     container_name: chatnow-minio
     command: server /data --console-address ":9001"
     environment:
