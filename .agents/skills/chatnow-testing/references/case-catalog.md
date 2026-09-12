@@ -24,7 +24,7 @@ Case IDs are stable identities, not completion claims. Put the ID in the case co
 | Performance | `PF-01` through `PF-08` |
 | Reliability | `RL-<category>-<number>` |
 
-Reliability is a distinct reserved namespace and layer. The current tree has no executable Reliability suite; reserving an ID never authorizes inventing a directory, target, command, or successful run.
+Reliability has an executable Compose gate in `tests/reliability` (`make -C tests test-reliability`). The existing RL-05 category contains circuit recovery and Push persistence cases; new cases use the category-number allocation below. A reserved ID is never evidence of a successful run.
 
 ## Allocation procedure
 

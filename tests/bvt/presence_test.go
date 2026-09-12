@@ -16,8 +16,10 @@ import (
 // BVT-018 | P0 | presence 链路 | 查询在线状态，返回 online
 func TestBVT_GetPresence_Success(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	ws := fixture.ConnectWS(t, authed)
+	t.Cleanup(func() { ws.Close() })
 
-	// 登录后 presence 应为 ONLINE
+	// Presence is ONLINE after an authenticated WebSocket becomes active.
 	req := &presence.GetPresenceReq{
 		RequestId: client.NewRequestID(),
 		UserId:    authed.UserID,

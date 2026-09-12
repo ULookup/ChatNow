@@ -10,7 +10,8 @@ set(proto_files common/types.proto common/error.proto common/envelope.proto
                 message/message_types.proto
                 identity/identity_service.proto
                 conversation/conversation_service.proto
-                relationship/relationship_service.proto)
+                relationship/relationship_service.proto
+                push/notify.proto push/push_service.proto)
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
     string(REPLACE ".proto" ".pb.cc" proto_cc ${proto_file})
@@ -54,11 +55,12 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog
+find_package(jsoncpp CONFIG REQUIRED)
+target_link_libraries(${target} jsoncpp_lib -lgflags -lspdlog -lglog
     -lfmt -lbrpc -lssl -lcrypto
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
-    -lcpr -lelasticlient -ljsoncpp)
+    -lcpr -lelasticlient)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)

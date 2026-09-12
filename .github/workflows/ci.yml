@@ -16,9 +16,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential protobuf-compiler netcat-openbsd
-      - name: Build C++ services
-        run: mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc)
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
@@ -112,6 +110,8 @@ jobs:
       - &validate-compose-artifacts
         name: Validate downloaded Compose service artifacts
         run: docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 ./scripts/validate_compose_artifacts.sh compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -145,6 +145,8 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -178,7 +180,12 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
-      - name: Start full stack
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
+      - name: Start full stack with RL-05 rate limits
+        env:
+          TRANSMITE_RATE_LIMIT_USER_MAX: '8'
+          TRANSMITE_RATE_LIMIT_SESSION_MAX: '40'
         run: docker compose up -d --build
       - name: Wait for services
         run: ./scripts/wait_for_services.sh
@@ -211,6 +218,8 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack with PF-09 rate limits
         env:
           # Transmite flags are int32; use the maximum valid value for gate-only headroom.
@@ -230,7 +239,7 @@ jobs:
         run: docker compose down -v
 
   perf:
-    needs: func
+    needs: [service-artifacts, func]
     runs-on: ubuntu-22.04
     if: github.event_name == 'schedule'
     steps:
@@ -244,6 +253,12 @@ jobs:
           sudo apt-get install -y protobuf-compiler netcat-openbsd
       - name: Install Go protobuf generator
         run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - *download-compose-artifacts
+      - *restore-compose-artifacts
+      - *chmod-compose-artifacts
+      - *validate-compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services

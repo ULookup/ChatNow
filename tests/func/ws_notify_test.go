@@ -9,9 +9,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
+	conversation "chatnow-tests/proto/chatnow/conversation"
 	identity "chatnow-tests/proto/chatnow/identity"
 	msg "chatnow-tests/proto/chatnow/message"
 	presence "chatnow-tests/proto/chatnow/presence"
@@ -126,9 +128,12 @@ func TestFN_WS_ConversationCreateNotify(t *testing.T) {
 	// member 应收到 CONVERSATION_CREATE_NOTIFY
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := wsMember.WaitForNotify(ctx, int32(push.NotifyType_CONVERSATION_CREATE_NOTIFY))
+	notification, err := wsMember.WaitForNotify(ctx, int32(push.NotifyType_CONVERSATION_CREATE_NOTIFY))
 	require.NoError(t, err, "member 应收到会话创建通知")
-	_ = convID
+	created := &conversation.Conversation{}
+	require.NoError(t, proto.Unmarshal(notification.GetNewConversationInfo().GetConversationPayload(), created))
+	require.Equal(t, convID, created.ConversationId)
+	require.Nil(t, created.Self, "broadcast payload must not expose the creator's personal membership state")
 }
 
 // FN-WS-05 | P1 | websocket | 订阅的用户上线/离线，WS 收到通知

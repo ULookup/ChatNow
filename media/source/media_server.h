@@ -72,7 +72,8 @@ public:
         _multi    = std::make_unique<MultipartHandler>(
                        s3, mime, files, blobs, quota,
                        cfg.public_bucket, cfg.private_bucket, cfg.presign_seconds);
-        _download = std::make_unique<DownloadHandler>(s3, files, cfg.presign_seconds);
+        _download = std::make_unique<DownloadHandler>(s3, files, cfg.presign_seconds,
+                                                      cfg.public_bucket, cfg.public_url_prefix);
         _speech   = std::make_unique<SpeechHandler>(cfg.asr_endpoint);
     }
 
@@ -295,9 +296,11 @@ public:
         }
     }
 
-    void make_s3_object(const std::string& endpoint, const std::string& region,
+    void make_s3_object(const std::string& endpoint, const std::string& public_endpoint,
+                        const std::string& region,
                         const std::string& access_key, const std::string& secret_key) {
-        S3Options o{endpoint, region, access_key, secret_key, /*path_style*/true};
+        S3Options o{endpoint, public_endpoint, region, access_key, secret_key,
+                    /*path_style*/true};
         _s3 = std::make_shared<S3Client>(o);
     }
 

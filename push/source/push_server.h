@@ -545,7 +545,14 @@ private:
         }
 
         _connections->insert(conn, uid, did, jti);
-        if (_online_route) _online_route->bind(uid, did, _instance_id);
+        {
+            const auto cache_key = key::local_route_cache_key(uid);
+            auto guard = _inflight_registry ? _inflight_registry->acquire(cache_key)
+                                           : InflightRegistry::Guard{};
+            std::unique_lock<std::mutex> lock(guard.mu ? *guard.mu : _dummy_mu_);
+            if (_online_route) _online_route->bind(uid, did, _instance_id);
+            if (_local_route_cache) _local_route_cache->invalidate(cache_key);
+        }
 
         // 写 Presence（Push 为写入端）
         _write_presence_online_(uid, did);
@@ -596,7 +603,7 @@ private:
         try {
             std::string k = key::presence_device_key(uid, did);
             const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
-            auto pipe = _redis->pipeline();
+            auto pipe = _redis->pipeline(k);
             pipe.hset(k, "state", "ONLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -612,7 +619,7 @@ private:
         try {
             std::string k = key::presence_device_key(uid, did);
             const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
-            auto pipe = _redis->pipeline();
+            auto pipe = _redis->pipeline(k);
             pipe.hset(k, "state", "OFFLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -725,7 +732,7 @@ private:
             route.device_ids.push_back(did);
             route.device_to_instance[did] = inst;
         }
-        if (_local_route_cache) {
+        if (_local_route_cache && !route.device_ids.empty()) {
             _local_route_cache->set(cache_key, route, randomized_ttl(_route_l1_ttl));
         }
 
@@ -1135,7 +1142,7 @@ public:
                         const std::string &queue,
                         const std::string &binding_key)
     {
-        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, password, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         _push_settings = {
             .exchange = exchange,

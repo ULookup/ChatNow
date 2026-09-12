@@ -43,15 +43,22 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 	rejectedBefore := reliabilitySumBVar(t, endpoints, "redis_circuit_rejected_total")
 	recoveredBefore := reliabilitySumBVar(t, endpoints, "redis_circuit_recovered_total")
 
+	redisPaused := true
 	t.Cleanup(func() {
-		chaos.StartRedisCluster(t, HTTP.Config())
-		chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
+		if redisPaused {
+			chaos.UnpauseRedisCluster(t, HTTP.Config())
+			chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
+		}
 	})
-	chaos.StopRedisCluster(t, HTTP.Config())
+	chaos.PauseRedisCluster(t, HTTP.Config())
 
 	rateLimited := 0
 	seqUnavailable := 0
-	for i := 0; i < 650; i++ {
+	responseCodes := make(map[int32]int)
+	outageStarted := time.Now()
+	// The dedicated RL-05 stack uses 8 user tokens per minute. A bounded
+	// burst exhausts fallback capacity even with refill during failed Redis calls.
+	for i := 0; i < 32; i++ {
 		sendRsp := &transmite.SendMessageRsp{}
 		err := user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
 			RequestId:      client.NewRequestID(),
@@ -63,6 +70,7 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 			ClientMsgId: client.NewRequestID(),
 		}, sendRsp)
 		require.NoError(t, err)
+		responseCodes[sendRsp.GetHeader().GetErrorCode()]++
 		if sendRsp.GetHeader().GetErrorMessage() == "rate_limited" {
 			rateLimited++
 		}
@@ -70,19 +78,15 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 			seqUnavailable++
 		}
 	}
+	t.Logf("outage responses: codes=%v rate_limited=%d seq_unavailable=%d elapsed=%s",
+		responseCodes, rateLimited, seqUnavailable, time.Since(outageStarted))
 	require.Greater(t, rateLimited, 0, "Redis outage must retain bounded rate limiting")
 	require.Greater(t, seqUnavailable, 0, "SeqGen truth source must fail unavailable")
 	require.Greater(t, reliabilitySumBVar(t, endpoints, "redis_circuit_open_total"), openedBefore)
 	require.Greater(t, reliabilitySumBVar(t, endpoints, "redis_circuit_rejected_total"), rejectedBefore)
 
-	uid := user.UserID
-	for i := 0; i < 3; i++ {
-		rsp := &identity.GetProfileRsp{}
-		_ = user.DoAuth("/service/identity/get_profile", &identity.GetProfileReq{
-			RequestId: client.NewRequestID(), UserId: &uid,
-		}, rsp)
-	}
-
+	// Measure the open circuit immediately. Unrelated outage RPCs can cross
+	// its one-second probe deadline and legitimately enter HalfOpen instead.
 	started := time.Now()
 	fastFail := &transmite.SendMessageRsp{}
 	err := user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
@@ -95,7 +99,16 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 	require.False(t, fastFail.GetHeader().GetSuccess())
 	require.Less(t, time.Since(started), 50*time.Millisecond)
 
-	chaos.StartRedisCluster(t, HTTP.Config())
+	uid := user.UserID
+	for i := 0; i < 3; i++ {
+		rsp := &identity.GetProfileRsp{}
+		_ = user.DoAuth("/service/identity/get_profile", &identity.GetProfileReq{
+			RequestId: client.NewRequestID(), UserId: &uid,
+		}, rsp)
+	}
+
+	chaos.UnpauseRedisCluster(t, HTTP.Config())
+	redisPaused = false
 	chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
 	time.Sleep(1100 * time.Millisecond)
 	rsp := &identity.GetProfileRsp{}
@@ -117,8 +130,8 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 }
 
 // RL-05 Push truth source: Rabbit accepts while Push is paused; after Redis is
-// stopped, resuming Push must requeue before websocket delivery. Recovery then
-// permits the half-open probe, durable Unacked write, and at-least-once delivery.
+// paused without withdrawing DNS, resuming Push must requeue before delivery.
+// Recovery permits the half-open probe, durable Unacked write, and delivery.
 func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 	// This black-box choreography is intentionally tied to the compose topology:
 	// one Push container owns the websocket and exposes the sole configured bvar
@@ -134,7 +147,11 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 	ws, err := client.OpenWebSocket(HTTP.Config())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ws.Close() })
-	require.NoError(t, ws.WriteBinary(client.PushAuthNotify(recipient.AccessToken, "default_device")))
+	require.NoError(t, ws.WriteBinary(client.PushAuthNotify(recipient.AccessToken, recipient.DeviceID)))
+	senderWS, err := client.OpenWebSocket(HTTP.Config())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = senderWS.Close() })
+	require.NoError(t, senderWS.WriteBinary(client.PushAuthNotify(sender.AccessToken, sender.DeviceID)))
 
 	deviceKey := fmt.Sprintf("im:dev:{%s}", recipient.UserID)
 	deadline := time.Now().Add(5 * time.Second)
@@ -151,23 +168,25 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 		require.NoError(t, readErr)
 	}
 
-	// A successful end-to-end delivery warms that instance's route L1 before it
-	// is paused. The test-only TTL keeps the route through the outage choreography.
+	// Warm both member routes: an offline sender has no positive L1 route and
+	// would fail route discovery before the Unacked persistence under test.
+	// The test-only TTL keeps both routes through the outage choreography.
 	warmMarker := "rl-unacked-warm-" + client.NewRequestID()
 	sendReliabilityMessage(t, sender, convID, warmMarker)
 	require.True(t, readWebSocketMarker(ws, warmMarker, 5*time.Second), "warm Push delivery missing")
+	require.True(t, readWebSocketMarker(senderWS, warmMarker, 5*time.Second), "warm sender Push delivery missing")
 	persistBefore := verify.BVar(t, pushEndpoint, "push_unacked_persist_failure_total")
 	requeueBefore := verify.BVar(t, pushEndpoint, "push_message_requeue_total")
 
 	requireDocker(t, "pause", pushContainer)
 	paused := true
-	redisStopped := false
+	redisPaused := false
 	t.Cleanup(func() {
 		if paused {
 			_, _ = exec.Command("docker", "unpause", pushContainer).CombinedOutput()
 		}
-		if redisStopped {
-			chaos.StartRedisCluster(t, HTTP.Config())
+		if redisPaused {
+			chaos.UnpauseRedisCluster(t, HTTP.Config())
 			chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
 		}
 	})
@@ -175,25 +194,24 @@ func TestRL_PushUnackedRequeuesUntilRedisRecovers(t *testing.T) {
 	marker := "rl-unacked-" + client.NewRequestID()
 	sendReliabilityMessage(t, sender, convID, marker)
 
-	chaos.StopRedisCluster(t, HTTP.Config())
-	redisStopped = true
+	redisPaused = true
+	chaos.PauseRedisCluster(t, HTTP.Config())
 	requireDocker(t, "unpause", pushContainer)
 	paused = false
 	requireBVarIncrease(t, pushEndpoint, "push_unacked_persist_failure_total", persistBefore, 5*time.Second)
 	requireBVarIncrease(t, pushEndpoint, "push_message_requeue_total", requeueBefore, 5*time.Second)
-	if payload, readErr := ws.ReadFrame(500 * time.Millisecond); readErr == nil {
-		t.Fatalf("Push delivered before durable Unacked persistence: %x", payload)
-	} else if timeout, ok := readErr.(net.Error); !ok || !timeout.Timeout() {
-		t.Fatalf("websocket failed while awaiting Redis outage: %v", readErr)
-	}
+	// Other already durable messages may be redelivered; only the newly queued
+	// marker is forbidden before its own Unacked write succeeds.
+	require.False(t, readWebSocketMarker(ws, marker, 500*time.Millisecond),
+		"Push delivered the outage message before durable Unacked persistence")
 
-	chaos.StartRedisCluster(t, HTTP.Config())
+	chaos.UnpauseRedisCluster(t, HTTP.Config())
 	chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
-	redisStopped = false
+	redisPaused = false
 
 	require.True(t, readWebSocketMarker(ws, marker, 20*time.Second),
 		"requeued Push was not delivered after Redis recovery")
-	unackedKey := fmt.Sprintf("im:unack:{%s:default_device}", recipient.UserID)
+	unackedKey := fmt.Sprintf("im:unack:{%s:%s}", recipient.UserID, recipient.DeviceID)
 	require.Equal(t, "1", verify.RedisCLI(t, "EXISTS", unackedKey),
 		"delivery must follow durable Unacked persistence")
 }

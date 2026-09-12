@@ -30,6 +30,7 @@ RUN apt-get -o Acquire::Retries=5 update \
         libodb-dev \
         libodb-mysql-dev \
         libprotobuf-dev \
+        libprotoc-dev \
         libsnappy-dev \
         libspdlog-dev \
         libssl-dev \
@@ -115,6 +116,8 @@ RUN set -euo pipefail; \
     cmake --install /tmp/cpr-build; \
     rm -rf /tmp/cpr /tmp/cpr-build
 
+COPY docker/ci/elasticlient-jsoncpp.cmake /tmp/elasticlient-jsoncpp.cmake
+
 RUN set -euo pipefail; \
     . /tmp/dependencies.lock; \
     git init /tmp/elasticlient; \
@@ -123,6 +126,7 @@ RUN set -euo pipefail; \
     git -C /tmp/elasticlient checkout --detach FETCH_HEAD; \
     test "$(git -C /tmp/elasticlient rev-parse HEAD)" = "$ELASTICLIENT_REV"; \
     cmake -S /tmp/elasticlient -B /tmp/elasticlient-build -G Ninja \
+        -DCMAKE_PROJECT_Elasticlient_INCLUDE=/tmp/elasticlient-jsoncpp.cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DBUILD_ELASTICLIENT_EXAMPLE=OFF \
@@ -145,6 +149,7 @@ RUN set -euo pipefail; \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DAMQP-CPP_BUILD_EXAMPLES=OFF \
+        -DAMQP-CPP_LINUX_TCP=ON \
         -DAMQP-CPP_BUILD_SHARED=ON; \
     cmake --build /tmp/amqp-cpp-build --parallel "$(nproc)"; \
     cmake --install /tmp/amqp-cpp-build; \
@@ -174,3 +179,8 @@ RUN printf '%s\n' '/usr/local/lib' '/usr/local/lib64' > /etc/ld.so.conf.d/chatno
     && ldconfig
 
 WORKDIR /workspace
+
+# Ubuntu's ODB compiler invokes the GCC version it was packaged with.
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends g++-12 \
+    && rm -rf /var/lib/apt/lists/*

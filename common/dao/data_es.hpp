@@ -317,7 +317,7 @@ public:
         builder.append_should_match("chat_session_name", key)
                .append_should_match("chat_session_id.keyword", key)
                .append_must_term("status", std::to_string(0))
-               .append_must_term("member_ids", caller_uid)
+               .append_must_term("member_ids.keyword", caller_uid)
                .sort_by("update_time", "desc")
                .page(0, size);
         Json::Value json_session = builder.search();

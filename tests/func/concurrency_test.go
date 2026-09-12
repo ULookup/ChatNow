@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +15,7 @@ import (
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	"chatnow-tests/pkg/verify"
+	conversation "chatnow-tests/proto/chatnow/conversation"
 	media "chatnow-tests/proto/chatnow/media"
 	msg "chatnow-tests/proto/chatnow/message"
 	relationship "chatnow-tests/proto/chatnow/relationship"
@@ -76,7 +78,7 @@ func TestFN_CC_SendMessage_SameClientMsgId(t *testing.T) {
 
 // FN-CC-02 | P1 | concurrency | 10 goroutine 并发发消息，全部落库，seq 不重复
 func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
-	a, _, convID := setupConv(t)
+	a, recipient, convID := setupConv(t)
 
 	var wg sync.WaitGroup
 	msgIDs := make([]int64, 10)
@@ -142,7 +144,23 @@ func TestFN_CC_SendMessage_DifferentMsgId(t *testing.T) {
 	// 直查 DB：message 表有 10 条
 	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
 	defer dbV.Close()
+	for _, id := range msgIDs {
+		dbV.WaitMessageExists(t, id, 10*time.Second)
+	}
 	dbV.MessageCount(t, convID, 10)
+	// Every persisted concurrent message contributes to the conversation watermark.
+	list := &conversation.ListConversationsRsp{}
+	require.NoError(t, recipient.DoAuth("/service/conversation/list",
+		&conversation.ListConversationsReq{RequestId: client.NewRequestID()}, list))
+	require.True(t, list.GetHeader().GetSuccess())
+	found := false
+	for _, item := range list.Conversations {
+		if item.ConversationId == convID {
+			found = true
+			require.Equal(t, uint64(10), item.GetSelf().GetUnreadCount())
+		}
+	}
+	require.True(t, found)
 }
 
 // FN-CC-03 | P1 | concurrency | 好友通过瞬间并发发消息，不丢
@@ -171,6 +189,7 @@ func TestFN_CC_FriendAccept_ThenSend(t *testing.T) {
 	// 并发发 5 条消息
 	var wg sync.WaitGroup
 	errs := make([]error, 5)
+	messageIDs := make([]int64, 5)
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(idx int) {
@@ -189,6 +208,7 @@ func TestFN_CC_FriendAccept_ThenSend(t *testing.T) {
 			if errs[idx] == nil && !rsp.Header.Success {
 				errs[idx] = fmt.Errorf("send failed: %s", rsp.Header.ErrorMessage)
 			}
+			messageIDs[idx] = rsp.GetMessage().GetMessageId()
 		}(i)
 	}
 	wg.Wait()
@@ -201,6 +221,10 @@ func TestFN_CC_FriendAccept_ThenSend(t *testing.T) {
 	// 直查 DB：5 条消息全部落库
 	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
 	defer dbV.Close()
+	for _, id := range messageIDs {
+		require.NotZero(t, id)
+		dbV.WaitMessageExists(t, id, 10*time.Second)
+	}
 	dbV.MessageCount(t, convID, 5)
 }
 
@@ -218,6 +242,7 @@ func TestFN_CC_MediaUpload_SameHash(t *testing.T) {
 	// 5 goroutine 并发 ApplyUpload 相同 hash（已存在）
 	var wg sync.WaitGroup
 	fileIDs := make([]string, 5)
+	deduplicated := make([]bool, 5)
 	errs := make([]error, 5)
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
@@ -235,6 +260,7 @@ func TestFN_CC_MediaUpload_SameHash(t *testing.T) {
 			errs[idx] = authed.DoAuth("/service/media/apply_upload", req, rsp)
 			if errs[idx] == nil && rsp.Header.Success {
 				fileIDs[idx] = rsp.FileId
+				deduplicated[idx] = rsp.AlreadyExists && rsp.UploadUrl == ""
 			}
 		}(i)
 	}
@@ -246,10 +272,21 @@ func TestFN_CC_MediaUpload_SameHash(t *testing.T) {
 		require.NotEmpty(t, fileIDs[i], "goroutine %d 的 file_id 为空", i)
 	}
 
-	// 验证所有返回的 file_id 相同（dedup 正确）
-	require.Equal(t, existingID, fileIDs[0], "dedup 应返回已存在的 file_id")
+	// Dedup shares stored bytes while each upload owns a distinct metadata row.
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	existing := dbV.MediaFile(t, existingID)
+	seen := map[string]bool{existingID: true}
 	for i, id := range fileIDs {
-		assert.Equal(t, fileIDs[0], id, "goroutine %d 的 file_id 应一致（dedup）", i)
+		require.True(t, deduplicated[i])
+		require.False(t, seen[id], "each upload needs a distinct file reference")
+		seen[id] = true
+		complete := &media.CompleteUploadRsp{}
+		require.NoError(t, authed.DoAuth("/service/media/complete_upload", &media.CompleteUploadReq{RequestId: client.NewRequestID(), FileId: id}, complete))
+		require.True(t, complete.GetHeader().GetSuccess())
+		record := dbV.MediaFile(t, id)
+		require.Equal(t, existing.ObjectKey, record.ObjectKey)
+		require.Equal(t, existing.Bucket, record.Bucket)
 	}
 }
 

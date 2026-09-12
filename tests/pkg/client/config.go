@@ -2,6 +2,7 @@ package client
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
@@ -55,6 +56,9 @@ func LoadConfig(path string) *Config {
 	cfg := &Config{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		panic("failed to parse config: " + err.Error())
+	}
+	if cfg.Infra.ComposeDir != "" && !filepath.IsAbs(cfg.Infra.ComposeDir) {
+		cfg.Infra.ComposeDir = filepath.Clean(filepath.Join(filepath.Dir(path), cfg.Infra.ComposeDir))
 	}
 	// Env overrides for CI
 	if v := os.Getenv("GATEWAY_ADDR"); v != "" {

@@ -1,0 +1,32 @@
+{
+  "_comment": "Container Media configuration. Credentials are injected through the runtime secret resolver.",
+
+  "s3": {
+    "endpoint":        "http://minio:9000",
+    "public_endpoint": "http://127.0.0.1:19000",
+    "region":          "us-east-1"
+  },
+
+  "media": {
+    "public_bucket":     "chatnow-media-public",
+    "private_bucket":    "chatnow-media-private",
+    "public_url_prefix": "http://127.0.0.1:19000/chatnow-media-public",
+    "presign_seconds":   900,
+    "asr_endpoint":      "",
+    "mime_whitelist": [
+      {"prefix": "image/jpeg",       "max_mb":  20},
+      {"prefix": "image/png",        "max_mb":  20},
+      {"prefix": "image/gif",        "max_mb":  20},
+      {"prefix": "image/webp",       "max_mb":  20},
+      {"prefix": "video/mp4",        "max_mb": 500},
+      {"prefix": "video/webm",       "max_mb": 500},
+      {"prefix": "video/quicktime",  "max_mb": 500},
+      {"prefix": "audio/aac",        "max_mb":  50},
+      {"prefix": "audio/mp4",        "max_mb":  50},
+      {"prefix": "audio/ogg",        "max_mb":  50},
+      {"prefix": "audio/webm",       "max_mb":  50},
+      {"prefix": "application/pdf",  "max_mb": 100},
+      {"prefix": "text/plain",       "max_mb":   5}
+    ]
+  }
+}

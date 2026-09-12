@@ -33,6 +33,7 @@ func ConnectWS(t testing.TB, c *client.HTTPClient) *client.WSClient {
 	if err != nil {
 		t.Fatalf("ConnectWS: %v", err)
 	}
+	t.Cleanup(func() { ws.Close() })
 	waitForWSOnline(t, c)
 	return ws
 }
@@ -43,6 +44,7 @@ func ConnectWSWithDeviceID(t testing.TB, c *client.HTTPClient, deviceID string) 
 	if err != nil {
 		t.Fatalf("ConnectWSWithDeviceID: %v", err)
 	}
+	t.Cleanup(func() { ws.Close() })
 	waitForWSOnline(t, c)
 	return ws
 }

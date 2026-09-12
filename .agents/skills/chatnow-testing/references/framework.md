@@ -2,7 +2,7 @@
 
 Target version: `3.0-dev`
 Status: Current
-Verified: 2026-07-22
+Verified: 2026-09-13
 
 Read this reference before selecting, implementing, running, or reporting a test. Reinspect `tests/Makefile`, `.github/workflows/ci.yml`, and the current `tests/` tree before relying on a path, target, or command; executable files are authoritative.
 
@@ -17,14 +17,23 @@ Read this reference before selecting, implementing, running, or reporting a test
 | L4 Performance | `tests/perf`, `perf` | Throughput and latency baselines | `make -C tests test-perf` |
 | Reliability | `tests/reliability`, `reliability` | Redis failure injection, recovery, and Push unacked convergence | `make -C tests test-reliability` |
 
-The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, `make -C tests test-agent-policy`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content. Repository policy checks are static evidence and never substitute for a behavior RED or runtime gate.
+The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, `make -C tests test-agent-policy`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content. Repository policy checks and `tests/pkg/contracts` Compose/runtime contracts are static evidence and never substitute for a behavior RED or runtime gate. Repository contracts do not consume a BVT/Functional case ID namespace.
+
+RL-05 requires a dedicated disposable stack started with `TRANSMITE_RATE_LIMIT_USER_MAX=8 TRANSMITE_RATE_LIMIT_SESSION_MAX=40 docker compose up -d --build`. These values make the fallback burst deterministic; they are not production recommendations. Run Functional/BVT on their separate default-limit stacks. The Push test uses its issued device ID and restores Redis/paused containers on failure.
+
+The executable RL-05 cases use Redis pause/unpause to retain DNS while Redis stops responding. They prove process-stall circuit/recovery behavior and Unacked ordering, not container stop/recreate, DNS withdrawal, cluster topology changes or rolling recovery. Compose fault commands have a 20-second execution limit.
+
+Measure the Open-state fast-failure request immediately after the bounded outage burst. Unrelated faulted RPCs can cross the one-second recovery-probe deadline; a HalfOpen socket probe is a different phase and must not be mistaken for an Open-state rejection.
 
 The Reliability target runs the complete tagged package and does not consume `TEST_RUN`. For an exact test, invoke the same tagged Go package with an anchored `-run` expression, then run `make -C tests test-reliability` for the layer regression. The current fault controller is Redis-only; there is no RabbitMQ, MySQL, arbitrary-service, or general-network controller.
 
 The L0 commands currently encoded in `.github/workflows/ci.yml` are:
 
 ```bash
-mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc)
+docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
+'
 cd tests && go vet ./...
 cd tests
 unformatted=$(gofmt -l .)
@@ -40,7 +49,15 @@ These are Linux workflow commands. On another platform, report the workflow as n
 
 CI runs `build` independently and builds reusable service artifacts. BVT needs `service-artifacts`; Functional needs both `service-artifacts` and BVT; Reliability needs `service-artifacts` but does not wait for BVT. Scheduled Performance runs after Functional, while the cache-performance job depends directly on `service-artifacts`. Preserve each gate's actual dependency when changing workflows or selecting local risk checks.
 
-The dedicated Reliability job exists, but the inspected PR run was skipped after an upstream failure. Its existence is executable-surface evidence, not a successful runtime result.
+The dedicated Reliability job is executable. Its existence is not a successful runtime result; record the actual current-head result separately from BVT and Functional.
+
+## Full-stack readiness boundary
+
+`scripts/wait_for_services.sh` is the bounded pre-suite gate for the root Compose runtime when a full-stack job or operator explicitly invokes it. It verifies Redis Cluster state and slots, all 17 ODB tables and five MySQL application users, RabbitMQ running/alarm state, Elasticsearch yellow-or-green health, MinIO readiness and both media buckets, eight exact etcd service registrations, dependency-aware Gateway `GET /health`, and Push listener reachability. The Push check is TCP reachability, not WebSocket delivery evidence.
+
+Container health, one-shot initializer completion, and the shared `entrypoint.sh` bounded TCP polling are startup prerequisites; none replaces `scripts/wait_for_services.sh`. Conversely, a passing static contract for the helper or Compose shape does not prove that any container started or that a runtime gate passed.
+
+Issue #88 integrates the Issue #78 runtime into CI. Each job owns a fresh checkout and its middle/data directory. scripts/create_test_env.py generates synthetic credentials and refuses existing state. Until a fresh run exists for the exact commit, report cold start, BVT, Functional, Reliability, and Performance as `not run` or `blocked`, not passed.
 
 ## Shared framework
 
@@ -49,13 +66,15 @@ The dedicated Reliability job exists, but the inspected PR run was skipped after
 - `tests/pkg/cleanup`: stack-readiness polling and suite cleanup. `tests/bvt/setup_test.go` and `tests/func/setup_test.go` call it from `TestMain`.
 - `tests/pkg/verify`: direct MySQL, Elasticsearch, and MinIO checks. Use these when an API success alone cannot prove persistence, indexing, object state, idempotency, or cross-store convergence.
 
+Device fixtures must use the device ID issued by Identity. A second WebSocket payload using the same JWT does not create a second authenticated device; log in separately for each device. BVar reads request the brpc console representation and parse the named integer response. MinIO verification needs `MINIO_ENDPOINT` as well as the synthetic access credentials. Rate-limit correctness can initialize a test-owned exhausted bucket, while throughput belongs in Performance. Message persistence and search assertions wait for their bounded observable state rather than assuming the send response or index write implies immediate visibility.
+
 Use unique IDs for every request and collision-prone resource. Do not rely on a fixed username, message idempotency key, group name, device ID, file key, or search token shared across runs.
 
 ## Waiting and cleanup
 
 Poll the externally observable condition with a bounded deadline and useful failure message. Suitable conditions include service reachability, a WebSocket event, a database row/state, an Elasticsearch hit, a MinIO object, or an API state transition. A polling interval is allowed; a fixed delay used as proof of readiness or convergence is not.
 
-Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. CI owns `docker compose down -v` in its full-stack jobs.
+Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. Root Compose persists infrastructure through bind mounts under `middle/data`; `docker compose down -v` does not remove that state. A clean-slate test must use a fresh CI checkout or another explicitly disposable storage path and must never delete a shared tree.
 
 ## Change-to-layer matrix
 

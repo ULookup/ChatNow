@@ -75,8 +75,14 @@ public:
 
             if (!state_opt) continue;
 
-            int state_val = std::stoi(*state_opt);
-            PresenceState dev_state = static_cast<PresenceState>(state_val);
+            PresenceState dev_state = PresenceState::PRESENCE_UNSPECIFIED;
+            // Push writes enum names; retain numeric values used by older writers.
+            if (!PresenceState_Parse(*state_opt, &dev_state)) {
+                if (state_opt->size() != 1 || (*state_opt)[0] < '0' || (*state_opt)[0] > '5') {
+                    continue;
+                }
+                dev_state = static_cast<PresenceState>((*state_opt)[0] - '0');
+            }
 
             // TTL 检查
             if (last_opt) {

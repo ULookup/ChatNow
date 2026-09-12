@@ -2,14 +2,15 @@
   "_comment": "P4 媒体子系统 JSON 配置：仅 s3 + media 段；mysql/redis/etcd/listen_port 等走 gflags",
 
   "s3": {
-    "endpoint":   "http://127.0.0.1:9000",
-    "region":     "us-east-1"
+    "endpoint":        "http://127.0.0.1:19000",
+    "public_endpoint": "http://127.0.0.1:19000",
+    "region":          "us-east-1"
   },
 
   "media": {
     "public_bucket":     "chatnow-media-public",
     "private_bucket":    "chatnow-media-private",
-    "public_url_prefix": "http://127.0.0.1:9000/chatnow-media-public",
+    "public_url_prefix": "http://127.0.0.1:19000/chatnow-media-public",
     "presign_seconds":   900,
     "asr_endpoint":      "",
     "mime_whitelist": [
