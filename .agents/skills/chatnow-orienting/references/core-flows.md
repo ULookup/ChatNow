@@ -92,3 +92,7 @@ Redis authentication, dynamic reload, automatic rotation, and additional credent
 ## Architecture-change synchronization
 
 Any change to these paths, ownership boundaries, stores, protocols, topology, ordering, retry, idempotency, trust, or failure semantics must update this reference and any affected `technology-stack.md` or `repository-map.md` content in the same PR.
+
+## Disposable CI startup
+
+CI builds the nine native services once in the pinned Ubuntu builder, restores that artifact into each fresh test checkout, generates synthetic credentials, and runs Compose initialization before semantic readiness. MySQL, Redis Cluster, RabbitMQ, and MinIO initialization must converge before application services and runtime tests proceed. Existing environment files or persisted data cause test bootstrap to fail closed. Runtime results must be reported separately from static contracts.

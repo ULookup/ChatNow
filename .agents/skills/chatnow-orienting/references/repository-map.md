@@ -20,21 +20,21 @@ Verified: 2026-07-22
 | `presence/` | Presence aggregation, subscriptions, and typing coordination | `presence/source/presence_server.h`, `presence/source/presence_server.cc`, `proto/presence/presence_service.proto` |
 | `push/` | WebSocket connections, routes, cross-instance delivery, resend, client ACK ingestion | `push/source/push_server.h`, `push/source/connection.hpp`, `push/source/push_server.cc`, `proto/push/notify.proto` |
 | `odb/` | ODB entity definitions and durable relational fields | Affected entity, especially `message.hxx`, `user_timeline.hxx`, `conversation_member.hxx`, and `media_*.hxx` |
-| `conf/` | Non-secret local/container flags and JSON configuration; tracked files are not a runtime secret source | `conf/local/`, `conf/docker/`, `conf/auth.json`, `conf/media.json` |
-| `sql/` | Versioned schema migrations | `sql/V4__media.sql` and any migration matching affected ODB entities |
-| `docker/` | Separate MinIO topology and initialization; not wired into the root application network | `docker/docker-compose.yml`, `docker/minio-init/entrypoint.sh` |
-| `docker-compose.yml` | Application stack declaration; Media object-storage wiring is incomplete | Root `docker-compose.yml`, then affected `Dockerfile` and `conf/docker` file |
-| `scripts/` | Operational support and monitoring configuration | `scripts/install_aws_sdk_linux.sh`, `scripts/prometheus/redis_alerts.yml` |
+| `conf/` | Non-secret local/container flags and JSON configuration; tracked files are not a runtime secret source | `conf/local/`, `conf/docker/`, `conf/auth.json`, local `conf/media.json`, container `conf/docker/media.json` |
+| `sql/` | Versioned forward-only schema migrations for all current ODB objects | `sql/V1__core.sql`, `sql/V4__media.sql`, `scripts/init_mysql.sh` |
+| `docker/` | Reusable MinIO initialization script plus a supplemental standalone topology that is not combined with root Compose | `docker/minio-init/entrypoint.sh`, `docker/docker-compose.yml` |
+| `docker-compose.yml` | Integrated local application topology, health conditions, and one-shot convergence services | Root `docker-compose.yml`, affected `Dockerfile`, `conf/docker`, and initializer script |
+| `scripts/` | Runtime convergence/readiness, operational support, and monitoring | `scripts/init_mysql.sh`, `scripts/converge_mysql_users.sh`, `scripts/init_redis_cluster.sh`, `scripts/init_rabbitmq.py`, `scripts/wait_for_services.sh`, `scripts/prometheus/redis_alerts.yml` |
 | `tests/` | Pure-Go L1-L4 plus Redis-focused Reliability framework, clients, fixtures, cleanup, and store verification | `tests/Makefile`, `tests/config.yaml`, affected `tests/bvt`, `tests/func`, `tests/perf`, `tests/reliability`, `tests/pkg` |
-| `docs/` | Secondary architecture/API context and canonical operations guidance | `docs/operations/runtime-secrets.md`, affected `docs/api/*.yaml`, then relevant architecture documents |
+| `docs/` | Secondary architecture/API context and canonical operations guidance | `docs/operations/compose-runtime.md`, `docs/operations/runtime-secrets.md`, affected `docs/api/*.yaml`, then relevant architecture documents |
 
 ## Verified ports and infrastructure endpoints
 
-Application ports come from `conf/local`, `conf/docker`, and root `docker-compose.yml`. MinIO ports come from the separate `docker/docker-compose.yml`; this is not an integrated container endpoint map.
+Application and integrated infrastructure ports come from `conf/local`, `conf/docker`, and root `docker-compose.yml`. Published root-profile infrastructure ports bind to loopback.
 
 | Owner | Local endpoint/port | Container endpoint/port | Evidence |
 |---|---:|---:|---|
-| Gateway HTTP | `127.0.0.1:9000` | `gateway_server:9000` | `gateway_server.conf` `http_listen_port` |
+| Gateway HTTP and readiness | `127.0.0.1:9000`; unauthenticated `GET /health` | `gateway_server:9000` | `gateway_server.conf` `http_listen_port`; `GatewayServer::dependencies_ready` |
 | Media brpc | `127.0.0.1:10002` | `media_server:10002` | `media_server.conf` |
 | Identity brpc | `127.0.0.1:10003` | `identity_server:10003` | `identity_server.conf` |
 | Transmite brpc | `127.0.0.1:10004` | `transmite_server:10004` | `transmite_server.conf` |
@@ -47,14 +47,18 @@ Application ports come from `conf/local`, `conf/docker`, and root `docker-compos
 | etcd | `127.0.0.1:2379` | `etcd:2379` | all service configs |
 | MySQL | `127.0.0.1:3306` | `mysql:3306` | root Compose |
 | Redis cluster | `127.0.0.1:6379`, `:6380`-`:6384` | `redis-node1:6379`, `redis-node2:6380` through `redis-node6:6384` | root Compose; service seed flags |
-| RabbitMQ | `127.0.0.1:5672` | `rabbitmq:5672` | Transmite, Message, Push configs |
+| RabbitMQ | `127.0.0.1:5672` | `rabbitmq:5672` | Transmite, Message, Push host-only `mq_host` configs; builders append `5672` |
 | Elasticsearch | HTTP `127.0.0.1:9200`; transport `:9300` | `elasticsearch:9200`; transport `:9300` | root Compose; service configs |
-| MinIO S3 | Host `127.0.0.1:9000`, conflicting with Gateway | `minio:9000` only inside the separate MinIO Compose network | `conf/media.json`; supplemental Compose |
-| MinIO console | Host `127.0.0.1:9001`, conflicting with Push WebSocket | `minio:9001` only inside the separate MinIO Compose network | supplemental Compose |
+| MinIO S3 | `127.0.0.1:19000` for local access and presigned URLs | `minio:9000` for Media internal operations | root Compose; `conf/media.json`; `conf/docker/media.json` |
+| MinIO console | `127.0.0.1:19001` | `minio:9001` | root Compose |
 
-MySQL service configs set `mysql_port=0`, while root Compose exposes MySQL on `3306` and service entrypoints wait on `mysql:3306`; preserve that distinction when diagnosing driver defaults. Gateway's `websocket_listen_port=0` is not the client WebSocket endpoint; Push owns `ws_port=9001`.
+MySQL service configs set `mysql_port=0`, while root Compose exposes MySQL on `3306` and service entrypoints wait on `mysql:3306`; preserve that distinction when diagnosing driver defaults. Gateway's `websocket_listen_port=0` is not the client WebSocket endpoint; Push owns `ws_port=9001`. Gateway `GET /health` returns `200` only when all eight discovered business-service channels are available and returns `503` otherwise; it is not a process-only liveness response.
 
-Root Compose mounts `conf/media.json` into Media, but `s3.endpoint=http://127.0.0.1:9000` addresses the Media container itself. Root Compose has no MinIO service/dependency, while the supplemental MinIO Compose project has no declared shared external network with the root project. Do not present these declarations as a working integrated Media topology or recommend their current commands as a functional Media runtime. Any repair must explicitly reconcile the network, endpoint, dependency, and `9000`/`9001` host-port conflicts, then be verified from the affected containers.
+Root Compose mounts `conf/docker/media.json` read-only. Media uses `s3.endpoint=http://minio:9000` for server-side S3 operations and `s3.public_endpoint=http://127.0.0.1:19000` to generate URLs reachable by local host clients. `common/infra/s3_client.hpp` owns separate internal and presign clients. Do not use the loopback public endpoint for a remote deployment without replacing it with a client-reachable address.
+
+`mysql-init` applies read-only `V*.sql` migrations through `scripts/init_mysql.sh` and a checksum ledger. `V1__core.sql` plus `V4__media.sql` cover all 17 current ODB object tables; `scripts/converge_mysql_users.sh` owns the five table-scoped application identities. Redis, RabbitMQ, and MinIO use their own bounded one-shot initializers. `scripts/wait_for_services.sh` is the cross-stack semantic gate; `entrypoint.sh` is only bounded TCP prerequisite polling.
+
+Root infrastructure state is bind-mounted under `middle/data`. `docker compose down -v` does not remove that state, and CI uses a fresh runner checkout per job as its disposable storage owner. The synthetic environment helper refuses existing data. Do not claim a repeatable cold start or passing runtime gate from the source topology or static contracts.
 
 ## Runtime credential ownership
 
@@ -64,7 +68,7 @@ Current consumers at the verified commit are:
 - Conversation, Identity, Media, Message, and Relationship resolve service-specific MySQL password inputs through `common/config/secret_resolver.hpp`.
 - Transmite, Message, and Push resolve service-specific RabbitMQ password inputs through the same resolver.
 - Identity resolves its SMTP password; Media resolves separate S3 access-key and secret-key inputs. Non-secret S3 settings remain in `conf/media.json`.
-- Root Compose requires MySQL, RabbitMQ, and supplemental MinIO bootstrap values through deployment environment references. These are separate from least-privileged application inputs. Redis has no configured password or ACL consumer.
+- Root Compose requires MySQL, RabbitMQ, and MinIO bootstrap values through deployment environment references. One-shot initializers use those bootstrap inputs to converge least-privileged MySQL, RabbitMQ, and MinIO application identities; application containers consume only their own resolver inputs. Redis has no configured password or ACL consumer.
 
 Tracked runtime credential literals have been removed from the scoped source, configuration, Compose, and test-runtime surfaces. Do not reintroduce values in documentation, logs, test output, Issues, or PRs. Synthetic test-only credentials and API examples require narrow scanner exemptions rather than broad path allowlists.
 

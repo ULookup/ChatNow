@@ -17,7 +17,7 @@ Read this reference before selecting, implementing, running, or reporting a test
 | L4 Performance | `tests/perf`, `perf` | Throughput and latency baselines | `make -C tests test-perf` |
 | Reliability | `tests/reliability`, `reliability` | Redis failure injection, recovery, and Push unacked convergence | `make -C tests test-reliability` |
 
-The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, `make -C tests test-agent-policy`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content. Repository policy checks are static evidence and never substitute for a behavior RED or runtime gate.
+The current `tests/Makefile` also provides `make -C tests proto`, `make -C tests deps`, `make -C tests test-agent-policy`, and `make -C tests clean`. Run `proto` only when generated Go protobuf is required; `clean` removes generated `tests/proto/chatnow` content. Repository policy checks and `tests/pkg/contracts` Compose/runtime contracts are static evidence and never substitute for a behavior RED or runtime gate. Repository contracts do not consume a BVT/Functional case ID namespace.
 
 The Reliability target runs the complete tagged package and does not consume `TEST_RUN`. For an exact test, invoke the same tagged Go package with an anchored `-run` expression, then run `make -C tests test-reliability` for the layer regression. The current fault controller is Redis-only; there is no RabbitMQ, MySQL, arbitrary-service, or general-network controller.
 
@@ -42,6 +42,14 @@ CI runs `build` independently and builds reusable service artifacts. BVT needs `
 
 The dedicated Reliability job exists, but the inspected PR run was skipped after an upstream failure. Its existence is executable-surface evidence, not a successful runtime result.
 
+## Full-stack readiness boundary
+
+`scripts/wait_for_services.sh` is the bounded pre-suite gate for the root Compose runtime when a full-stack job or operator explicitly invokes it. It verifies Redis Cluster state and slots, all 17 ODB tables and five MySQL application users, RabbitMQ running/alarm state, Elasticsearch yellow-or-green health, MinIO readiness and both media buckets, eight exact etcd service registrations, dependency-aware Gateway `GET /health`, and Push listener reachability. The Push check is TCP reachability, not WebSocket delivery evidence.
+
+Container health, one-shot initializer completion, and the shared `entrypoint.sh` bounded TCP polling are startup prerequisites; none replaces `scripts/wait_for_services.sh`. Conversely, a passing static contract for the helper or Compose shape does not prove that any container started or that a runtime gate passed.
+
+Issue #88 integrates the Issue #78 runtime into CI. Each job owns a fresh checkout and its middle/data directory. scripts/create_test_env.py generates synthetic credentials and refuses existing state. Until a fresh run exists for the exact commit, report cold start, BVT, Functional, Reliability, and Performance as `not run` or `blocked`, not passed.
+
 ## Shared framework
 
 - `tests/pkg/client`: configuration plus shared HTTP and WebSocket clients. Use `client.NewRequestID()` and `client.NewDeviceID()` for collision-resistant request, idempotency, device, and test-data suffixes.
@@ -55,7 +63,7 @@ Use unique IDs for every request and collision-prone resource. Do not rely on a 
 
 Poll the externally observable condition with a bounded deadline and useful failure message. Suitable conditions include service reachability, a WebSocket event, a database row/state, an Elasticsearch hit, a MinIO object, or an API state transition. A polling interval is allowed; a fixed delay used as proof of readiness or convergence is not.
 
-Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. CI owns `docker compose down -v` in its full-stack jobs.
+Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. Root Compose persists infrastructure through bind mounts under `middle/data`; `docker compose down -v` does not remove that state. A clean-slate test must use an explicitly disposable storage path or the separate CI override and must never delete a shared tree.
 
 ## Change-to-layer matrix
 

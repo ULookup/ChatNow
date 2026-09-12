@@ -30,6 +30,7 @@ RUN apt-get -o Acquire::Retries=5 update \
         libodb-dev \
         libodb-mysql-dev \
         libprotobuf-dev \
+        libprotoc-dev \
         libsnappy-dev \
         libspdlog-dev \
         libssl-dev \

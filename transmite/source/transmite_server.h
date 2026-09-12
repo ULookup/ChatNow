@@ -891,7 +891,7 @@ public:
         }
         _exchange_name = exchange_name;
         _routing_key.clear();  // publisher-only：FANOUT 路由忽略 routing_key，固定空串
-        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, password, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         declare_settings settings {
             .exchange = exchange_name,
