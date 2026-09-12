@@ -80,6 +80,7 @@ Ordinary PUT URLs use the standard S3 presigner with the headers returned to the
 - Async/retry: cleanup handles stale pending, quarantine, and unreferenced object paths; client retries must preserve file/upload identifiers and completion idempotency.
 - Tests: `tests/bvt/media_test.go`, `tests/func/media_test.go`, `tests/func/concurrency_test.go`, `tests/func/scenarios_test.go`, `tests/perf/upload_test.go`, `tests/pkg/verify/minio.go`.
 - Invariants: service processes metadata rather than normal file bytes; only committed objects are downloadable; MySQL metadata/quota and MinIO object state must converge; preserve dedup and completion idempotency.
+- Deduplication shares the stored object, not the file identifier: repeated uploads receive distinct metadata references to the same bucket/object key. Functional checks must validate both the distinct references and shared bytes.
 
 ## Presence and typing
 

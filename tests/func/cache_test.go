@@ -416,30 +416,55 @@ func TestFN_CA_UnackedSameUserSeqLatestPayloadAndAck(t *testing.T) {
 
 // FN-CA-05 | healthy Redis applies the distributed message rate limit.
 func TestFN_CA_RateLimit(t *testing.T) {
-	user, peer, convID := fixture.MakeFriends(t, HTTP)
-	_ = peer
-
-	rateLimited := 0
-	for i := 0; i < 650; i++ {
-		rsp := &transmite.SendMessageRsp{}
-		err := user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
-			RequestId:      client.NewRequestID(),
-			ConversationId: convID,
-			Content: &msg.MessageContent{
-				Type: msg.MessageType_TEXT,
-				Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: fmt.Sprintf("rate-limit-%d", i)}},
-			},
-			ClientMsgId: client.NewRequestID(),
-		}, rsp)
+	user, _, convID := fixture.MakeFriends(t, HTTP)
+	// Start with an exhausted, user-owned bucket so this correctness test does
+	// not depend on load-generator throughput exceeding the refill rate.
+	key := "im:rl:user:" + user.UserID
+	verify.RedisCLI(t, "HSET", key, "tokens", "0", "ts", strconv.FormatInt(time.Now().UnixMilli(), 10))
+	verify.RedisCLI(t, "PEXPIRE", key, "120000")
+	t.Cleanup(func() { verify.RedisCLI(t, "DEL", key) })
+	const workers, requests = 8, 24
+	jobs := make(chan int, requests)
+	results := make(chan *transmite.SendMessageRsp, requests)
+	errors := make(chan error, requests)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for index := range jobs {
+				rsp := &transmite.SendMessageRsp{}
+				err := user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
+					RequestId: client.NewRequestID(), ConversationId: convID,
+					Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
+						Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: fmt.Sprintf("rate-limit-%d", index)}}},
+					ClientMsgId: client.NewRequestID(),
+				}, rsp)
+				errors <- err
+				results <- rsp
+			}
+		}()
+	}
+	for i := 0; i < requests; i++ {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	close(errors)
+	close(results)
+	for err := range errors {
 		require.NoError(t, err)
+	}
+	rateLimited := 0
+	for rsp := range results {
 		if rsp.GetHeader().GetErrorMessage() == "rate_limited" {
 			rateLimited++
+		} else {
+			require.True(t, rsp.GetHeader().GetSuccess(), rsp.GetHeader().GetErrorMessage())
 		}
 	}
-
 	require.Greater(t, rateLimited, 0, "healthy Redis must enforce the distributed rate limit")
 }
-
 func TestFN_CA_UserInfoL2AvoidsRepeatedRPC(t *testing.T) {
 	user, _, convID := fixture.MakeFriends(t, HTTP)
 	verify.RedisCLI(t, "DEL", userInfoRedisKey(user.UserID))

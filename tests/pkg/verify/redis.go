@@ -41,18 +41,29 @@ func RedisTTL(t testing.TB, key string) time.Duration {
 
 func BVar(t testing.TB, baseURL, name string) int64 {
 	t.Helper()
-	rsp, err := http.Get(fmt.Sprintf("%s/vars/%s", baseURL, name))
+	client := &http.Client{Timeout: 10 * time.Second}
+	rsp, err := client.Get(fmt.Sprintf("%s/vars/%s?console=1", baseURL, name))
 	if err != nil {
 		t.Fatalf("read bvar %s: %v", name, err)
 	}
 	defer rsp.Body.Close()
-	body, err := io.ReadAll(rsp.Body)
+	if rsp.StatusCode != http.StatusOK {
+		t.Fatalf("read bvar %s: HTTP %d", name, rsp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(rsp.Body, 65536))
 	if err != nil {
 		t.Fatalf("read bvar body %s: %v", name, err)
 	}
-	value, err := strconv.ParseInt(strings.TrimSpace(string(body)), 10, 64)
+	text := strings.TrimSpace(string(body))
+	if label, raw, found := strings.Cut(text, ":"); found {
+		if strings.TrimSpace(label) != name {
+			t.Fatalf("unexpected bvar label for %s", name)
+		}
+		text = strings.TrimSpace(raw)
+	}
+	value, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
-		t.Fatalf("parse bvar %s=%q: %v", name, body, err)
+		t.Fatalf("bvar %s did not return an integer", name)
 	}
 	return value
 }

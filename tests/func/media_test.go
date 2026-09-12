@@ -321,7 +321,7 @@ func TestFN_MD_AbortMultipart_AlreadyAborted(t *testing.T) {
 	_ = abortRsp2.Header.Success
 }
 
-// FN-MD-11 | P0 | dedup | 相同 content_hash，第二次 apply 返回 already_exists=true + 相同 file_id
+// FN-MD-11 | P0 | dedup | same hash reuses bytes with a distinct file reference.
 func TestFN_MD_ApplyUpload_Dedup_SameHash(t *testing.T) {
 	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	content := []byte("md-dedup-same-hash")
@@ -341,8 +341,12 @@ func TestFN_MD_ApplyUpload_Dedup_SameHash(t *testing.T) {
 	require.NoError(t, authed.DoAuth("/service/media/apply_upload", applyReq, applyRsp))
 	require.True(t, applyRsp.Header.Success)
 	assert.True(t, applyRsp.AlreadyExists, "相同 hash 应返回 already_exists=true")
-	assert.Equal(t, fileID, applyRsp.FileId, "dedup 应返回相同 file_id")
+	require.NotEmpty(t, applyRsp.FileId)
+	assert.NotEqual(t, fileID, applyRsp.FileId, "dedup creates a new file reference")
 	assert.Empty(t, applyRsp.UploadUrl, "dedup 时不应返回 upload_url")
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	assert.Equal(t, dbV.MediaFile(t, fileID).ObjectKey, dbV.MediaFile(t, applyRsp.FileId).ObjectKey)
 }
 
 // FN-MD-12 | P0 | quota | 超用户配额拒绝（默认 5GB，此处用大文件触发）

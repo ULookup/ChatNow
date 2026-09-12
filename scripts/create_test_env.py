@@ -25,6 +25,7 @@ def main():
     values['MYSQL_DSN'] = f"root:{values['CHATNOW_MYSQL_ROOT_PASSWORD']}@tcp(127.0.0.1:3306)/chatnow?parseTime=true"
     values['MINIO_ACCESS_KEY'] = values['CHATNOW_MEDIA_S3_ACCESS_KEY']
     values['MINIO_SECRET_KEY'] = values['CHATNOW_MEDIA_S3_SECRET_KEY']
+    values['MINIO_ENDPOINT'] = '127.0.0.1:19000'
     with os.fdopen(os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
         for name, value in values.items():
             stream.write(f"{name}='{value}'\n")
