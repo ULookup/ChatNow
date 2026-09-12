@@ -54,11 +54,12 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog
+find_package(jsoncpp CONFIG REQUIRED)
+target_link_libraries(${target} jsoncpp_lib -lgflags -lspdlog
     -lfmt -lbrpc -lssl -lcrypto
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
-    -lcpr -lelasticlient -ljsoncpp)
+    -lcpr -lelasticlient)
 
 include_directories(${CMAKE_CURRENT_BINARY_DIR})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../common)
