@@ -379,6 +379,9 @@ func TestFN_MS_SyncMessages_NotMember(t *testing.T) {
 func TestFN_MS_RecallMessage_ByNonAuthor(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
 	msgID, _ := fixture.SendTextMessage(t, alice, convID, "will-try-recall")
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, msgID, 10*time.Second)
 
 	// bob（非发送者）尝试撤回 alice 的消息
 	req := &msg.RecallMessageReq{

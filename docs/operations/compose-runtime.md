@@ -2,9 +2,9 @@
 
 Target version: `3.0-dev`
 Status: Unverified
-Reviewed: 2026-07-22
+Reviewed: 2026-09-13
 
-This is the canonical operating contract for the repository-root Compose runtime. The source and static contracts implement the topology described below, but a fresh full-stack cold start and the BVT, Functional, Reliability, and Performance gates have not been observed for this change. Do not report those dynamic gates as passing until fresh evidence exists for the exact commit.
+This is the canonical operating contract for the repository-root Compose runtime. Issue #88 has exercised cold startup, all nine native service builds, and BVT on Linux CI. Functional and Reliability have exposed unresolved failures; this profile is not a validated release deployment. PR #89 records the exact tested commits and individual gate results. Always obtain fresh evidence for the intended release pair.
 
 The root profile is a local-development runtime intended for disposable environments. It is not the production HA topology tracked by Issue #73. Issue #88 integrates CI using fresh runner checkouts, shared native service artifacts, and synthetic credentials. Existing environment files and persistent data are never overwritten by the bootstrap helper.
 
@@ -98,6 +98,8 @@ Root Compose publishes MinIO S3 on `127.0.0.1:19000` and its console on `127.0.0
 
 Gateway `/health` is dependency-aware, not a process-liveness response. It returns HTTP `200` only when the Gateway service manager currently has at least one discovered channel for each of the eight business services; it returns HTTP `503` otherwise. It does not replace the stateful infrastructure probes above.
 
+Channel presence does not prove RPC reachability after container IP changes. The current brpc channel cache can retain an old IP for a reused service hostname. Redis Cluster metadata can also retain old peer IPs after a simultaneous container restart. Do not treat a successful cold start as rolling-update or restart-recovery evidence. Keep persisted data and investigate stale discovery/cluster addresses before attempting recovery; never recreate an existing cluster merely to make readiness pass.
+
 The Push check is currently bounded TCP reachability because Push has no separate semantic health endpoint. Do not describe that individual probe as end-to-end WebSocket delivery evidence.
 
 ## Shutdown and clean-state boundary
@@ -112,4 +114,4 @@ The root profile persists infrastructure under `middle/data` through bind mounts
 
 ## Evidence required before a readiness claim
 
-Static Compose contracts, shell syntax, formatting, compilation, and `docker compose config` are supporting checks only. A full runtime claim requires fresh evidence for the exact commit from an empty disposable state, successful `scripts/wait_for_services.sh`, and the applicable Go gates. Until the follow-up CI PR supplies that evidence, report the runtime as `Unverified` and list every dynamic gate as not run or blocked.
+Static Compose contracts, shell syntax, formatting, compilation, and `docker compose config` are supporting checks only. A full runtime claim requires fresh evidence for the exact commit from an empty disposable state, successful `scripts/wait_for_services.sh`, and the applicable Go gates. Report each gate as passed, failed, blocked, or not run from its actual result. Any applicable failure keeps the release verdict `Unverified`.

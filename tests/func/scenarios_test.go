@@ -380,7 +380,7 @@ func TestScenario_MediaUploadFullFlow(t *testing.T) {
 	dlResp.Body.Close()
 	assert.Equal(t, content, body, "下载内容与上传不一致")
 
-	// Step 5: 重复 ApplyUpload（相同 hash）-> dedup 返回相同 file_id
+	// Step 5: duplicate content shares bytes through a distinct file reference.
 	applyReq2 := &media.ApplyUploadReq{
 		RequestId: client.NewRequestID(), FileName: "sc05-dup.txt",
 		FileSize: int64(len(content)), MimeType: "text/plain",
@@ -390,7 +390,12 @@ func TestScenario_MediaUploadFullFlow(t *testing.T) {
 	require.NoError(t, user.DoAuth("/service/media/apply_upload", applyReq2, applyRsp2))
 	require.True(t, applyRsp2.Header.Success)
 	assert.True(t, applyRsp2.AlreadyExists, "相同 hash 应返回 already_exists=true")
-	assert.Equal(t, fileID, applyRsp2.FileId, "dedup 应返回相同 file_id")
+	require.NotEmpty(t, applyRsp2.FileId)
+	assert.NotEqual(t, fileID, applyRsp2.FileId)
+	assert.Empty(t, applyRsp2.UploadUrl)
+	mediaDB := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer mediaDB.Close()
+	assert.Equal(t, mediaDB.MediaFile(t, fileID).ObjectKey, mediaDB.MediaFile(t, applyRsp2.FileId).ObjectKey)
 
 	// Step 6: 大文件 multipart（6MB -> 3 parts @ 2MB）
 	bigContent := make([]byte, 6*1024*1024)
@@ -596,17 +601,18 @@ func TestScenario_UnreadCountConsistency(t *testing.T) {
 
 	// Step 2: b ListConversations，验证 unread_count=3
 	listReq := &conversation.ListConversationsReq{RequestId: client.NewRequestID()}
-	listRsp := &conversation.ListConversationsRsp{}
-	require.NoError(t, b.DoAuth("/service/conversation/list", listReq, listRsp))
-	var bobConv *conversation.Conversation
-	for _, c := range listRsp.Conversations {
-		if c.ConversationId == convID {
-			bobConv = c
-			break
+	require.Eventually(t, func() bool {
+		listRsp := &conversation.ListConversationsRsp{}
+		if err := b.DoAuth("/service/conversation/list", listReq, listRsp); err != nil || !listRsp.GetHeader().GetSuccess() {
+			return false
 		}
-	}
-	require.NotNil(t, bobConv, "b 的会话列表中应包含 convID")
-	assert.Equal(t, uint64(3), bobConv.Self.UnreadCount, "b 未读数应为 3")
+		for _, c := range listRsp.Conversations {
+			if c.ConversationId == convID {
+				return c.GetSelf().GetUnreadCount() == 3
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "recipient unread count must converge to three")
 
 	// Step 3: 数据一致性 - DB unread_count=3
 	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)

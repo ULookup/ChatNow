@@ -2,7 +2,7 @@
 
 Target version: `3.0-dev`
 Status: Current
-Verified: 2026-07-22
+Verified: 2026-09-13
 
 Read this reference before selecting, implementing, running, or reporting a test. Reinspect `tests/Makefile`, `.github/workflows/ci.yml`, and the current `tests/` tree before relying on a path, target, or command; executable files are authoritative.
 
@@ -24,7 +24,10 @@ The Reliability target runs the complete tagged package and does not consume `TE
 The L0 commands currently encoded in `.github/workflows/ci.yml` are:
 
 ```bash
-mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc)
+docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
+'
 cd tests && go vet ./...
 cd tests
 unformatted=$(gofmt -l .)
@@ -40,7 +43,7 @@ These are Linux workflow commands. On another platform, report the workflow as n
 
 CI runs `build` independently and builds reusable service artifacts. BVT needs `service-artifacts`; Functional needs both `service-artifacts` and BVT; Reliability needs `service-artifacts` but does not wait for BVT. Scheduled Performance runs after Functional, while the cache-performance job depends directly on `service-artifacts`. Preserve each gate's actual dependency when changing workflows or selecting local risk checks.
 
-The dedicated Reliability job exists, but the inspected PR run was skipped after an upstream failure. Its existence is executable-surface evidence, not a successful runtime result.
+The dedicated Reliability job is executable. Its existence is not a successful runtime result; record the actual current-head result separately from BVT and Functional.
 
 ## Full-stack readiness boundary
 
@@ -56,6 +59,8 @@ Issue #88 integrates the Issue #78 runtime into CI. Each job owns a fresh checko
 - `tests/pkg/fixture`: reusable authenticated users, friendships, conversations, groups, messages, media, and WebSocket setup. Extend a fixture instead of copying setup.
 - `tests/pkg/cleanup`: stack-readiness polling and suite cleanup. `tests/bvt/setup_test.go` and `tests/func/setup_test.go` call it from `TestMain`.
 - `tests/pkg/verify`: direct MySQL, Elasticsearch, and MinIO checks. Use these when an API success alone cannot prove persistence, indexing, object state, idempotency, or cross-store convergence.
+
+Device fixtures must use the device ID issued by Identity. A second WebSocket payload using the same JWT does not create a second authenticated device; log in separately for each device. BVar reads request the brpc console representation and parse the named integer response. MinIO verification needs `MINIO_ENDPOINT` as well as the synthetic access credentials. Rate-limit correctness can initialize a test-owned exhausted bucket, while throughput belongs in Performance. Message persistence and search assertions wait for their bounded observable state rather than assuming the send response or index write implies immediate visibility.
 
 Use unique IDs for every request and collision-prone resource. Do not rely on a fixed username, message idempotency key, group name, device ID, file key, or search token shared across runs.
 

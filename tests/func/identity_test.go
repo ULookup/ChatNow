@@ -506,7 +506,7 @@ func TestFN_ID_UpdateProfileAvatarUpload(t *testing.T) {
 	}
 	rsp := &identity.UpdateProfileRsp{}
 	require.NoError(t, authed.DoAuth("/service/identity/update_profile", req, rsp))
-	require.True(t, rsp.Header.Success)
+	require.True(t, rsp.Header.Success, "update profile: code=%d message=%s", rsp.Header.ErrorCode, rsp.Header.ErrorMessage)
 	require.NotNil(t, rsp.UserInfo)
 	require.NotEmpty(t, rsp.UserInfo.AvatarUrl)
 	assert.True(t, strings.HasSuffix(rsp.UserInfo.AvatarUrl, "/avatar/"+fileID))

@@ -84,6 +84,6 @@ func LoginUser(t testing.TB, c *client.HTTPClient, username, password string) *c
 	authed.AccessToken = rsp.Tokens.AccessToken
 	authed.RefreshToken = rsp.Tokens.RefreshToken
 	authed.UserID = rsp.UserInfo.UserId
-	authed.DeviceID = client.NewDeviceID()
+	authed.DeviceID = req.DeviceId
 	return authed
 }
