@@ -491,43 +491,35 @@ func TestScenario_MessageReliability(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 7: Multi-Device Login Kick
-// SC-07 | P1 | scenario | 多设备登录：设备 A 登录 -> 设备 B 登录 -> A 被踢 -> A token 失效
+// Scenario 7: Multi-device coexistence
+// SC-07 | P1 | scenario | both devices remain authenticated and receive messages.
 // ---------------------------------------------------------------------------
 
 func TestScenario_MultiDeviceLogin(t *testing.T) {
-	// 先注册用户（LoginUser 要求用户已存在）
-	username := "sc07_user_" + client.NewRequestID()[:8]
-	password := "Sc07@123456"
-
-	regReq := &identity.RegisterReq{
-		RequestId: client.NewRequestID(),
-		Credential: &identity.RegisterReq_UsernamePwd{
-			UsernamePwd: &identity.UsernamePassword{Username: username, Password: password},
-		},
-		Nickname: username,
-	}
-	require.NoError(t, HTTP.DoNoAuth("/service/identity/register", regReq, &identity.RegisterRsp{}))
-
-	// 设备 A 登录
+	_, username, password := fixture.RegisterAndLogin(t, HTTP)
 	deviceA := fixture.LoginUser(t, HTTP, username, password)
-	require.NotEmpty(t, deviceA.AccessToken)
-
-	// 验证 A 能调 API
-	profileReq := &identity.GetProfileReq{RequestId: client.NewRequestID()}
-	require.NoError(t, deviceA.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}))
-
-	// 设备 B 登录同用户
+	wsA := fixture.ConnectWS(t, deviceA)
 	deviceB := fixture.LoginUser(t, HTTP, username, password)
-	require.NotEmpty(t, deviceB.AccessToken)
-	require.NotEqual(t, deviceA.AccessToken, deviceB.AccessToken, "B 的 token 应不同于 A")
-
-	// 设备 A 的 token 应失效（被踢）
-	err := deviceA.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{})
-	assert.Error(t, err, "设备 A 被踢后 token 应失效")
-
-	// 设备 B 仍可调 API
-	require.NoError(t, deviceB.DoAuth("/service/identity/get_profile", profileReq, &identity.GetProfileRsp{}))
+	wsB := fixture.ConnectWS(t, deviceB)
+	require.NotEqual(t, deviceA.AccessToken, deviceB.AccessToken)
+	require.NotEqual(t, deviceA.DeviceID, deviceB.DeviceID)
+	for _, device := range []*client.HTTPClient{deviceA, deviceB} {
+		rsp := &identity.GetProfileRsp{}
+		require.NoError(t, device.DoAuth("/service/identity/get_profile", &identity.GetProfileReq{RequestId: client.NewRequestID()}, rsp))
+		require.True(t, rsp.GetHeader().GetSuccess())
+		require.Equal(t, deviceA.UserID, rsp.GetUserInfo().GetUserId())
+	}
+	peer, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	convID := fixture.CreateGroupWithMembers(t, deviceA, []*client.HTTPClient{peer}, "multi-device-delivery")
+	marker := "multi-device-" + client.NewRequestID()
+	fixture.SendTextMessage(t, peer, convID, marker)
+	for _, ws := range []*client.WSClient{wsA, wsB} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		notify, err := ws.WaitForNotify(ctx, int32(push.NotifyType_CHAT_MESSAGE_NOTIFY))
+		cancel()
+		require.NoError(t, err, "each authenticated device must receive the message")
+		require.Equal(t, marker, notify.GetNewMessageInfo().GetMessageInfo().GetContent().GetText().GetText())
+	}
 }
 
 // ---------------------------------------------------------------------------

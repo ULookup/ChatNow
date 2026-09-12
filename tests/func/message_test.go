@@ -396,12 +396,17 @@ func TestFN_MS_RecallMessage_ByNonAuthor(t *testing.T) {
 	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")
 }
 
-// FN-MS-10 | P0 | error path | 删除他人消息应失败
-func TestFN_MS_DeleteMessages_NotOwned(t *testing.T) {
+// FN-MS-10 | P0 | isolation | deleting a received message affects only the caller.
+func TestFN_MS_DeleteMessages_OnlyOwnTimeline(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
 	msgID, _ := fixture.SendTextMessage(t, alice, convID, "will-try-delete")
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, msgID, 10*time.Second)
+	verifier.UserTimelineExists(t, alice.UserID, convID, 1)
+	verifier.UserTimelineExists(t, bob.UserID, convID, 1)
 
-	// bob 尝试删除 alice 的消息
+	// Bob removes his own view of Alice's message.
 	req := &msg.DeleteMessagesReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
@@ -410,8 +415,17 @@ func TestFN_MS_DeleteMessages_NotOwned(t *testing.T) {
 	rsp := &msg.DeleteMessagesRsp{}
 	err := bob.DoAuth("/service/message/delete", req, rsp)
 	require.NoError(t, err)
-	require.False(t, rsp.Header.Success, "删除他人消息应失败")
-	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")
+	require.True(t, rsp.GetHeader().GetSuccess())
+	verifier.UserTimelineExists(t, bob.UserID, convID, 0)
+	verifier.UserTimelineExists(t, alice.UserID, convID, 1)
+	verifier.MessageExists(t, msgID)
+	verifier.MessageStatus(t, msgID, 0)
+	outsider, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	denied := &msg.DeleteMessagesRsp{}
+	require.NoError(t, outsider.DoAuth("/service/message/delete", req, denied))
+	require.False(t, denied.GetHeader().GetSuccess())
+	require.Equal(t, int32(3002), denied.GetHeader().GetErrorCode())
+	verifier.UserTimelineExists(t, alice.UserID, convID, 1)
 }
 
 // FN-MS (untested) | P0 | SelectByClientMsgId 查询存在

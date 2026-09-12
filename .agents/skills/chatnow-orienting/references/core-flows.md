@@ -2,9 +2,11 @@
 
 Target version: `3.0-dev`
 Status: Current
-Verified: 2026-07-22
+Verified: 2026-09-13
 
 These are current-state flows for the `3.0-dev` line. Re-verify affected symbols at the target commit and keep proposals in a separate section.
+
+The release contract confirmed on 2026-09-13 preserves concurrent authenticated devices for one account. Logging in on another device must not invalidate the earlier device merely because it is newer. `DeleteMessages` removes only the authenticated caller's timeline references; it does not recall the shared message or remove another user's history. SC-07 and FN-MS-10 verify these boundaries with real sessions and persisted timelines.
 
 ## HTTP request flow
 
