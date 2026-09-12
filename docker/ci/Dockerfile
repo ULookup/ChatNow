@@ -178,3 +178,8 @@ RUN printf '%s\n' '/usr/local/lib' '/usr/local/lib64' > /etc/ld.so.conf.d/chatno
     && ldconfig
 
 WORKDIR /workspace
+
+# Ubuntu's ODB compiler invokes the GCC version it was packaged with.
+RUN apt-get -o Acquire::Retries=5 update \
+    && apt-get -o Acquire::Retries=5 install -y --no-install-recommends g++-12 \
+    && rm -rf /var/lib/apt/lists/*
