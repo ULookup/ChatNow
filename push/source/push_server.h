@@ -596,7 +596,7 @@ private:
         try {
             std::string k = key::presence_device_key(uid, did);
             const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
-            auto pipe = _redis->pipeline();
+            auto pipe = _redis->pipeline(k);
             pipe.hset(k, "state", "ONLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -612,7 +612,7 @@ private:
         try {
             std::string k = key::presence_device_key(uid, did);
             const auto effective_ttl = randomized_ttl(std::chrono::seconds(kPresenceTtlSec));
-            auto pipe = _redis->pipeline();
+            auto pipe = _redis->pipeline(k);
             pipe.hset(k, "state", "OFFLINE");
             pipe.hset(k, "last_active_at_ms", std::to_string(
                 std::chrono::duration_cast<std::chrono::milliseconds>(

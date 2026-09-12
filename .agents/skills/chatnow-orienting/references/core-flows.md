@@ -71,6 +71,8 @@ Redis authentication, dynamic reload, automatic rotation, and additional credent
 
 **Flow:** Apply/init -> presigned MinIO upload -> complete -> MySQL metadata/quota -> authenticated download request -> presigned MinIO GET.
 
+Ordinary PUT URLs use the standard S3 presigner with the headers returned to the client, without implicit SSE-C headers. `use_path_style` disables AWS virtual addressing for internal MinIO hostnames; internal object verification and public presigning can use different endpoints.
+
 - Entry/contracts: Gateway Media routes; `proto/media/media_service.proto`; `media/source/media_server.h`; `media/source/upload_handler.hpp`; `media/source/multipart_handler.hpp`; `media/source/download_handler.hpp`.
 - Stores: MinIO holds bytes; MySQL holds `media_file`, blob-ref/dedup, multipart, and per-user quota state; Redis coordinates cleanup/locks where implemented.
 - Boundaries: clients upload/download directly with short-lived presigned URLs. Apply validates size/MIME/hash/quota and records pending metadata; complete verifies object existence/size, converges dedup/refcount/quota, and is idempotent for committed files.
@@ -82,6 +84,8 @@ Redis authentication, dynamic reload, automatic rotation, and additional credent
 ## Presence and typing
 
 **Flow:** Push WebSocket lifecycle -> Redis presence/routes -> Presence aggregation/subscriptions -> Presence or Push notification -> WebSocket.
+
+Push routes each per-device write pipeline by its Redis key and stores enum names (`ONLINE`/`OFFLINE`). Presence accepts those names and legacy numeric enum values; malformed states are ignored. Registration alone does not create an online connection. BVT-018 opens an authenticated socket before asserting ONLINE.
 
 - Entry/contracts: `push/source/push_server.h`; `proto/presence/presence_service.proto`; `presence/source/presence_server.h`; `proto/push/notify.proto`.
 - Ownership: Push owns connections and route binding, writes per-device online/offline/heartbeat TTL state, and emits lifecycle notifications. Presence aggregates Redis device state, manages subscription sets and typing TTLs, and calls Push for delivery.

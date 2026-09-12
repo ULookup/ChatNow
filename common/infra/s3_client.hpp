@@ -68,7 +68,7 @@ public:
                 Aws::Auth::AWSCredentials(o.access_key, o.secret_key),
                 cfg,
                 Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
-                o.use_path_style);
+                !o.use_path_style);
         };
 
         _client = make_client(o.endpoint);
@@ -83,8 +83,8 @@ public:
                               const std::map<std::string, std::string>& headers) const {
         Aws::Http::HeaderValueCollection h;
         for (const auto& kv : headers) h.emplace(kv.first, kv.second);
-        auto url = _presign_client->GeneratePresignedUrlWithSSEC(
-            bucket, key, Aws::Http::HttpMethod::HTTP_PUT, h, /*sseKey*/"", seconds);
+        auto url = _presign_client->GeneratePresignedUrl(
+            bucket, key, Aws::Http::HttpMethod::HTTP_PUT, h, seconds);
         if (url.empty()) throw_failed("presigned_put empty url");
         return url;
     }
