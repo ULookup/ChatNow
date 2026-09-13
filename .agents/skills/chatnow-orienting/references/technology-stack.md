@@ -2,7 +2,7 @@
 
 Target version: `3.0-dev`
 Status: Current
-Verified: 2026-07-22
+Verified: 2026-09-13
 
 Use this reference for the `3.0-dev` architecture line, then verify task-sensitive details at the resolved commit.
 
@@ -31,6 +31,8 @@ Use this reference for the `3.0-dev` architecture line, then verify task-sensiti
 The CI Reliability job selects `tests/compose/reliability.yml` in addition to root Compose. That isolated test-only network has explicit IPAM so the Identity endpoint fault can request and restore IPv4 addresses on supported Docker Engine versions; it does not change the normal development network. See the testing framework for subnet overrides and preflight behavior.
 
 `common/mq/channel.hpp` uses direct brpc initialization for numeric endpoints and `Init("http://<hostname>:<port>", "rr", options)` for DNS endpoints. Here `http://` selects the DNS naming service, not the wire protocol: internal RPC remains `baidu_std`. The pinned brpc implementation refreshes DNS every five seconds by default (`ns_access_interval`), including when the etcd registration string is unchanged. Connection timeout, RPC timeout and retry limits remain in `ServiceChannel`; literal IPv4/IPv6 endpoints keep the existing direct path. References: [brpc client naming services](https://brpc.apache.org/docs/client/basics/), [pinned periodic refresh implementation](https://github.com/apache/brpc/blob/041cec5fb84a5b4458bac6275ea7d34e048bc3f1/src/brpc/periodic_naming_service.cpp).
+
+`Registry` in `common/infra/etcd.hpp` owns registration recovery. The pinned [etcd-cpp KeepAlive implementation](https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3/blob/ba6216385fc332b23d95683966824c2b86c2474e/src/KeepAlive.cpp) waits `ttl - 1` between renewals and stops after a terminal error. Registry therefore grants the actual 30-second lease separately and supplies a ten-second renewal cadence parameter (nine-second waits) with that lease ID. The callback only stores a lease-specific atomic failure flag; a separate worker cancels the old keeper, creates a new lease, and republishes the remembered key/value. It does not call `Check()` concurrently with the keeper or join from the callback. Network calls have two-second deadlines and recovery attempts have a one-second interval. `unregister()` is idempotent and permanently disables this Registry, joins recovery, and revokes the owned lease rather than deleting an unconditionally named key. Wire contracts, key paths, registration values and lease TTL are unchanged; older instances still lack recovery until upgraded.
 
 The root CMake project adds all nine services. The CI-equivalent build is:
 
@@ -76,7 +78,7 @@ The current test framework is entirely Go. New or restored C++ test suites are p
 | L4 Performance | `tests/perf`, `perf` | `cd tests && make proto && make test-perf` |
 | Reliability | `tests/reliability`, `reliability` | `cd tests && make proto && make test-reliability` |
 
-Reliability is an executable, Redis-focused layer. Its current tests exercise Redis circuit recovery and Push unacked requeue behavior through `tests/pkg/chaos/redis.go`. The Make target runs the whole layer and does not consume `TEST_RUN`; use a direct tagged `go test ... -run` command when exact selection is required. No current controller covers RabbitMQ, MySQL, arbitrary services, or general network faults, so do not describe this as a broad chaos platform.
+Reliability exercises Redis circuit recovery and Push unacked requeue, a scoped Identity endpoint move, Message stop/start, and Identity lease expiry through the controllers in `tests/pkg/chaos`. The lease controller suspends Identity until its exact registration disappears, then resumes the same process; it requires account RPC recovery without restarting Identity, Gateway or Transmite. The Make target runs the whole layer and does not consume `TEST_RUN`; use a direct tagged `go test ... -run` command when exact selection is required. No current controller covers RabbitMQ, MySQL, arbitrary services, or general network faults.
 
 The CI definition has a dedicated `reliability` job that depends on `service-artifacts`, independently of BVT. The job uses a dedicated test stack with bounded RL-05 limits. Report the actual current-head runtime result; the existence of a job is not green runtime evidence. Shared clients, fixtures, polling, cleanup, and direct store verification live under `tests/pkg`.
 
