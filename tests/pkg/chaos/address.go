@@ -111,40 +111,59 @@ func ChangeIdentityAddress(t testing.TB, cfg *client.Config) func() {
 			used[p.Addr()] = true
 		}
 	}
+	if !subnet.IsValid() || !subnet.Addr().Is4() {
+		t.Fatal("no IPv4 subnet covers the isolated Identity endpoint")
+	}
+	last := subnet.Addr().As4()
+	for bit := subnet.Bits(); bit < 32; bit++ {
+		last[bit/8] |= 1 << (7 - bit%8)
+	}
+	// Prefer the high end, away from normal low-address Compose allocation.
+	// Network inspection can omit reservations held by stopped containers, so
+	// Docker's actual allocation probe remains authoritative.
+	candidate := netip.AddrFrom4(last).Prev()
 	var replacement netip.Addr
-	for ip, count := subnet.Addr().Next(), 0; subnet.IsValid() && subnet.Contains(ip) && count < 65536; ip, count = ip.Next(), count+1 {
-		if !used[ip] && subnet.Contains(ip.Next()) {
-			replacement = ip
-			break
-		}
-	}
-	if !replacement.IsValid() {
-		t.Fatal("no unused address in the isolated Compose network")
-	}
 	// Older Docker engines reject explicit IPs on auto-allocated subnets. Prove
 	// support with an inert, test-owned endpoint before touching the live service.
 	// No credentials or application entrypoint are copied into the probe.
-	out, err = dockerAddress(cfg, "create", "--network", networkID, "--ip", replacement.String(),
-		"--entrypoint", "/bin/true", identity.Image)
-	if err != nil {
-		t.Fatalf("address fault needs a user configured subnet (tests/compose/reliability.yml): %v", err)
-	}
-	probeID := strings.TrimSpace(string(out))
-	probeRemoved := false
-	t.Cleanup(func() {
-		if !probeRemoved {
-			if _, e := dockerAddress(cfg, "rm", "--force", probeID); e != nil {
-				t.Errorf("remove address capability probe: %v", e)
-			}
+	for attempt := 0; attempt < 16; attempt++ {
+		for subnet.Contains(candidate) && candidate != subnet.Addr() && used[candidate] {
+			candidate = candidate.Prev()
 		}
-	})
-	if _, err = dockerAddress(cfg, "start", "--attach", probeID); err != nil {
-		t.Fatalf("address fault needs a user configured subnet (tests/compose/reliability.yml): %v", err)
+		if !subnet.Contains(candidate) || candidate == subnet.Addr() {
+			break
+		}
+		used[candidate] = true
+		out, probeErr := dockerAddress(cfg, "create", "--network", networkID, "--ip", candidate.String(),
+			"--entrypoint", "/bin/true", identity.Image)
+		if probeErr == nil {
+			probeID := strings.TrimSpace(string(out))
+			probeRemoved := false
+			t.Cleanup(func() {
+				if !probeRemoved {
+					if _, e := dockerAddress(cfg, "rm", "--force", probeID); e != nil {
+						t.Errorf("remove address capability probe: %v", e)
+					}
+				}
+			})
+			_, probeErr = dockerAddress(cfg, "start", "--attach", probeID)
+			if _, e := dockerAddress(cfg, "rm", "--force", probeID); e != nil {
+				t.Fatalf("release address capability probe: %v", e)
+			}
+			probeRemoved = true
+		}
+		if probeErr == nil {
+			replacement = candidate
+			break
+		}
+		if !strings.Contains(strings.ToLower(probeErr.Error()), "address already in use") {
+			t.Fatalf("address fault needs a user configured subnet (tests/compose/reliability.yml), candidate %s: %v", candidate, probeErr)
+		}
+		t.Logf("Docker reserves candidate %s; probing another address", candidate)
 	}
-	if _, err = dockerAddress(cfg, "rm", "--force", probeID); err != nil {
-		t.Fatalf("release address capability probe: %v", err)
+	if !replacement.IsValid() {
+		t.Fatal("no reservable address found within 16 probes of the isolated Compose network")
 	}
-	probeRemoved = true
 	connect := func(ip string) error {
 		args := []string{"network", "connect", "--ip", ip}
 		for _, alias := range aliases {
