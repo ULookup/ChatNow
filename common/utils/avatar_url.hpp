@@ -18,7 +18,7 @@
  *
  * 输入参数：
  *   - public_url_prefix：来自 conf/media.json `media.public_url_prefix`，
- *     例如 "http://127.0.0.1:9000/chatnow-media-public" 或 "https://cdn.example.com"。
+ *     例如 "http://127.0.0.1:19000/chatnow-media-public" 或 "https://cdn.example.com"。
  *   - file_id：snowflake 16 hex（见 file/source/upload_handler.hpp）。
  */
 

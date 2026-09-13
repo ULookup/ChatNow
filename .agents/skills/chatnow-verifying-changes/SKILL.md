@@ -32,7 +32,7 @@ Inspect the current `tests/Makefile`, `.github/workflows/ci.yml`, and test tree 
 | 3 | Target test | Run the smallest exact test that proves the changed behavior. |
 | 4 | Same-layer regression | Run the affected package or complete layer after the target passes. |
 | 5 | BVT, Functional, Scenario | Run each applicable correctness gate; record them separately rather than collapsing them into "tests." |
-| 6 | Performance, Reliability | Run the risk-relevant layer. Reliability is reserved in the current architecture: inspect for an executable surface, but never invent a directory, tag command, Make target, or successful run. |
+| 6 | Performance, Reliability | Run the risk-relevant layer. Redis-focused Reliability is executable through `make -C tests test-reliability`; inspect the current fault controller and report uncovered fault categories without inventing commands or successful runs. |
 | 7 | CI | Record the current commit's actual workflow and job results; an old green run is not evidence for the current commit. |
 
 Do not skip a lower rung because a higher rung passed. A broad check does not replace the exact target result, and a target pass does not replace regressions.
@@ -58,7 +58,7 @@ Use statuses literally:
 - `not run`: it was not executed or does not apply; state which and why. Never attach a predicted outcome.
 - `blocked`: it is required and applicable, but an unavailable tool, service, credential, platform, or environment prevented execution; name the blocker and the exact command that remains.
 
-For CI, include the commit SHA, workflow/run identity, job results, and failing or pending details. For an unavailable reserved Reliability layer, leave `Command` as `No executable command exists in the current repository`, set `not run`, and explain whether its absence is a readiness gap for this change.
+For CI, include the commit SHA, workflow/run identity, job results, and failing or pending details. For a required fault category without an executable controller, leave `Command` as `No executable command exists for this fault category`, set `not run`, and explain the readiness gap. Do not use that exception to omit the existing Redis Reliability gate.
 
 Do not replace full output with "clean," "looks good," a success count, an agent summary, or "see above." Preserve the exact command, exit status, and complete stdout/stderr in the verification evidence or an identified durable log artifact.
 

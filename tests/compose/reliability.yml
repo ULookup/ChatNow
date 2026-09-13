@@ -1,0 +1,7 @@
+# Use only with an isolated disposable Reliability stack. Explicit IPAM keeps
+# endpoint move/restore operations supported across Docker Engine versions.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${CHATNOW_RELIABILITY_SUBNET:-172.30.97.0/24}
