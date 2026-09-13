@@ -22,6 +22,8 @@ The release contract confirmed on 2026-09-13 preserves concurrent authenticated 
 
 ## Message send and delivery
 
+Worker ownership failure (`3.0-dev`, 2026-09-13, Current): `TransmiteServer::start` polls the selected worker allocator once per second. After it reports loss, the watchdog writes the fixed stderr diagnostic `worker_lease_lost action=exit code=1` and calls `std::_Exit(EXIT_FAILURE)` to stop every thread. It does not wait for registry network calls, RPC draining, destructors, or async logging; the existing ownership detection policy remains unchanged. A surviving stale registration expires within its existing 30-second lease or is replaced by the restarted process. This is a fail-stop, not graceful request completion or proof of instantaneous lease-expiry detection. Container restart reacquires a worker before serving. RL-WORKER-01 revokes the isolated stack's sole worker lease and records the original process's exit, diagnostic, and recovery across subsequent watchdog cycles. The previous `abort()` path was observed as two SIGABRT deliveries followed by SIGSEGV at libc's `hlt` fallback while the service was container PID 1; exit code 139 alone is not evidence of a memory corruption in this path.
+
 **Flow:** Client -> Gateway -> Transmite -> RabbitMQ message exchange -> Message/MySQL -> RabbitMQ push queue -> Push -> WebSocket.
 
 - Entry/contracts: Gateway `/service/transmite/send`; `proto/transmite/transmite_service.proto`; `proto/message/message_internal.proto`; `proto/push/notify.proto`.

@@ -28,6 +28,8 @@ Reliability has an executable Compose gate in `tests/reliability` (`make -C test
 
 ## Allocation procedure
 
+`RL-WORKER-01` is allocated to `tests/reliability/worker_test.go` for explicit process fencing after worker lease revocation, including container PID 1 exit diagnostics and delayed recovery observation. Allocation is not a test-pass claim.
+
 1. Inspect the current tree immediately before allocation. Search test source, comments, documentation, and the diff for the exact namespace; do not rely on this catalog to identify availability.
 2. Confirm that the behavior is not already represented under another ID.
 3. Format Functional numbers as zero-padded two-digit values `01` through `99`, matching the current executable tests (for example, `FN-ID-08`, `FN-MD-20`, and `FN-DC-07`). Choose the lowest unused number after considering concurrent reservations. If a Functional namespace reaches `99`, stop and update this catalog deliberately instead of silently widening the ID. For Reliability, choose the lowest unused category number after considering concurrent reservations. For bounded BVT, Scenario, and Performance namespaces, use only a free ID within the stated range.

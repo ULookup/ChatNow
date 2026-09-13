@@ -32,6 +32,8 @@
 #include "transmite/transmite_service.pb.h"
 #include <butil/logging.h>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 
 DECLARE_int32(rate_limit_user_max);
 DECLARE_int32(rate_limit_session_max);
@@ -786,11 +788,8 @@ public:
         if(_watchdog_thread.joinable()) _watchdog_thread.join();
     }
 
-    /* M4: 搭建RPC服务器，并启动服务器
-     *  - 启动 lease_lost watchdog：每 1s 轮询 worker_id 租约状态，
-     *    一旦发现租约丢失（其他实例占走了同一 worker_id），主动停服 + abort，
-     *    避免 SnowflakeId 用已被别人占据的 worker_id 继续发号产生重号。
-     */
+    // Poll worker ownership every second and terminate the entire process on
+    // loss. An in-flight handler must not keep allocating IDs under that worker.
     void start() {
         if(_worker_allocator || _etcd_worker_allocator) {
             _watchdog_running.store(true);
@@ -800,13 +799,12 @@ public:
                     if (_worker_allocator) lost = _worker_allocator->lease_lost();
                     if (!lost && _etcd_worker_allocator) lost = _etcd_worker_allocator->lease_lost();
                     if (lost) {
-                        // brpc Stop(0) 不会打断 in-flight handler；
-                        // 在 worker_id 已被别人占走的状态下，每多发一个雪花 ID 都
-                        // 必然撞向对端实例，污染 message 主键唯一约束。
-                        // → 唯一正确语义：立刻 abort，让所有 bthread 一起死。
-                        LOG_ERROR("worker_id 租约丢失，立即 abort 防雪花 ID 重号");
-                        try { if(_reg_client) _reg_client->unregister(); } catch(...) {}
-                        std::abort();
+                        // abort() can fall through to SIGSEGV as container PID 1.
+                        // Do not wait for network unregister or destructors while
+                        // RPC handlers can still mint IDs. Registry TTL/restart
+                        // handles the stale registration after this fail-stop.
+                        std::fputs("worker_lease_lost action=exit code=1\n", stderr);
+                        std::_Exit(EXIT_FAILURE);
                     }
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
