@@ -24,7 +24,7 @@ Case IDs are stable identities, not completion claims. Put the ID in the case co
 | Performance | `PF-01` through `PF-08` |
 | Reliability | `RL-<category>-<number>` |
 
-Reliability is a distinct reserved namespace and layer. The current tree has no executable Reliability suite; reserving an ID never authorizes inventing a directory, target, command, or successful run.
+Reliability has an executable Compose gate in `tests/reliability` (`make -C tests test-reliability`). The existing RL-05 category contains circuit recovery and Push persistence cases; new cases use the category-number allocation below. A reserved ID is never evidence of a successful run.
 
 ## Allocation procedure
 
@@ -37,6 +37,10 @@ Reliability is a distinct reserved namespace and layer. The current tree has no 
 A reservation means only "claimed for coordination." It does not mean the test exists, compiles, ran, passed, covers the behavior, or is ready to merge. Remove an abandoned reservation or make its unimplemented status explicit in the owning work item.
 
 ## Naming and comments
+
+RL-DISCOVERY-01 is allocated to `TestRL_DiscoveryRecoversAfterIdentityAddressChange` for Issue #97. It covers automatic RPC recovery after changing an isolated Compose Identity endpoint's IPv4 address, without restarting callers. The allocation alone is not passing evidence.
+
+FN-AM-07 is allocated to `TestFN_AM_ExpiredJWTClassification` in `tests/func/jwt_expiry_test.go` for Issue #28. It covers signed JWT expiration classification and rejection controls through Identity and Gateway. Its synthetic signing fixture is `tests/pkg/fixture/jwt.go`; execution requires the isolated stack's synthetic `CHATNOW_JWT_CONFIG`. The case ID alone is not a passing verification result.
 
 Use a descriptive Go identifier such as `TestFN_MS_UpdateReadAck_Idempotent`, `TestScenario_MessageSearchES`, or `BenchmarkSendMessage`. Place a concise English case comment immediately above it. This example is an existing BVT identity, not a new reservation:
 

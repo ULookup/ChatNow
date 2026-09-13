@@ -1,6 +1,7 @@
 package chaos
 
 import (
+	"context"
 	"os/exec"
 	"strings"
 	"testing"
@@ -16,7 +17,9 @@ var redisServices = []string{
 
 func compose(t testing.TB, cfg *client.Config, args ...string) {
 	t.Helper()
-	cmd := exec.Command("docker", append([]string{"compose"}, args...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, args...)...)
 	cmd.Dir = cfg.Infra.ComposeDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("docker compose %v: %v: %s", args, err, out)
@@ -29,6 +32,16 @@ func StopRedisCluster(t testing.TB, cfg *client.Config) {
 
 func StartRedisCluster(t testing.TB, cfg *client.Config) {
 	compose(t, cfg, append([]string{"start"}, redisServices...)...)
+}
+
+// Pause preserves the container network and DNS while Redis stops answering.
+// This isolates socket timeout/circuit behavior from Docker DNS withdrawal.
+func PauseRedisCluster(t testing.TB, cfg *client.Config) {
+	compose(t, cfg, append([]string{"pause"}, redisServices...)...)
+}
+
+func UnpauseRedisCluster(t testing.TB, cfg *client.Config) {
+	compose(t, cfg, append([]string{"unpause"}, redisServices...)...)
 }
 
 func WaitRedisCluster(t testing.TB, cfg *client.Config, timeout time.Duration) {

@@ -62,6 +62,14 @@ inline bool is_redis_pool_wait_error(const sw::redis::Error &error) noexcept {
     return true;
 }
 
+inline bool is_redis_availability_error(const sw::redis::Error &error) noexcept {
+    if (is_redis_pool_wait_error(error)) return true;
+    // Pinned redis++ wraps exhausted topology-refresh attempts in a base Error.
+    // Keep command ReplyError/WRONGTYPE and other typed errors out of the breaker.
+    return typeid(error) == typeid(sw::redis::Error) &&
+           std::string_view(error.what()) == "Failed to update shards info";
+}
+
 class RedisPipeline {
 public:
     RedisPipeline(sw::redis::Pipeline pipeline,
@@ -128,7 +136,7 @@ public:
             settle_success_();
             throw;
         } catch (const sw::redis::Error &error) {
-            if (is_redis_pool_wait_error(error)) record_connection_failure_();
+            if (is_redis_availability_error(error)) record_connection_failure_();
             else abandon_();
             throw;
         } catch (...) {
@@ -153,7 +161,7 @@ private:
             record_connection_failure_();
             throw;
         } catch (const sw::redis::Error &error) {
-            if (is_redis_pool_wait_error(error)) record_connection_failure_();
+            if (is_redis_availability_error(error)) record_connection_failure_();
             else abandon_();
             throw;
         } catch (...) {
@@ -343,7 +351,7 @@ public:
             record_success_(permit);
             throw;
         } catch (const sw::redis::Error &error) {
-            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            if (is_redis_availability_error(error)) record_connection_failure_(permit);
             else abandon_(permit);
             throw;
         } catch (...) {
@@ -436,7 +444,7 @@ private:
             record_success_(permit);
             throw;
         } catch (const sw::redis::Error &error) {
-            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            if (is_redis_availability_error(error)) record_connection_failure_(permit);
             else abandon_(permit);
             throw;
         } catch (...) {
@@ -461,7 +469,7 @@ private:
             record_success_(permit);
             throw;
         } catch (const sw::redis::Error &error) {
-            if (is_redis_pool_wait_error(error)) record_connection_failure_(permit);
+            if (is_redis_availability_error(error)) record_connection_failure_(permit);
             else abandon_(permit);
             throw;
         } catch (...) {
@@ -954,6 +962,7 @@ public:
         } catch(std::exception &e) {
             LOG_ERROR("Members.list_snapshot 失败 {}: {}", ssid, e.what());
             snap.stable = false;
+            snap.version = kUnknownCacheVersion;
         }
         return snap;
     }

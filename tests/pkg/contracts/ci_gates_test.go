@@ -202,6 +202,9 @@ func TestCIGates(t *testing.T) {
 	require.Equal(t, "service-artifacts", reliability.Needs)
 	require.Equal(t, "github.event_name == 'pull_request' || github.event_name == 'schedule'", reliability.If)
 
+	require.Equal(t, "8", gateEnv(t, reliability, "TRANSMITE_RATE_LIMIT_USER_MAX"))
+	require.Equal(t, "40", gateEnv(t, reliability, "TRANSMITE_RATE_LIMIT_SESSION_MAX"))
+
 	perfCache, ok := workflow.Jobs["perf-cache"]
 	require.True(t, ok, "PF-09 must have a dedicated perf-cache job")
 	require.Equal(t, "service-artifacts", perfCache.Needs)

@@ -28,8 +28,13 @@ class DownloadHandler {
 public:
     DownloadHandler(std::shared_ptr<S3Client>       s3,
                     std::shared_ptr<MediaFileTable> files,
-                    int                             presign_seconds)
-        : _s3(std::move(s3)), _files(std::move(files)), _presign(presign_seconds) {}
+                    int                             presign_seconds,
+                    std::string public_bucket, std::string public_url_prefix)
+        : _s3(std::move(s3)), _files(std::move(files)), _presign(presign_seconds),
+          _public_bucket(std::move(public_bucket)), _public_url_prefix(std::move(public_url_prefix)) {
+        while (!_public_url_prefix.empty() && _public_url_prefix.back() == '/')
+            _public_url_prefix.pop_back();
+    }
 
     void apply(const std::string& user_id,
                const ::chatnow::media::ApplyDownloadReq& req,
@@ -46,6 +51,8 @@ public:
         rsp->set_download_url(url);
         rsp->set_expires_in_sec(_presign);
         fill_file_info(*file, rsp->mutable_file_info());
+        if (file->bucket() == _public_bucket && !_public_url_prefix.empty())
+            rsp->mutable_file_info()->set_public_url(_public_url_prefix + "/" + file->object_key());
         LOG_INFO("apply_download user={} file={} size={}",
                  user_id, file->file_id(), file->file_size());
     }
@@ -58,12 +65,16 @@ public:
             throw ServiceError(::chatnow::error::kMediaFileNotFound, "no such file");
         }
         fill_file_info(*file, rsp->mutable_file_info());
+        if (file->bucket() == _public_bucket && !_public_url_prefix.empty())
+            rsp->mutable_file_info()->set_public_url(_public_url_prefix + "/" + file->object_key());
     }
 
 private:
     std::shared_ptr<S3Client>       _s3;
     std::shared_ptr<MediaFileTable> _files;
     int                             _presign;
+    std::string _public_bucket;
+    std::string _public_url_prefix;
 };
 
 }  // namespace chatnow
