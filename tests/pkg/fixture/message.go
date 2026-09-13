@@ -2,14 +2,18 @@ package fixture
 
 import (
 	"testing"
+	"time"
 
 	"chatnow-tests/pkg/client"
+	"chatnow-tests/pkg/verify"
 	msg "chatnow-tests/proto/chatnow/message"
 	transmite "chatnow-tests/proto/chatnow/transmite"
 )
 
-// SendTextMessage 发送文本消息，返回 (message_id, seq_id)。
+// SendTextMessage sends once and waits for the durable message before returning.
+// Use SendTextMessageWithClientMsgId when testing broker acceptance itself.
 func SendTextMessage(t testing.TB, c *client.HTTPClient, convID, text string) (int64, uint64) {
+	t.Helper()
 	req := &transmite.SendMessageReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
@@ -29,6 +33,9 @@ func SendTextMessage(t testing.TB, c *client.HTTPClient, convID, text string) (i
 	if rsp.Message == nil {
 		t.Fatal("SendTextMessage: response message is nil")
 	}
+	db := verify.NewDBVerifier(c.Config().Database.MySQLDSN)
+	defer db.Close()
+	db.WaitMessageExists(t, rsp.Message.MessageId, 10*time.Second)
 	return rsp.Message.MessageId, rsp.Message.SeqId
 }
 

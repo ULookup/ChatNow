@@ -34,11 +34,12 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 # 5. 声明目标及依赖
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog 
+find_package(jsoncpp CONFIG REQUIRED)
+target_link_libraries(${target} jsoncpp_lib -lgflags -lspdlog -lglog
     -lfmt -lbrpc -lssl -lcrypto 
     -lprotobuf -lleveldb -letcd-cpp-api 
     -lcurl -lodb-mysql -lodb -lodb-boost
-    -lhiredis -lcpr -lelasticlient -ljsoncpp
+    -lhiredis -lcpr -lelasticlient
     -lhiredis -lredis++ -lpthread -lboost_system
     -lcpprest -lcurl)
 

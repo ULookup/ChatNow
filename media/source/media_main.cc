@@ -54,6 +54,7 @@ struct LoadedMediaConf {
     chatnow::MediaServiceConfig                  cfg;
     std::shared_ptr<chatnow::MimeWhitelist>      mime;
     std::string s3_endpoint;
+    std::string s3_public_endpoint;
     std::string s3_region;
 };
 
@@ -75,7 +76,12 @@ LoadedMediaConf load_media_conf(const std::string& path) {
 
     LoadedMediaConf out;
     out.s3_endpoint   = s3.get("endpoint",   "").asString();
+    out.s3_public_endpoint = s3.get("public_endpoint", "").asString();
     out.s3_region     = s3.get("region",     "us-east-1").asString();
+
+    if (out.s3_endpoint.empty() || out.s3_public_endpoint.empty()) {
+        throw std::runtime_error("media_conf: s3_endpoint_invalid");
+    }
 
     out.cfg.public_bucket     = md.get("public_bucket",     "").asString();
     out.cfg.private_bucket    = md.get("private_bucket",    "").asString();
@@ -124,7 +130,7 @@ int main(int argc, char* argv[]) {
         b.set_redis_seeds(FLAGS_redis_seeds);
         b.make_redis_object(FLAGS_redis_host, FLAGS_redis_port, FLAGS_redis_db,
                             FLAGS_redis_keep_alive);
-        b.make_s3_object(conf.s3_endpoint, conf.s3_region,
+        b.make_s3_object(conf.s3_endpoint, conf.s3_public_endpoint, conf.s3_region,
                          s3_access_key, s3_secret_key);
         b.set_media_config(conf.cfg, conf.mime);
         b.make_registry_object(FLAGS_registry_host,

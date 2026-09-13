@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  CHATNOW_TEST_DIAGNOSTICS: '1'
+
 on:
   push:
     branches: [main, develop, 3.0-dev]
@@ -16,9 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake build-essential protobuf-compiler netcat-openbsd
-      - name: Build C++ services
-        run: mkdir -p build && cd build && cmake .. && cmake --build . -j$(nproc)
+          sudo apt-get install -y protobuf-compiler netcat-openbsd
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
@@ -30,6 +31,10 @@ jobs:
         run: cd tests && go mod download
       - name: Validate CI gate contracts
         run: cd tests && go test ./pkg/contracts -count=1
+      - name: Validate fault-controller boundaries
+        run: cd tests && go test ./pkg/chaos -count=1
+      - name: Validate internal RPC transport
+        run: cd tests && go test ./pkg/client -count=1
       - name: Go vet
         run: cd tests && go vet ./...
       - name: Go fmt check
@@ -112,6 +117,8 @@ jobs:
       - &validate-compose-artifacts
         name: Validate downloaded Compose service artifacts
         run: docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 ./scripts/validate_compose_artifacts.sh compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -120,8 +127,23 @@ jobs:
         run: cd tests && make proto
       - name: Download Go deps
         run: cd tests && go mod download
+      - &before-diagnostics
+        name: Capture initial service state
+        run: python3 scripts/collect_test_diagnostics.py --output test-diagnostics/before.json
       - name: Run BVT smoke tests
         run: cd tests && make test-bvt
+      - &failure-diagnostics
+        name: Collect failure diagnostics
+        if: failure()
+        run: python3 scripts/collect_test_diagnostics.py --output test-diagnostics/failure.json
+      - &upload-diagnostics
+        name: Preserve sanitized failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}
+          path: test-diagnostics
+          retention-days: 7
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -145,6 +167,8 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services
@@ -153,8 +177,11 @@ jobs:
         run: cd tests && make proto
       - name: Download Go deps
         run: cd tests && go mod download
+      - *before-diagnostics
       - name: Run functional tests
         run: cd tests && make test-func
+      - *failure-diagnostics
+      - *upload-diagnostics
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -163,6 +190,8 @@ jobs:
     needs: service-artifacts
     runs-on: ubuntu-22.04
     if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    env:
+      COMPOSE_FILE: docker-compose.yml:tests/compose/reliability.yml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -178,7 +207,12 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
-      - name: Start full stack
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
+      - name: Start full stack with RL-05 rate limits
+        env:
+          TRANSMITE_RATE_LIMIT_USER_MAX: '8'
+          TRANSMITE_RATE_LIMIT_SESSION_MAX: '40'
         run: docker compose up -d --build
       - name: Wait for services
         run: ./scripts/wait_for_services.sh
@@ -186,8 +220,11 @@ jobs:
         run: cd tests && make proto
       - name: Download Go deps
         run: cd tests && go mod download
+      - *before-diagnostics
       - name: Run cache reliability gate
         run: cd tests && make test-reliability
+      - *failure-diagnostics
+      - *upload-diagnostics
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -211,6 +248,8 @@ jobs:
       - *restore-compose-artifacts
       - *chmod-compose-artifacts
       - *validate-compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack with PF-09 rate limits
         env:
           # Transmite flags are int32; use the maximum valid value for gate-only headroom.
@@ -230,7 +269,7 @@ jobs:
         run: docker compose down -v
 
   perf:
-    needs: func
+    needs: [service-artifacts, func]
     runs-on: ubuntu-22.04
     if: github.event_name == 'schedule'
     steps:
@@ -244,6 +283,12 @@ jobs:
           sudo apt-get install -y protobuf-compiler netcat-openbsd
       - name: Install Go protobuf generator
         run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+      - *download-compose-artifacts
+      - *restore-compose-artifacts
+      - *chmod-compose-artifacts
+      - *validate-compose-artifacts
+      - name: Initialize synthetic test environment
+        run: python3 scripts/create_test_env.py --github-env
       - name: Start full stack
         run: docker compose up -d --build
       - name: Wait for services

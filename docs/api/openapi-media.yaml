@@ -5,7 +5,9 @@ info:
   description: |
     媒体上传/下载域。Proto: proto/media/media_service.proto
     Service: chatnow.media.MediaService
-    注意: 分片上传接口（InitMultipartUpload/ApplyPartUpload/CompleteMultipartUpload/AbortMultipartUpload）尚未暴露为 HTTP 路由。
+    Multipart operations below are exposed through JWT-authenticated Gateway routes.
+    Upload each part using its complete signed URL; do not alter query parameters.
+    Every non-final S3 multipart part must contain at least 5 MiB.
 
 servers:
   - url: http://localhost:9000
@@ -35,7 +37,7 @@ paths:
             application/x-protobuf:
               schema:
                 allOf:
-                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader'
                   - $ref: '#/components/schemas/ApplyUploadRsp'
         '4xx': { $ref: '#/components/responses/BusinessError' }
 
@@ -57,9 +59,85 @@ paths:
             application/x-protobuf:
               schema:
                 allOf:
-                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader'
                   - $ref: '#/components/schemas/CompleteUploadRsp'
         '4xx': { $ref: '#/components/responses/BusinessError' }
+
+  /service/media/init_multipart:
+    post:
+      summary: Initialize a multipart upload
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: InitMultipartUpload, request: InitMultipartReq, response: InitMultipartRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/InitMultipartReq' }
+      responses:
+        '200':
+          description: Protobuf response; inspect header.success and header.error_code.
+          content:
+            application/x-protobuf:
+              schema: { $ref: '#/components/schemas/InitMultipartRsp' }
+        '401':
+          description: Missing, invalid or revoked JWT; request is rejected before RPC dispatch.
+
+  /service/media/apply_part_upload:
+    post:
+      summary: Presign one multipart part
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: ApplyPartUpload, request: ApplyPartReq, response: ApplyPartRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/ApplyPartReq' }
+      responses:
+        '200':
+          description: Protobuf response; inspect header.success and header.error_code.
+          content:
+            application/x-protobuf:
+              schema: { $ref: '#/components/schemas/ApplyPartRsp' }
+        '401':
+          description: Missing, invalid or revoked JWT; request is rejected before RPC dispatch.
+
+  /service/media/complete_multipart:
+    post:
+      summary: Complete parts in ascending part-number order
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: CompleteMultipartUpload, request: CompleteMultipartReq, response: CompleteMultipartRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/CompleteMultipartReq' }
+      responses:
+        '200':
+          description: Protobuf response; inspect header.success and header.error_code.
+          content:
+            application/x-protobuf:
+              schema: { $ref: '#/components/schemas/CompleteMultipartRsp' }
+        '401':
+          description: Missing, invalid or revoked JWT; request is rejected before RPC dispatch.
+
+  /service/media/abort_multipart:
+    post:
+      summary: Abort a pending multipart upload
+      tags: [Media]
+      x-protobuf: { service: chatnow.media.MediaService, rpc: AbortMultipartUpload, request: AbortMultipartReq, response: AbortMultipartRsp, file: proto/media/media_service.proto }
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema: { $ref: '#/components/schemas/AbortMultipartReq' }
+      responses:
+        '200':
+          description: Protobuf response; inspect header.success and header.error_code.
+          content:
+            application/x-protobuf:
+              schema: { $ref: '#/components/schemas/AbortMultipartRsp' }
+        '401':
+          description: Missing, invalid or revoked JWT; request is rejected before RPC dispatch.
 
   /service/media/apply_download:
     post:
@@ -79,7 +157,7 @@ paths:
             application/x-protobuf:
               schema:
                 allOf:
-                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader'
                   - $ref: '#/components/schemas/ApplyDownloadRsp'
         '4xx': { $ref: '#/components/responses/BusinessError' }
 
@@ -100,14 +178,18 @@ paths:
             application/x-protobuf:
               schema:
                 allOf:
-                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader'
                   - $ref: '#/components/schemas/GetFileInfoRsp'
         '4xx': { $ref: '#/components/responses/BusinessError' }
 
   /service/media/speech_recognition:
     post:
       summary: 语音识别
-      description: 短音频 ASR，直接传 bytes，不经过 S3。
+      description: |
+        Accepts inline PCM16 bytes up to 2 MiB, without S3. Empty input or an odd
+        byte count is invalid. A configured ASR backend is not yet available, so
+        valid input returns a business failure with speech recognition unavailable;
+        it must not be treated as a successful transcription.
       tags: [Media]
       x-protobuf: { service: chatnow.media.MediaService, rpc: SpeechRecognition, request: SpeechRecognitionReq, response: SpeechRecognitionRsp, file: proto/media/media_service.proto }
       requestBody:
@@ -122,7 +204,7 @@ paths:
             application/x-protobuf:
               schema:
                 allOf:
-                  - $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader'
+                  - $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader'
                   - $ref: '#/components/schemas/SpeechRecognitionRsp'
         '4xx': { $ref: '#/components/responses/BusinessError' }
 
@@ -138,7 +220,7 @@ components:
       description: 业务错误（error_code != 0）
       content:
         application/x-protobuf:
-          schema: { $ref: '../openapi-common.yaml#/components/schemas/ResponseHeader' }
+          schema: { $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader' }
 
   schemas:
     MediaPurpose:
@@ -155,6 +237,9 @@ components:
         file_size: { type: integer, format: int64 }
         mime_type: { type: string }
         uploaded_at_ms: { type: integer, format: int64 }
+        public_url:
+          type: string
+          description: Canonical unsigned URL for committed public objects returned by ApplyDownload or GetFileInfo; empty for private files. Protobuf field 6.
 
     ApplyUploadReq:
       x-protobuf: { message: ApplyUploadReq, file: proto/media/media_service.proto }
@@ -246,3 +331,67 @@ components:
         recognition_result:
           type: string
           description: 识别出的文字
+
+    InitMultipartReq:
+      allOf:
+        - $ref: '#/components/schemas/ApplyUploadReq'
+      x-protobuf: { message: InitMultipartReq, file: proto/media/media_service.proto }
+
+    InitMultipartRsp:
+      type: object
+      properties:
+        header: { $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader' }
+        file_id: { type: string }
+        upload_id: { type: string }
+        recommended_part_size_bytes: { type: integer, format: int32 }
+
+    ApplyPartReq:
+      type: object
+      required: [request_id, upload_id, part_number]
+      properties:
+        request_id: { type: string }
+        upload_id: { type: string }
+        part_number: { type: integer, minimum: 1, maximum: 10000 }
+
+    ApplyPartRsp:
+      type: object
+      properties:
+        header: { $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader' }
+        upload_url: { type: string, description: Signed PUT URL binding uploadId and partNumber. }
+        expires_in_sec: { type: integer, format: int32 }
+
+    PartETag:
+      type: object
+      required: [part_number, etag]
+      properties:
+        part_number: { type: integer, minimum: 1, maximum: 10000 }
+        etag: { type: string, description: ETag returned by the successful part PUT. }
+
+    CompleteMultipartReq:
+      type: object
+      required: [request_id, upload_id, parts]
+      properties:
+        request_id: { type: string }
+        upload_id: { type: string }
+        parts:
+          type: array
+          description: Parts in ascending part-number order.
+          items: { $ref: '#/components/schemas/PartETag' }
+
+    CompleteMultipartRsp:
+      type: object
+      properties:
+        header: { $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader' }
+        file_info: { $ref: '#/components/schemas/FileInfo' }
+
+    AbortMultipartReq:
+      type: object
+      required: [request_id, upload_id]
+      properties:
+        request_id: { type: string }
+        upload_id: { type: string }
+
+    AbortMultipartRsp:
+      type: object
+      properties:
+        header: { $ref: 'openapi-common.yaml#/components/schemas/ResponseHeader' }

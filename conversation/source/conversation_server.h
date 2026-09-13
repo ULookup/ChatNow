@@ -11,6 +11,7 @@
 
 #include "infra/etcd.hpp"
 #include "mq/channel.hpp"
+#include "mq/business_notify.hpp"
 #include "infra/logger.hpp"
 #include "infra/metrics.hpp"
 #include <thread>
@@ -229,6 +230,15 @@ public:
             auto* self = out->mutable_self();
             self->set_role(static_cast<::chatnow::conversation::MemberRole>(owner_role));
             self->set_joined_at_ms(_to_ms(now));
+            ::chatnow::push::NotifyMessage notification;
+            notification.set_notify_event_id(req->request_id());
+            notification.set_notify_type(::chatnow::push::CONVERSATION_CREATE_NOTIFY);
+            notification.set_trace_id(auth.trace_id);
+            auto public_conversation = *out;
+            public_conversation.clear_self();
+            notification.mutable_new_conversation_info()->set_conversation_payload(
+                public_conversation.SerializeAsString());
+            notify_online_users(_mm_channels, cntl, req->request_id(), all_member_ids, notification);
         });
     }
 
@@ -666,6 +676,11 @@ public:
         brpc::ClosureGuard done_guard(done);
         auto* cntl = static_cast<brpc::Controller*>(base_cntl);
         HANDLE_RPC(cntl, req, rsp, {
+            const auto conversation = _mysql_conv->select(req->conversation_id());
+            if (!conversation || conversation->status() == ConversationStatus::DISMISSED) {
+                throw ServiceError(::chatnow::error::kConversationNotMember,
+                                   "conversation unavailable");
+            }
             // 1. 优先走 Redis 缓存；snapshot 前后版本一致才可信
             auto snap = _members_cache->list_snapshot(req->conversation_id());
             if (!snap.stable) metrics::g_members_cache_snapshot_race_total << 1;
@@ -1156,6 +1171,7 @@ public:
         _mm_channels->declared(_identity_service_name);
         _mm_channels->declared(_media_service_name);
         _mm_channels->declared(_message_service_name);
+        _mm_channels->declared(kBusinessPushService);
 
         auto put_cb = std::bind(&ServiceManager::onServiceOnline, _mm_channels.get(),
                                 std::placeholders::_1, std::placeholders::_2);
