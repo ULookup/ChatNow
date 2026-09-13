@@ -40,6 +40,8 @@ A reservation means only "claimed for coordination." It does not mean the test e
 
 ## Naming and comments
 
+RL-MESSAGE-02 is allocated to `TestRL_TextFixtureWaitsForPersistence` for Issue #104. It observes broker acceptance while Message is stopped, rejects a fixture return without a durable row, and requires convergence after restoring the consumer. Its cleanup joins the fixture and waits for persistence before deleting synthetic state. Allocation is not evidence that historical RPC 9002 or Identity crashes are resolved.
+
 FN-TM-02 is allocated to `TestFN_TM_IdempotentRecordWithoutReadableMessage` for Issue #105. It exercises both existing accepted/persisted Redis records against a real healthy Message lookup with no readable row, requires an unavailable response, and preserves the guard without publishing another message.
 
 RL-MESSAGE-01 is allocated to `TestRL_IdempotentResponseDuringMessageOutage` for Issue #105. It stops Message before or after persistence, observes Transmite directly through the existing internal RPC client, checks both cache formats, and requires complete original results after recovery with one message and one timeline entry per member. Allocation alone is not execution evidence.

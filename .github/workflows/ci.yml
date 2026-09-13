@@ -1,5 +1,8 @@
 name: CI
 
+env:
+  CHATNOW_TEST_DIAGNOSTICS: '1'
+
 on:
   push:
     branches: [main, develop, 3.0-dev]
@@ -124,8 +127,23 @@ jobs:
         run: cd tests && make proto
       - name: Download Go deps
         run: cd tests && go mod download
+      - &before-diagnostics
+        name: Capture initial service state
+        run: python3 scripts/collect_test_diagnostics.py --output test-diagnostics/before.json
       - name: Run BVT smoke tests
         run: cd tests && make test-bvt
+      - &failure-diagnostics
+        name: Collect failure diagnostics
+        if: failure()
+        run: python3 scripts/collect_test_diagnostics.py --output test-diagnostics/failure.json
+      - &upload-diagnostics
+        name: Preserve sanitized failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-diagnostics-${{ github.job }}
+          path: test-diagnostics
+          retention-days: 7
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -159,8 +177,11 @@ jobs:
         run: cd tests && make proto
       - name: Download Go deps
         run: cd tests && go mod download
+      - *before-diagnostics
       - name: Run functional tests
         run: cd tests && make test-func
+      - *failure-diagnostics
+      - *upload-diagnostics
       - name: Tear down
         if: always()
         run: docker compose down -v
@@ -199,8 +220,11 @@ jobs:
         run: cd tests && make proto
       - name: Download Go deps
         run: cd tests && go mod download
+      - *before-diagnostics
       - name: Run cache reliability gate
         run: cd tests && make test-reliability
+      - *failure-diagnostics
+      - *upload-diagnostics
       - name: Tear down
         if: always()
         run: docker compose down -v

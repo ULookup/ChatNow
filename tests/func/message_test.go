@@ -13,26 +13,12 @@ import (
 	"chatnow-tests/pkg/fixture"
 	"chatnow-tests/pkg/verify"
 	msg "chatnow-tests/proto/chatnow/message"
-	transmite "chatnow-tests/proto/chatnow/transmite"
 )
 
-// Helper: sends a text message and returns the message_id and seq_id.
+// Message API tests require the shared fixture's durable-message boundary.
 func sendMsg(t *testing.T, c *client.HTTPClient, convID string, text string) (msgID int64, seqID uint64) {
 	t.Helper()
-	req := &transmite.SendMessageReq{
-		RequestId:      client.NewRequestID(),
-		ConversationId: convID,
-		Content: &msg.MessageContent{
-			Type: msg.MessageType_TEXT,
-			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: text}},
-		},
-		ClientMsgId: client.NewRequestID(),
-	}
-	rsp := &transmite.SendMessageRsp{}
-	require.NoError(t, c.DoAuth("/service/transmite/send", req, rsp))
-	require.True(t, rsp.GetHeader().GetSuccess())
-	require.NotNil(t, rsp.GetMessage())
-	return rsp.GetMessage().GetMessageId(), rsp.GetMessage().GetSeqId()
+	return fixture.SendTextMessage(t, c, convID, text)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,19 +91,22 @@ func TestGetMessagesById_Success(t *testing.T) {
 
 func TestSearchMessages_Success(t *testing.T) {
 	a, _, convID := setupConv(t)
-	sendMsg(t, a, convID, "unique search term zebra42")
+	keyword := "search" + client.NewRequestID()
+	messageID, _ := sendMsg(t, a, convID, keyword)
+	verify.NewESVerifier(Cfg.Database.ESURL).MessageIndexed(t, messageID, keyword)
 
 	req := &msg.SearchMessagesReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		Keyword:        "zebra42",
+		Keyword:        keyword,
 		Limit:          20,
 	}
 	rsp := &msg.SearchMessagesRsp{}
 	err := a.DoAuth("/service/message/search", req, rsp)
 	require.NoError(t, err)
-	// Search may return empty if ES is not available; verify response is valid.
-	assert.True(t, rsp.GetHeader().GetSuccess() || !rsp.GetHeader().GetSuccess(), "response received")
+	require.True(t, rsp.GetHeader().GetSuccess(), "search failed with code %d", rsp.GetHeader().GetErrorCode())
+	require.Len(t, rsp.GetMessages(), 1)
+	assert.Equal(t, messageID, rsp.GetMessages()[0].GetMessageId())
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +421,11 @@ func TestFN_MS_DeleteMessages_OnlyOwnTimeline(t *testing.T) {
 func TestFN_MS_SelectByClientMsgId_Found(t *testing.T) {
 	alice, _, convID := fixture.MakeFriends(t, HTTP)
 	clientMsgID := client.NewRequestID()
-	msgID, _, _ := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "select-by-client-msg-id", clientMsgID)
+	msgID, _, accepted := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "select-by-client-msg-id", clientMsgID)
+	require.True(t, accepted)
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, msgID, 10*time.Second)
 
 	req := &msg.SelectByClientMsgIdReq{
 		RequestId:   client.NewRequestID(),
