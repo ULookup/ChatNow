@@ -38,6 +38,10 @@ A reservation means only "claimed for coordination." It does not mean the test e
 
 ## Naming and comments
 
+FN-TM-02 is allocated to `TestFN_TM_IdempotentRecordWithoutReadableMessage` for Issue #105. It exercises both existing accepted/persisted Redis records against a real healthy Message lookup with no readable row, requires an unavailable response, and preserves the guard without publishing another message.
+
+RL-MESSAGE-01 is allocated to `TestRL_IdempotentResponseDuringMessageOutage` for Issue #105. It stops Message before or after persistence, observes Transmite directly through the existing internal RPC client, checks both cache formats, and requires complete original results after recovery with one message and one timeline entry per member. Allocation alone is not execution evidence.
+
 RL-REDIS-01 is allocated to `TestRL_RedisCircuitCleanupAfterAssertionFailure` for Issue #102. It injects a failing assertion in an isolated subprocess of RL-05, then requires an already prepared caller to send successfully after cleanup. RL-05 retains Gateway outage assertions while measuring the single Transmite's Open rejections using per-request counters and direct internal RPC. Allocation is not execution evidence.
 
 RL-DISCOVERY-01 is allocated to `TestRL_DiscoveryRecoversAfterIdentityAddressChange` for Issue #97. It covers automatic RPC recovery after changing an isolated Compose Identity endpoint's IPv4 address, without restarting callers. The allocation alone is not passing evidence.

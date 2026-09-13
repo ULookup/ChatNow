@@ -445,6 +445,7 @@ func TestScenario_MessageReliability(t *testing.T) {
 	msgID1, seq1, success1 := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "reliability-test", clientMsgID)
 	require.True(t, success1, "第一次发送应成功")
 	require.NotZero(t, msgID1)
+	require.NotZero(t, seq1)
 
 	// Step 2: 用相同 client_msg_id 重发（模拟网络重传）
 	msgID2, seq2, success2 := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "reliability-test", clientMsgID)
@@ -454,6 +455,15 @@ func TestScenario_MessageReliability(t *testing.T) {
 		assert.Equal(t, msgID1, msgID2, "相同 client_msg_id 应返回相同 message_id")
 		assert.Equal(t, seq1, seq2, "相同 client_msg_id 应返回相同 seq_id")
 	}
+	// A retry during asynchronous persistence may be unavailable. Recovery
+	// must still produce the complete original result, not merely avoid success.
+	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer dbV.Close()
+	dbV.WaitMessageExists(t, msgID1, 10*time.Second)
+	recoveredID, recoveredSeq, recovered := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "reliability-test", clientMsgID)
+	require.True(t, recovered, "retry must succeed after the original is persisted")
+	require.Equal(t, msgID1, recoveredID)
+	require.Equal(t, seq1, recoveredSeq)
 
 	// Step 3: bob sync 验证收到该消息（仅 1 条）
 	syncReq := &msg.SyncMessagesReq{
@@ -481,8 +491,6 @@ func TestScenario_MessageReliability(t *testing.T) {
 	assert.Equal(t, msgID1, selectRsp.Message.MessageId)
 
 	// Step 5: 数据一致性 - DB 仅 1 条（不重复）
-	dbV := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
-	defer dbV.Close()
 	dbV.MessageCount(t, convID, 1)
 	dbV.MessageByClientMsgId(t, clientMsgID, true)
 }
