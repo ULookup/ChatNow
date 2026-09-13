@@ -15,9 +15,9 @@ import (
 )
 
 type containerAddress struct {
-	ID, StartedAt, Project string
-	Running                bool
-	Networks               map[string]struct {
+	ID, StartedAt, Project, Image string
+	Running                       bool
+	Networks                      map[string]struct {
 		IPAddress, NetworkID string
 		Aliases              []string
 	}
@@ -37,7 +37,7 @@ func dockerAddress(cfg *client.Config, args ...string) ([]byte, error) {
 
 func inspectAddress(cfg *client.Config, id string) (containerAddress, error) {
 	// Select only network/process metadata; never collect container credentials.
-	format := `{"ID":{{json .Id}},"StartedAt":{{json .State.StartedAt}},"Running":{{json .State.Running}},"Project":{{json (index .Config.Labels "com.docker.compose.project")}},"Networks":{{json .NetworkSettings.Networks}}}`
+	format := `{"ID":{{json .Id}},"Image":{{json .Config.Image}},"StartedAt":{{json .State.StartedAt}},"Running":{{json .State.Running}},"Project":{{json (index .Config.Labels "com.docker.compose.project")}},"Networks":{{json .NetworkSettings.Networks}}}`
 	out, err := dockerAddress(cfg, "inspect", "--format", format, id)
 	var result containerAddress
 	if err == nil {
@@ -121,6 +121,30 @@ func ChangeIdentityAddress(t testing.TB, cfg *client.Config) func() {
 	if !replacement.IsValid() {
 		t.Fatal("no unused address in the isolated Compose network")
 	}
+	// Older Docker engines reject explicit IPs on auto-allocated subnets. Prove
+	// support with an inert, test-owned endpoint before touching the live service.
+	// No credentials or application entrypoint are copied into the probe.
+	out, err = dockerAddress(cfg, "create", "--network", networkID, "--ip", replacement.String(),
+		"--entrypoint", "/bin/true", identity.Image)
+	if err != nil {
+		t.Fatalf("address fault needs a user configured subnet (tests/compose/reliability.yml): %v", err)
+	}
+	probeID := strings.TrimSpace(string(out))
+	probeRemoved := false
+	t.Cleanup(func() {
+		if !probeRemoved {
+			if _, e := dockerAddress(cfg, "rm", "--force", probeID); e != nil {
+				t.Errorf("remove address capability probe: %v", e)
+			}
+		}
+	})
+	if _, err = dockerAddress(cfg, "start", "--attach", probeID); err != nil {
+		t.Fatalf("address fault needs a user configured subnet (tests/compose/reliability.yml): %v", err)
+	}
+	if _, err = dockerAddress(cfg, "rm", "--force", probeID); err != nil {
+		t.Fatalf("release address capability probe: %v", err)
+	}
+	probeRemoved = true
 	connect := func(ip string) error {
 		args := []string{"network", "connect", "--ip", ip}
 		for _, alias := range aliases {

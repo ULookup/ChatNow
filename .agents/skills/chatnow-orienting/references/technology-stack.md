@@ -28,6 +28,8 @@ Use this reference for the `3.0-dev` architecture line, then verify task-sensiti
 
 ## Build entry points
 
+The CI Reliability job selects `tests/compose/reliability.yml` in addition to root Compose. That isolated test-only network has explicit IPAM so the Identity endpoint fault can request and restore IPv4 addresses on supported Docker Engine versions; it does not change the normal development network. See the testing framework for subnet overrides and preflight behavior.
+
 `common/mq/channel.hpp` uses direct brpc initialization for numeric endpoints and `Init("http://<hostname>:<port>", "rr", options)` for DNS endpoints. Here `http://` selects the DNS naming service, not the wire protocol: internal RPC remains `baidu_std`. The pinned brpc implementation refreshes DNS every five seconds by default (`ns_access_interval`), including when the etcd registration string is unchanged. Connection timeout, RPC timeout and retry limits remain in `ServiceChannel`; literal IPv4/IPv6 endpoints keep the existing direct path. References: [brpc client naming services](https://brpc.apache.org/docs/client/basics/), [pinned periodic refresh implementation](https://github.com/apache/brpc/blob/041cec5fb84a5b4458bac6275ea7d34e048bc3f1/src/brpc/periodic_naming_service.cpp).
 
 The root CMake project adds all nine services. The CI-equivalent build is:

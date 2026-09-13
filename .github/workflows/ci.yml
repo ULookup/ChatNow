@@ -27,7 +27,7 @@ jobs:
       - name: Download Go deps
         run: cd tests && go mod download
       - name: Validate CI gate contracts
-        run: cd tests && go test ./pkg/contracts -count=1
+        run: cd tests && go test ./pkg/contracts ./pkg/chaos -count=1
       - name: Go vet
         run: cd tests && go vet ./...
       - name: Go fmt check
@@ -165,6 +165,8 @@ jobs:
     needs: service-artifacts
     runs-on: ubuntu-22.04
     if: github.event_name == 'pull_request' || github.event_name == 'schedule'
+    env:
+      COMPOSE_FILE: docker-compose.yml:tests/compose/reliability.yml
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
