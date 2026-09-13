@@ -76,6 +76,8 @@ Use unique IDs for every request and collision-prone resource. Do not rely on a 
 
 ## Waiting and cleanup
 
+RL-DISCOVERY-01 (`TestRL_DiscoveryRecoversAfterIdentityAddressChange`) uses `tests/pkg/chaos/address.go` to move only Identity's IPv4 endpoint in the selected isolated Compose project. It requires one Identity network owned by that project, preserves aliases, selects an unused address, bounds Docker commands, and restores the original address and aliases with `t.Cleanup`, including on RED. Identity is restarted at both the changed and restored addresses to reconnect its outgoing datastore clients and registry lease; Gateway and Transmite process identities must remain unchanged. Account/profile RPC and an uncached sender's message must recover within a shared 45-second budget. Run it with `go test -tags=reliability ./reliability/... -run '^TestRL_DiscoveryRecoversAfterIdentityAddressChange$' -v -count=1 -timeout=180s`, then the complete Reliability gate. Never run network fault tests concurrently with other suites on the same stack. This controller does not cover shared/external networks, IPv6 fault injection, registry lease recovery without a service restart, full container recreation or Redis address changes.
+
 Poll the externally observable condition with a bounded deadline and useful failure message. Suitable conditions include service reachability, a WebSocket event, a database row/state, an Elasticsearch hit, a MinIO object, or an API state transition. A polling interval is allowed; a fixed delay used as proof of readiness or convergence is not.
 
 Assign exactly one owner for each created resource. Prefer suite-level cleanup through `tests/pkg/cleanup`; add `t.Cleanup` for per-test resources such as clients, sockets, temporary objects, or state that suite cleanup cannot safely own. Cleanup must run on assertion failure. Root Compose persists infrastructure through bind mounts under `middle/data`; `docker compose down -v` does not remove that state. A clean-slate test must use a fresh CI checkout or another explicitly disposable storage path and must never delete a shared tree.
@@ -90,7 +92,8 @@ Assign exactly one owner for each created resource. Prefer suite-level cleanup t
 | Cross-service flow, MQ/WebSocket delivery, idempotency, ordering, or MySQL/Elasticsearch/MinIO consistency | L3 Scenario | Also run affected L2 and L1 gates. |
 | Throughput, latency, allocation, or benchmark threshold | L4 Performance | Also run correctness layers for behavior used by the benchmark. |
 | Redis failure injection, restart recovery, or Push unacked convergence | Reliability | Run the exact tagged test, then `make -C tests test-reliability`; also run lower correctness layers selected by the affected behavior. |
-| RabbitMQ/MySQL/service/network fault behavior | Reliability | No current controller exists for these faults. Do not expand the framework unless the scoped Issue authorizes it; use the nearest executable correctness layer and report the gap. |
+| Identity hostname address recovery | Reliability | Use RL-DISCOVERY-01 and its scoped Compose endpoint controller, then lower correctness gates. |
+| Other RabbitMQ/MySQL/service/network fault behavior | Reliability | No general controller exists for these faults. Do not expand the framework unless the scoped Issue authorizes it; use the nearest executable correctness layer and report the gap. |
 
 Choose the lowest layer that can fail for the required behavior, not the cheapest layer that happens to run. Run the target test first, its same-layer regressions second, and broader layers according to risk.
 

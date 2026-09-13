@@ -14,7 +14,7 @@ The release contract confirmed on 2026-09-13 preserves concurrent authenticated 
 
 - Entry/contracts: `gateway/source/gateway_server.h`; affected `proto/*/*_service.proto`; `proto/common/envelope.proto`.
 - Boundary: Gateway parses Protobuf, authenticates JWT except whitelisted Identity routes, derives `user_id`/`device_id`/JTI, adds trace context, and serializes `RpcMetadata` into the brpc attachment.
-- Discovery: `ServiceManager` resolves service instances through etcd; calls are synchronous with route-specific timeouts.
+- Discovery: `ServiceManager` resolves service instances through etcd; numeric endpoints retain direct brpc channels, while hostname endpoints use brpc's periodic DNS naming service. The same registration value can therefore recover after an IP change without restarting callers. Calls retain `baidu_std` and existing route-specific timeouts; DNS discovery does not add application retries or delivery guarantees.
 - Failure: malformed input, unavailable backends, and RPC timeouts are translated into a Protobuf `ResponseHeader`; retries remain a client decision unless a flow states otherwise.
 - Tests: `tests/bvt`, affected `tests/func`, `tests/func/auth_middleware_test.go`, `tests/func/security_test.go`.
 - Invariants: client identity fields never override server-derived auth context; services validate required metadata; trace context propagates where supported.

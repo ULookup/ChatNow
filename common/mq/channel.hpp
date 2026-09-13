@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <brpc/channel.h>
+#include <butil/endpoint.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -53,7 +54,14 @@ public:
         options.timeout_ms         = kRpcTimeoutMs;
         options.max_retry          = kRpcMaxRetry;
         options.protocol           = "baidu_std";
-        if(channel->Init(host.c_str(), &options) != 0) {
+        // Numeric endpoints keep their direct channel. Hostnames need brpc's
+        // periodic DNS naming service so an unchanged etcd value can move IPs.
+        // The http:// prefix selects DNS discovery; the RPC stays baidu_std.
+        butil::EndPoint endpoint;
+        const int initialized = butil::str2endpoint(host.c_str(), &endpoint) == 0
+            ? channel->Init(endpoint, &options)
+            : channel->Init(("http://" + host).c_str(), "rr", &options);
+        if(initialized != 0) {
             LOG_ERROR("初始化 {}-{} 信道失败", _service_name, host);
             return;
         }
