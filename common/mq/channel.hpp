@@ -123,6 +123,21 @@ public:
         return it->second->choose();
     }
 
+    /* brief: Return whether a declared service currently has at least one channel.
+     * Copy the shared owner while holding the manager lock, then inspect the
+     * channel after releasing it so readiness checks do not extend the nested
+     * manager -> channel lock scope used by choose(). */
+    bool available(const std::string &service_name) const {
+        ServiceChannel::ptr service;
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+            auto it = _services.find(service_name);
+            if(it == _services.end()) return false;
+            service = it->second;
+        }
+        return service->size() != 0;
+    }
+
     /* brief: 声明关注哪些服务（不关注的服务上下线事件会被忽略，节省内存） */
     void declared(const std::string &service_name) {
         std::unique_lock<std::mutex> lock(_mutex);
@@ -179,7 +194,7 @@ private:
         return service_instance.substr(0, pos);
     }
 
-    std::mutex _mutex;
+    mutable std::mutex _mutex;
     std::unordered_set<std::string> _follow_services;
     std::unordered_map<std::string, ServiceChannel::ptr> _services;
 };

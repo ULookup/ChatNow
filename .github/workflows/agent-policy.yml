@@ -29,7 +29,8 @@ jobs:
       - name: Build trusted policy binary
         run: cd tests && go build -o "$RUNNER_TEMP/agent-policy" ./cmd/agent-policy
       - name: Validate Issue
-        run: "$RUNNER_TEMP/agent-policy" issue
+        run: |
+          "$RUNNER_TEMP/agent-policy" issue
 
   pull-request-policy:
     if: github.event_name == 'pull_request'
@@ -68,14 +69,19 @@ jobs:
             echo 'AGENT_POLICY_COMMITS_EOF'
           } >> "$GITHUB_ENV"
       - name: Validate branch
-        run: "$RUNNER_TEMP/agent-policy" branch
+        run: |
+          "$RUNNER_TEMP/agent-policy" branch
       - name: Validate commit subjects
-        run: "$RUNNER_TEMP/agent-policy" commits
+        run: |
+          "$RUNNER_TEMP/agent-policy" commits
       - name: Validate pull request body
-        run: "$RUNNER_TEMP/agent-policy" pull-request
+        run: |
+          "$RUNNER_TEMP/agent-policy" pull-request
       - name: Validate Skill synchronization
-        run: "$RUNNER_TEMP/agent-policy" skill-sync
+        run: |
+          "$RUNNER_TEMP/agent-policy" skill-sync
       - name: Validate Skill packages
         env:
           AGENT_POLICY_REPO_ROOT: ${{ github.workspace }}
-        run: "$RUNNER_TEMP/agent-policy" skills
+        run: |
+          "$RUNNER_TEMP/agent-policy" skills
