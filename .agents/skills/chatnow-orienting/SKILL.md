@@ -28,6 +28,7 @@ Verify secondary claims against higher-precedence evidence. Cite repository path
 3. Trace entry points and calls across HTTP, brpc, RabbitMQ, WebSocket, Redis, MySQL, Elasticsearch, MinIO, and etcd as applicable.
 4. Map state ownership, trusted identity derivation, sync/async boundaries, retries, idempotency keys, outboxes, and recovery behavior.
 5. State current invariants before evaluating a proposal. Distinguish durable sources of truth from caches, routing state, and acceleration layers.
+   For worker-ID ownership loss, trace process fencing separately from service-registration recovery; a recovered registration never proves safe ID allocation. See the worker fail-stop contract in `references/core-flows.md`.
 6. Separate **Current behavior** from **Proposed behavior**. Never describe an intended design as implemented.
 7. Identify compatibility, partial-failure, observability, deployment, and test impact.
 8. For any architecture, service-boundary, infrastructure-topology, or core-flow change, require updates to this Skill's affected references in the same PR. A follow-up Issue is not a substitute.

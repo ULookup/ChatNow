@@ -1,6 +1,7 @@
 package cleanup
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -134,12 +135,15 @@ func flushRedisNode(addr string) error {
 	if err != nil {
 		return err
 	}
-	resp := make([]byte, 64)
-	n, err := conn.Read(resp)
+	s, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
 		return fmt.Errorf("read FLUSHALL response: %w", err)
 	}
-	s := string(resp[:n])
+	// Replica contents converge from the primaries flushed by the same suite.
+	// Authentication, loading, and other failures still abort cleanup.
+	if strings.HasPrefix(s, "-READONLY ") {
+		return nil
+	}
 	if !strings.HasPrefix(s, "+OK") {
 		return fmt.Errorf("FLUSHALL failed: %s", strings.TrimSpace(s))
 	}
