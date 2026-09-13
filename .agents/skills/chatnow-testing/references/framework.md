@@ -57,6 +57,8 @@ The dedicated Reliability job is executable. Its existence is not a successful r
 
 Container health, one-shot initializer completion, and the shared `entrypoint.sh` bounded TCP polling are startup prerequisites; none replaces `scripts/wait_for_services.sh`. Conversely, a passing static contract for the helper or Compose shape does not prove that any container started or that a runtime gate passed.
 
+The readiness shell contracts in `tests/pkg/contracts/readiness_execution_test.go` execute the real helper with controlled external command boundaries. They verify stdin-only MinIO credentials and interruption of a stalled Docker probe within the deadline, without accessing real credentials or services. GNU `timeout` limits each Compose invocation to the remaining budget, followed by a one-second kill grace period. These process-boundary tests do not replace full-stack readiness or BVT.
+
 Issue #88 integrates the Issue #78 runtime into CI. Each job owns a fresh checkout and its middle/data directory. scripts/create_test_env.py generates synthetic credentials and refuses existing state. Until a fresh run exists for the exact commit, report cold start, BVT, Functional, Reliability, and Performance as `not run` or `blocked`, not passed.
 
 ## Shared framework

@@ -10,7 +10,10 @@ cd "$repo_root"
 deadline=$((SECONDS + READY_TIMEOUT_SEC))
 
 compose() {
-  docker compose "$@"
+  local remaining=$((deadline - SECONDS))
+  (( remaining > 0 )) || return 1
+  # A stuck Docker request must not prevent the outer deadline from advancing.
+  timeout --kill-after=1 "${remaining}s" docker compose "$@"
 }
 
 wait_until() {
@@ -75,7 +78,8 @@ probe_minio() {
   curl --fail --silent --show-error --max-time 2 \
     'http://127.0.0.1:19000/minio/health/ready' >/dev/null || return 1
   compose run --rm --no-deps --entrypoint /bin/sh minio-init -ec '
-    mc alias set ready http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
+    printf "%s\n%s\n" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" |
+      mc alias set ready http://minio:9000 --api S3v4 --path on >/dev/null
     mc stat ready/chatnow-media-public >/dev/null
     mc stat ready/chatnow-media-private >/dev/null
   ' >/dev/null 2>&1

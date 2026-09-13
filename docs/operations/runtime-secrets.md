@@ -51,6 +51,8 @@ The root Compose one-shot initializers receive only the credentials they need to
 
 RabbitMQ secrets are sent in Management API JSON bodies rather than command arguments. MinIO feeds root and application secret material to `mc` through standard input, isolates `mc` state in a temporary configuration directory, and removes it on exit. These initialization boundaries do not make bootstrap credentials application inputs. Application containers continue to receive only their own direct or `_FILE` resolver inputs. See [Compose Runtime Operations](compose-runtime.md) for ordering and readiness; neither document is evidence that a cold start has passed.
 
+The MinIO readiness probe follows the same stdin-only credential boundary. It runs in a temporary `docker compose run --rm` container; the root identity and password must never become `mc alias set` arguments.
+
 ## Current injection contract
 
 For every migrated logical secret named `NAME`, the common resolver accepts exactly one source:

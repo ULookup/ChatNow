@@ -4,7 +4,7 @@ Target version: `3.0-dev`
 Status: Unverified
 Reviewed: 2026-09-13
 
-This is the canonical operating contract for the repository-root Compose runtime. Issue #88 has exercised cold startup, all nine native service builds, and BVT on Linux CI. Functional and Reliability have exposed unresolved failures; this profile is not a validated release deployment. PR #89 records the exact tested commits and individual gate results. Always obtain fresh evidence for the intended release pair.
+This is the canonical operating contract for the repository-root Compose runtime. Issue #88 has exercised cold startup, all nine native service builds, BVT, Functional, and Redis-focused Reliability on Linux CI. Results are commit-specific and do not validate a release deployment. PR #89 records the exact tested commits and individual gate results. Always obtain fresh evidence for the intended release pair.
 
 The root profile is a local-development runtime intended for disposable environments. It is not the production HA topology tracked by Issue #73. Issue #88 integrates CI using fresh runner checkouts, shared native service artifacts, and synthetic credentials. Existing environment files and persistent data are never overwritten by the bootstrap helper.
 
@@ -108,6 +108,8 @@ Root Compose publishes MinIO S3 on `127.0.0.1:19000` and its console on `127.0.0
 - etcd contains exactly the eight expected service registration keys for Identity, Media, Transmite, Message, Relationship, Conversation, Presence, and Push.
 - unauthenticated Gateway `GET /health` returns success.
 - the Push WebSocket listener is reachable on host port `9001`.
+
+Each Docker Compose invocation is limited to the remaining readiness budget through GNU `timeout`, with a one-second kill grace period. The host therefore requires GNU coreutils in addition to Docker, curl, Bash, and netcat. The MinIO bucket probe sends its synthetic bootstrap identity through standard input to `mc`, never through process arguments; its temporary container is removed after the probe.
 
 Gateway `/health` is dependency-aware, not a process-liveness response. It returns HTTP `200` only when the Gateway service manager currently has at least one discovered channel for each of the eight business services; it returns HTTP `503` otherwise. It does not replace the stateful infrastructure probes above.
 

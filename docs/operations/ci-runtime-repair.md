@@ -27,6 +27,8 @@ Draft PR #89. The owner approved extending #88 on 2026-09-13 to cover defects ex
 | Fast-failure sample takes a recovery probe | Three unrelated outage RPCs crossed the one-second Open deadline before measurement. Measure Open immediately, then exercise those RPCs; retain the 50 ms limit and recovery assertions. | RL-05 fast-failure timing |
 | Push reliability socket missing | The test authenticated using a device ID different from its JWT. Use the issued ID and check only the unpersisted outage marker. | RL-05 Push persistence/requeue |
 | Push records requeue but loses the message | AMQP-CPP `reject` takes bit flags; boolean `true` does not set `AMQP::requeue`. Use the explicit flag for retry actions and exceptions in both consumer overloads. | RL-05 durable Unacked and post-recovery delivery |
+| Readiness exposes bootstrap credentials in process arguments | The MinIO probe bypassed the initializer's stdin-only boundary. Feed `mc alias set` through stdin in the disposable probe container. | `TestReadinessMinIOCredentialsStayOffCommandLine` |
+| Readiness deadline cannot interrupt a stalled Docker command | The outer polling deadline only ran after a probe returned. Bound each Compose invocation with GNU `timeout` using the remaining budget. | `TestReadinessDeadlineBoundsStalledProbe` |
 
 ## Compatibility and operational boundaries
 
