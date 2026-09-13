@@ -43,7 +43,7 @@ func TestBVT_AddMembers_Success(t *testing.T) {
 	m3, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	fixture.AddMembers(t, owner, convID, []string{m3.UserID})
 
-	// 验证成员数 = 3（owner + 2 初始 + 1 新增）
+	// Verify the owner, both original members, and the newly added member.
 	listReq := &conversation.ListMembersReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
@@ -52,9 +52,11 @@ func TestBVT_AddMembers_Success(t *testing.T) {
 	err := owner.DoAuth("/service/conversation/list_members", listReq, listRsp)
 	require.NoError(t, err)
 	assert.True(t, listRsp.Header.Success)
-	assert.Len(t, listRsp.Members, 3)
-
-	_ = members
+	actual := make([]string, 0, len(listRsp.Members))
+	for _, member := range listRsp.Members {
+		actual = append(actual, member.GetUserInfo().GetUserId())
+	}
+	assert.ElementsMatch(t, []string{owner.UserID, members[0].UserID, members[1].UserID, m3.UserID}, actual)
 }
 
 // BVT-014 | P0 | 会话链路 | 列出会话，包含刚建的群

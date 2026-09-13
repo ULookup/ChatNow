@@ -24,7 +24,7 @@ Case IDs are stable identities, not completion claims. Put the ID in the case co
 | Performance | `PF-01` through `PF-08` |
 | Reliability | `RL-<category>-<number>` |
 
-Reliability is a distinct reserved namespace and layer. The current tree has no executable Reliability suite; reserving an ID never authorizes inventing a directory, target, command, or successful run.
+Reliability has an executable Compose gate in `tests/reliability` (`make -C tests test-reliability`). The existing RL-05 category contains circuit recovery and Push persistence cases; new cases use the category-number allocation below. A reserved ID is never evidence of a successful run.
 
 ## Allocation procedure
 
@@ -37,6 +37,18 @@ Reliability is a distinct reserved namespace and layer. The current tree has no 
 A reservation means only "claimed for coordination." It does not mean the test exists, compiles, ran, passed, covers the behavior, or is ready to merge. Remove an abandoned reservation or make its unimplemented status explicit in the owning work item.
 
 ## Naming and comments
+
+FN-TM-02 is allocated to `TestFN_TM_IdempotentRecordWithoutReadableMessage` for Issue #105. It exercises both existing accepted/persisted Redis records against a real healthy Message lookup with no readable row, requires an unavailable response, and preserves the guard without publishing another message.
+
+RL-MESSAGE-01 is allocated to `TestRL_IdempotentResponseDuringMessageOutage` for Issue #105. It stops Message before or after persistence, observes Transmite directly through the existing internal RPC client, checks both cache formats, and requires complete original results after recovery with one message and one timeline entry per member. Allocation alone is not execution evidence.
+
+RL-REDIS-01 is allocated to `TestRL_RedisCircuitCleanupAfterAssertionFailure` for Issue #102. It injects a failing assertion in an isolated subprocess of RL-05, then requires an already prepared caller to send successfully after cleanup. RL-05 retains Gateway outage assertions while measuring the single Transmite's Open rejections using per-request counters and direct internal RPC. Allocation is not execution evidence.
+
+RL-DISCOVERY-01 is allocated to `TestRL_DiscoveryRecoversAfterIdentityAddressChange` for Issue #97. It covers automatic RPC recovery after changing an isolated Compose Identity endpoint's IPv4 address, without restarting callers. The allocation alone is not passing evidence.
+
+RL-DISCOVERY-02 is allocated to `TestRL_RegistryRecoversAfterLeaseExpiry` for Issue #99. It suspends Identity renewal until the exact etcd registration expires, resumes that same process, and requires the key and authenticated account RPC to recover within 60 seconds. Identity, Gateway and Transmite process identities must remain unchanged. Failure cleanup restores Identity before synthetic data cleanup; allocation alone is not passing evidence.
+
+FN-AM-07 is allocated to `TestFN_AM_ExpiredJWTClassification` in `tests/func/jwt_expiry_test.go` for Issue #28. It covers signed JWT expiration classification and rejection controls through Identity and Gateway. Its synthetic signing fixture is `tests/pkg/fixture/jwt.go`; execution requires the isolated stack's synthetic `CHATNOW_JWT_CONFIG`. The case ID alone is not a passing verification result.
 
 Use a descriptive Go identifier such as `TestFN_MS_UpdateReadAck_Idempotent`, `TestScenario_MessageSearchES`, or `BenchmarkSendMessage`. Place a concise English case comment immediately above it. This example is an existing BVT identity, not a new reservation:
 

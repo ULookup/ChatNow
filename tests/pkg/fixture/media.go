@@ -154,3 +154,10 @@ func UploadLargeFile(t testing.TB, c *client.HTTPClient, content []byte, mime st
 	}
 	return initRsp.FileId
 }
+
+// MultipartPDFContent creates unique allowed content with a PDF signature.
+func MultipartPDFContent(size int) []byte {
+	content := bytes.Repeat([]byte(" "), size)
+	copy(content, []byte("%PDF-1.7\n% "+client.NewRequestID()+"\n"))
+	return content
+}

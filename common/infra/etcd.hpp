@@ -5,22 +5,27 @@
  * etcd 服务注册 / 发现封装
  * ---------------------------------------------------------------------------
  * 设计要点：
- *   1. Registry: 改用 lease keep-alive；析构走 Cancel（旧版调 Lease() 是错的）
+ *   1. Registry uses bounded lease replacement, with serialized shutdown.
  *   2. Discovery: 监听 basedir 下的 PUT/DELETE 事件，回调送给 ServiceManager
  *   3. 日志统一改为 LOG_xxx 宏（旧版用了 SPDLOG_xxx 不走我们的格式）
  *   4. 新增 Registry::unregister()：服务退出前主动撤销，避免依赖 lease 过期
- *   5. KeepAlive 间隔 3s 写死过短；改为 30s lease + 默认 keepalive 内置心跳
+ *   5. Replace 30-second leases every 10 seconds; retry failures after one second.
  * ===========================================================================
  */
 
 #include <etcd/Client.hpp>
-#include <etcd/KeepAlive.hpp>
 #include <etcd/Response.hpp>
 #include <etcd/Watcher.hpp>
 #include <etcd/Value.hpp>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
+#include <thread>
 #include "infra/logger.hpp"
 
 namespace chatnow
@@ -30,7 +35,7 @@ inline constexpr int kLeaseSeconds = 30;  // 30s lease，避免 3s 过短的瞬�
 
 /* brief: 服务注册客户端
  *  - 启动时调 registry(key, host) 写入实例信息
- *  - lease 周期内由后台 keep-alive 自动续期
+ *  - A worker renews registration by publishing a fresh lease before expiry.
  *  - 进程退出前应主动调 unregister() 撤销，让上游服务发现立即感知下线
  */
 class Registry
@@ -39,20 +44,18 @@ public:
     using ptr = std::shared_ptr<Registry>;
 
     explicit Registry(const std::string &host)
-        : _client(std::make_shared<etcd::Client>(host)),
-          _keep_alive(_client->leasekeepalive(kLeaseSeconds).get()),
-          _lease_id(_keep_alive->Lease()) {}
-
-    ~Registry() {
-        try {
-            // 撤销 lease，关联的 key 立刻失效；旧实现错调 Lease() 实际是 getter
-            _keep_alive->Cancel();
-            _client->leaserevoke(_lease_id).wait();
-        } catch(...) { /* 析构吞异常 */ }
+        : _client(std::make_shared<etcd::Client>(host)) {
+        _client->set_grpc_timeout(std::chrono::seconds(2));
+        _lease_id = make_lease_();
+        _recovery_thread = std::thread([this] { recover_(); });
     }
+
+    ~Registry() { unregister(); }
 
     /* brief: 注册服务实例 (key, value=host) */
     bool registry(const std::string &key, const std::string &val) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (_stopping) return false;
         try {
             auto resp = _client->put(key, val, _lease_id).get();
             if(!resp.is_ok()) {
@@ -60,6 +63,7 @@ public:
                 return false;
             }
             _registered_key = key;
+            _registered_value = val;
             return true;
         } catch(std::exception &e) {
             LOG_ERROR("注册数据异常 key={}: {}", key, e.what());
@@ -67,22 +71,81 @@ public:
         }
     }
 
-    /* brief: 主动注销 — 进程优雅退出时应在主循环停止后调用 */
-    void unregister() {
-        if(_registered_key.empty()) return;
+    // Stop recovery before removing the owned registration. Revoke only our
+    // lease, so shutdown cannot delete a replacement instance's newer value.
+    void unregister() noexcept {
         try {
-            _client->rm(_registered_key).wait();
-            _registered_key.clear();
-        } catch(std::exception &e) {
-            LOG_WARN("主动注销失败 key={}: {}", _registered_key, e.what());
-        }
+            std::call_once(_shutdown_once, [this] {
+                {
+                    std::lock_guard<std::mutex> lock(_mutex);
+                    _stopping = true;
+                    _registered_key.clear();
+                    _registered_value.clear();
+                }
+                _wake.notify_all();
+                if (_recovery_thread.joinable()) _recovery_thread.join();
+                discard_lease_(_lease_id);
+            });
+        } catch (...) {}
     }
 
 private:
+    int64_t make_lease_() {
+        auto granted = _client->leasegrant(kLeaseSeconds).get();
+        if (!granted.is_ok() || granted.value().lease() == 0) {
+            throw std::runtime_error("registry lease grant failed");
+        }
+        return granted.value().lease();
+    }
+
+    void discard_lease_(int64_t lease_id) noexcept {
+        try { if (lease_id != 0) _client->leaserevoke(lease_id).get(); } catch (...) {}
+    }
+
+    void recover_() {
+        std::unique_lock<std::mutex> lock(_mutex);
+        auto interval = std::chrono::seconds(kLeaseSeconds / 3);
+        bool retrying = false;
+        while (!_stopping) {
+            _wake.wait_for(lock, interval, [this] { return _stopping; });
+            if (_stopping) break;
+            if (_registered_key.empty()) continue;
+            try {
+                // The pinned KeepAlive implementation has unbounded stream
+                // creation/cancellation waits. Use only deadline-bound unary
+                // calls: publish the same value under a fresh lease before
+                // revoking the previous one. Existing channels deduplicate PUT.
+                auto replacement = make_lease_();
+                try {
+                    auto response = _client->put(_registered_key, _registered_value, replacement).get();
+                    if (!response.is_ok()) throw std::runtime_error("registry recovery put failed");
+                } catch (...) {
+                    discard_lease_(replacement);
+                    throw;
+                }
+                auto previous = _lease_id;
+                _lease_id = replacement;
+                discard_lease_(previous);
+                if (retrying) LOG_INFO("registry_recovery outcome=restored");
+                retrying = false;
+                interval = std::chrono::seconds(kLeaseSeconds / 3);
+            } catch (const std::exception &) {
+                retrying = true;
+                interval = std::chrono::seconds(1);
+                LOG_WARN("registry_recovery outcome=retry");
+            }
+        }
+    }
+
     std::shared_ptr<etcd::Client> _client;
-    std::shared_ptr<etcd::KeepAlive> _keep_alive;
-    uint64_t _lease_id;
-    std::string _registered_key;  // 注册的 key，析构 / 主动注销时使用
+    int64_t _lease_id{0};
+    std::string _registered_key;
+    std::string _registered_value;
+    std::mutex _mutex;
+    std::condition_variable _wake;
+    bool _stopping{false};
+    std::once_flag _shutdown_once;
+    std::thread _recovery_thread;
 };
 
 /* brief: 服务发现客户端
