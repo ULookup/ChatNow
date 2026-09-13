@@ -8,6 +8,8 @@ Read this reference before selecting, implementing, running, or reporting a test
 
 ## Layers and executable surface
 
+BLD-01 (`TestDefaultBuildContainsOnlyServices`) lives in `tests/pkg/buildcontract` and uses CMake's file API after configuring a real temporary Release tree. It requires exactly the nine service targets; the historical `common/test/` files are retained but excluded from the maintained root build. Set `CHATNOW_CMAKE_SOURCE` to the checkout on a native dependency host; without that explicit path the test reports a skip, never a runtime pass. `cd tests && CHATNOW_CMAKE_SOURCE="$(cd .. && pwd)" go test ./pkg/buildcontract -v -count=1` is the local graph gate. CI runs the compiled standard-library-only Go test inside its pinned native builder, then executes the default CMake build without a service allowlist and validates nine packaged artifacts. Temporary configuration files belong to `t.TempDir`; this test starts no services and owns no application data. A successful graph check is separate from successful compilation, BVT, Functional and Scenario.
+
 | Layer | Current location/tag | Purpose | Runnable repository command |
 |---|---|---|---|
 | L0 Build | `.github/workflows/ci.yml`; no test tag | C++ build, Go vet, Go formatting | Use the build workflow commands below. |

@@ -34,14 +34,16 @@ The CI Reliability job selects `tests/compose/reliability.yml` in addition to ro
 
 `Registry` in `common/infra/etcd.hpp` owns registration recovery. The pinned [etcd-cpp KeepAlive implementation](https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3/blob/ba6216385fc332b23d95683966824c2b86c2474e/src/KeepAlive.cpp) stops after a terminal error, while its [stream creation/cancellation](https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3/blob/ba6216385fc332b23d95683966824c2b86c2474e/src/v3/AsyncGRPC.cpp) includes unbounded completion-queue waits. Registry therefore uses only deadline-bound unary operations: every ten seconds it grants a fresh 30-second lease, publishes the remembered key/value under it, then revokes the previous lease. This trades up to three operations and one repeated PUT per successful cycle for explicit timeout and shutdown control; `ServiceChannel::append` deduplicates unchanged host values, retaining caller channels. Each operation has a two-second deadline, failed cycles retry after one second, and an unsuccessful candidate is revoked or expires naturally. `unregister()` is idempotent and permanently disables this Registry, joins recovery, and revokes the owned lease rather than deleting an unconditionally named key. Wire contracts, key paths, registration values and lease TTL are unchanged; lease IDs now rotate during normal operation, and older instances still lack recovery until upgraded. This does not claim complete service shutdown bounds for other unrelated worker/discovery threads or production-scale performance.
 
-The root CMake project adds all nine services. The CI-equivalent build is:
+The root CMake project adds only the nine services. `common/test/` is retained as historical source and is not part of the maintained build or test graph; do not restore those C++ targets as behavioral coverage. The default Release build used by CI is:
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
 Inspect root `CMakeLists.txt`, the affected service's `CMakeLists.txt`, and its `Dockerfile` when changing dependencies, generated Protobuf inputs, linking, or runtime packaging.
+
+BLD-01 in `tests/pkg/buildcontract` configures a real temporary Release tree and inspects CMake's file-API codemodel for exactly the nine service targets. Run `cd tests && CHATNOW_CMAKE_SOURCE="$(cd .. && pwd)" go test ./pkg/buildcontract -v -count=1` on a host with native dependencies. CI compiles this standard-library-only Go test and runs it in the pinned native builder, then builds the default target and validates all nine packaged service artifacts. The graph assertion alone does not prove compilation or service behavior.
 
 ## Configuration and runtime entry points
 

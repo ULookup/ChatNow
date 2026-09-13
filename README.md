@@ -59,12 +59,11 @@ Compose expects the nine service binaries and their dependency directories to be
 
 ### 3. Optional native build
 
-The CI builder compiles the services before Compose packages their runtime images. For host-side development, build the native targets first:
+The CI builder compiles the nine services before Compose packages their runtime images. The default build excludes historical `common/test/` C++ targets. For host-side development with the native dependencies installed:
 
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build . -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
 
 ### 4. Optional native service startup
@@ -76,14 +75,17 @@ cmake --build . -j$(nproc)
 # ... 共 9 个服务，全部配置文件见 conf/
 ```
 
-### 5. 跑测试
+### 5. Run tests
+
+The maintained test framework uses Go 1.24. Start the synthetic stack before the BVT and Functional gates. The optional build-graph check also requires native build dependencies.
 
 ```bash
-# C++ 单元测试
-./build/common/test/common_tests
-
-# Go 功能测试 (需要 Go 1.21+)
-cd tests && go test -tags=func -v ./func/
+cd tests
+make proto
+make test-bvt
+make test-func
+# Optional native build-graph contract; configures CMake without starting services.
+CHATNOW_CMAKE_SOURCE="$(cd .. && pwd)" go test ./pkg/buildcontract -v -count=1
 ```
 
 ## 架构

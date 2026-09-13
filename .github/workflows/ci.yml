@@ -27,7 +27,7 @@ jobs:
       - name: Download Go deps
         run: cd tests && go mod download
       - name: Validate CI gate contracts
-        run: cd tests && go test ./pkg/contracts -count=1
+        run: cd tests && go test ./pkg/contracts ./pkg/buildcontract -count=1
       - name: Validate fault-controller boundaries
         run: cd tests && go test ./pkg/chaos -count=1
       - name: Validate internal RPC transport
@@ -58,11 +58,18 @@ jobs:
           tags: chatnow-ci-builder:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Compile native build graph contract
+        run: cd tests && CGO_ENABLED=0 go test -c -o ../cmake-contract.test ./pkg/buildcontract
+      - name: Validate default CMake build graph
+        run: docker run --rm -v "$PWD:/workspace" -w /workspace -e CHATNOW_CMAKE_SOURCE=/workspace chatnow-ci-builder:ci ./cmake-contract.test -test.v
       - name: Build all Compose services once
         run: |
           docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
+          cmake --build build --parallel "$(nproc)"
           '
       - name: Package Compose service artifacts
         run: docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts

@@ -6,6 +6,7 @@ Case IDs are stable identities, not completion claims. Put the ID in the case co
 
 | Layer/domain | Namespace |
 |---|---|
+| Native build contract | `BLD-<two digits>`; `BLD-01` covers the default CMake graph |
 | BVT | `BVT-001` through `BVT-018` |
 | Functional: Identity | `FN-ID-<two digits>` |
 | Functional: Relationship | `FN-RL-<two digits>` |
