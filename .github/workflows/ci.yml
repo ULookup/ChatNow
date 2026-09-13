@@ -30,6 +30,8 @@ jobs:
         run: cd tests && go test ./pkg/contracts -count=1
       - name: Validate fault-controller boundaries
         run: cd tests && go test ./pkg/chaos -count=1
+      - name: Validate internal RPC transport
+        run: cd tests && go test ./pkg/client -count=1
       - name: Go vet
         run: cd tests && go vet ./...
       - name: Go fmt check

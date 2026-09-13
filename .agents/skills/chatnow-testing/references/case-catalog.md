@@ -38,6 +38,8 @@ A reservation means only "claimed for coordination." It does not mean the test e
 
 ## Naming and comments
 
+RL-REDIS-01 is allocated to `TestRL_RedisCircuitCleanupAfterAssertionFailure` for Issue #102. It injects a failing assertion in an isolated subprocess of RL-05, then requires an already prepared caller to send successfully after cleanup. RL-05 retains Gateway outage assertions while measuring the single Transmite's Open rejections using per-request counters and direct internal RPC. Allocation is not execution evidence.
+
 RL-DISCOVERY-01 is allocated to `TestRL_DiscoveryRecoversAfterIdentityAddressChange` for Issue #97. It covers automatic RPC recovery after changing an isolated Compose Identity endpoint's IPv4 address, without restarting callers. The allocation alone is not passing evidence.
 
 FN-AM-07 is allocated to `TestFN_AM_ExpiredJWTClassification` in `tests/func/jwt_expiry_test.go` for Issue #28. It covers signed JWT expiration classification and rejection controls through Identity and Gateway. Its synthetic signing fixture is `tests/pkg/fixture/jwt.go`; execution requires the isolated stack's synthetic `CHATNOW_JWT_CONFIG`. The case ID alone is not a passing verification result.

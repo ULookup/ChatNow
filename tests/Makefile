@@ -16,13 +16,13 @@ proto:
 	@echo "Generating protobuf..."
 	set -e; PROTO_BASE=../proto OUT_BASE=./proto; \
 	GO_OPTS="module=chatnow-tests/proto"; \
-	for p in $$PROTO_BASE/*/*.proto; do \
+	for p in $$PROTO_BASE/*/*.proto $$PROTO_BASE/common/auth/*.proto; do \
 		[ -f "$$p" ] || continue; \
 		rel=$${p#$$PROTO_BASE/}; \
 		dir=$$(dirname $$rel); \
 		GO_OPTS="$$GO_OPTS,M$$rel=chatnow-tests/proto/chatnow/$$dir"; \
 	done; \
-	for dir in common identity relationship conversation message transmite media presence push; do \
+	for dir in common common/auth identity relationship conversation message transmite media presence push; do \
 		mkdir -p "$$OUT_BASE/chatnow/$$dir"; \
 		for f in "$$PROTO_BASE/$$dir"/*.proto; do \
 			[ -f "$$f" ] || continue; \

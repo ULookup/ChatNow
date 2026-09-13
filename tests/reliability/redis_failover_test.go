@@ -4,19 +4,23 @@ package reliability_test
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 
 	"chatnow-tests/pkg/chaos"
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
 	"chatnow-tests/pkg/verify"
+	authmeta "chatnow-tests/proto/chatnow/common/auth"
 	identity "chatnow-tests/proto/chatnow/identity"
 	msg "chatnow-tests/proto/chatnow/message"
 	transmite "chatnow-tests/proto/chatnow/transmite"
@@ -39,17 +43,55 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 	}, prewarmRsp))
 	require.True(t, prewarmRsp.GetHeader().GetSuccess())
 	endpoints := reliabilityTransmiteEndpoints(t)
+	require.Len(t, endpoints, 1, "RL-05 requires one isolated Transmite for per-request circuit evidence")
+	metadata, err := proto.Marshal(&authmeta.RpcMetadata{
+		TraceId: client.NewRequestID(), UserId: user.UserID, DeviceId: user.DeviceID,
+	})
+	require.NoError(t, err)
+	internalSend := func(marker string) (*transmite.SendMessageRsp, error) {
+		rsp := &transmite.SendMessageRsp{}
+		err := user.DoInternalRPC(endpoints[0], "chatnow.transmite.MsgTransmitService", "SendMessage",
+			&transmite.SendMessageReq{
+				RequestId: client.NewRequestID(), ConversationId: convID, ClientMsgId: client.NewRequestID(),
+				Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
+					Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: marker}}},
+			}, rsp, metadata)
+		return rsp, err
+	}
+	internalWarm, err := internalSend("internal-prewarm")
+	require.NoError(t, err)
+	require.True(t, internalWarm.GetHeader().GetSuccess(), "direct RPC control must reach the real service")
 	openedBefore := reliabilitySumBVar(t, endpoints, "redis_circuit_open_total")
 	rejectedBefore := reliabilitySumBVar(t, endpoints, "redis_circuit_rejected_total")
 	recoveredBefore := reliabilitySumBVar(t, endpoints, "redis_circuit_recovered_total")
 
 	redisPaused := true
-	t.Cleanup(func() {
+	// The same idempotency key bounds recovery writes even after an ambiguous
+	// transport response. Redis cluster health alone does not close RPC circuits.
+	recoveryID := client.NewRequestID()
+	restore := func() {
 		if redisPaused {
 			chaos.UnpauseRedisCluster(t, HTTP.Config())
 			chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
+			redisPaused = false
 		}
-	})
+		uid := user.UserID
+		require.Eventually(t, func() bool {
+			profile := &identity.GetProfileRsp{}
+			if user.DoAuth("/service/identity/get_profile", &identity.GetProfileReq{
+				RequestId: client.NewRequestID(), UserId: &uid,
+			}, profile) != nil || !profile.GetHeader().GetSuccess() {
+				return false
+			}
+			sent := &transmite.SendMessageRsp{}
+			return user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
+				RequestId: client.NewRequestID(), ConversationId: convID, ClientMsgId: recoveryID,
+				Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
+					Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "recovered"}}},
+			}, sent) == nil && sent.GetHeader().GetSuccess()
+		}, 30*time.Second, 100*time.Millisecond, "Redis cleanup must restore account and message RPCs")
+	}
+	t.Cleanup(restore)
 	chaos.PauseRedisCluster(t, HTTP.Config())
 
 	rateLimited := 0
@@ -85,19 +127,43 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 	require.Greater(t, reliabilitySumBVar(t, endpoints, "redis_circuit_open_total"), openedBefore)
 	require.Greater(t, reliabilitySumBVar(t, endpoints, "redis_circuit_rejected_total"), rejectedBefore)
 
-	// Measure the open circuit immediately. Unrelated outage RPCs can cross
-	// its one-second probe deadline and legitimately enter HalfOpen instead.
-	started := time.Now()
-	fastFail := &transmite.SendMessageRsp{}
-	err := user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
-		RequestId: client.NewRequestID(), ConversationId: convID,
-		Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
-			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "fast-fail"}}},
-		ClientMsgId: client.NewRequestID(),
-	}, fastFail)
-	require.NoError(t, err)
-	require.False(t, fastFail.GetHeader().GetSuccess())
-	require.Less(t, time.Since(started), 50*time.Millisecond)
+	// A Gateway call includes a separate Redis circuit. Measure the Transmite
+	// boundary directly and classify every sample using its actual counters.
+	// No slow Open rejection can be discarded by retrying for a faster sample.
+	// This delay deliberately admits a recovery probe; it is not readiness
+	// evidence. Counter deltas below must prove that the probe actually ran.
+	time.Sleep(1100 * time.Millisecond)
+	openSamples, probeSamples := 0, 0
+	for i := 0; i < 8 && openSamples < 3; i++ {
+		failures := reliabilitySumBVar(t, endpoints, "redis_call_failure_total")
+		rejections := reliabilitySumBVar(t, endpoints, "redis_circuit_rejected_total")
+		opens := reliabilitySumBVar(t, endpoints, "redis_circuit_open_total")
+		started := time.Now()
+		failed, err := internalSend("fast-fail")
+		elapsed := time.Since(started)
+		require.NoError(t, err)
+		require.False(t, failed.GetHeader().GetSuccess())
+		failureDelta := reliabilitySumBVar(t, endpoints, "redis_call_failure_total") - failures
+		rejectedDelta := reliabilitySumBVar(t, endpoints, "redis_circuit_rejected_total") - rejections
+		openDelta := reliabilitySumBVar(t, endpoints, "redis_circuit_open_total") - opens
+		t.Logf("Transmite circuit sample %d: elapsed=%s failures=%d rejected=%d opened=%d",
+			i, elapsed, failureDelta, rejectedDelta, openDelta)
+		if failureDelta > 0 {
+			require.Positive(t, openDelta, "an admitted recovery attempt must reopen the paused Redis circuit")
+			probeSamples++
+			continue
+		}
+		require.Zero(t, failureDelta, "counters must be monotonic")
+		require.Zero(t, openDelta, "Open rejection must not change circuit generation")
+		require.Positive(t, rejectedDelta, "sample must prove an actual circuit rejection")
+		require.Less(t, elapsed, 50*time.Millisecond, "every proven Open rejection must meet the latency bound")
+		openSamples++
+	}
+	require.Equal(t, 3, openSamples, "insufficient phase-proven Open rejections in bounded sample set")
+	require.Positive(t, probeSamples, "the expired Open interval must exercise an actual recovery probe")
+	if os.Getenv("CHATNOW_REDIS_CLEANUP_CHILD") == "1" {
+		t.Fatal("injected RL-05 assertion failure")
+	}
 
 	uid := user.UserID
 	for i := 0; i < 3; i++ {
@@ -107,26 +173,39 @@ func TestRL_RedisCircuitFastFailAndRecovery(t *testing.T) {
 		}, rsp)
 	}
 
-	chaos.UnpauseRedisCluster(t, HTTP.Config())
-	redisPaused = false
-	chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
-	time.Sleep(1100 * time.Millisecond)
-	rsp := &identity.GetProfileRsp{}
-	require.NoError(t, user.DoAuth("/service/identity/get_profile", &identity.GetProfileReq{
-		RequestId: client.NewRequestID(), UserId: &uid,
-	}, rsp))
-	require.True(t, rsp.GetHeader().GetSuccess())
-
-	recoveredSend := &transmite.SendMessageRsp{}
-	require.NoError(t, user.DoAuth("/service/transmite/send", &transmite.SendMessageReq{
-		RequestId: client.NewRequestID(), ConversationId: convID,
-		Content: &msg.MessageContent{Type: msg.MessageType_TEXT,
-			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: "recovered"}}},
-		ClientMsgId: client.NewRequestID(),
-	}, recoveredSend))
-	require.True(t, recoveredSend.GetHeader().GetSuccess(), recoveredSend.GetHeader().GetErrorMessage())
+	restore()
 	require.Greater(t, reliabilitySumBVar(t, endpoints, "redis_circuit_recovered_total"), recoveredBefore,
 		"an Open->HalfOpen probe must recover the Transmite Redis circuit")
+}
+
+// RL-REDIS-01 | P0 | Assertion failure must restore actual message availability.
+func TestRL_RedisCircuitCleanupAfterAssertionFailure(t *testing.T) {
+	sender, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	peer, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	convID := fixture.CreateGroupWithMembers(t, sender, []*client.HTTPClient{peer}, "rl-cleanup")
+	sendReliabilityMessage(t, sender, convID, "cleanup-prewarm")
+	// The parent owns emergency unpause if the bounded child is interrupted.
+	childCompleted := false
+	t.Cleanup(func() {
+		if !childCompleted {
+			chaos.UnpauseRedisCluster(t, HTTP.Config())
+			chaos.WaitRedisCluster(t, HTTP.Config(), 60*time.Second)
+		}
+	})
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestRL_RedisCircuitFastFailAndRecovery$", "-test.v", "-test.count=1")
+	cmd.Env = append(os.Environ(), "CHATNOW_REDIS_CLEANUP_CHILD=1")
+	out, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
+		childCompleted = true // Go completed all test cleanups before exit(1).
+	}
+	require.Error(t, err, "child must execute the injected failure")
+	require.Contains(t, string(out), "injected RL-05 assertion failure", "child failed before the cleanup boundary")
+	// Do not poll here: the child's cleanup owns the convergence deadline.
+	sendReliabilityMessage(t, sender, convID, "cleanup-confirmed")
 }
 
 // RL-05 Push truth source: Rabbit accepts while Push is paused; after Redis is
