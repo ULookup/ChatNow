@@ -229,11 +229,13 @@ const (
 	consumerValidateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04@sha256:4fbb8e6a8395de5a7550b33509421a2bafbc0aab6c06ba2cef9ebffbc7092d90 ./scripts/validate_compose_artifacts.sh compose-artifacts`
 	nativeBuildCommand      = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci bash -lc '
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel "$(nproc)" --target conversation_server gateway_server identity_server media_server message_server presence_server push_server relationship_server transmite_server
+cmake --build build --parallel "$(nproc)"
 '`
-	packageCommand  = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts`
-	validateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/validate_compose_artifacts.sh compose-artifacts`
-	restoreCommand  = `for service in conversation gateway identity media message presence push relationship transmite; do
+	graphCompileCommand  = `cd tests && CGO_ENABLED=0 go test -c -o ../cmake-contract.test ./pkg/buildcontract`
+	graphValidateCommand = `docker run --rm -v "$PWD:/workspace" -w /workspace -e CHATNOW_CMAKE_SOURCE=/workspace chatnow-ci-builder:ci ./cmake-contract.test -test.v`
+	packageCommand       = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/package_compose_artifacts.sh build compose-artifacts`
+	validateCommand      = `docker run --rm -v "$PWD:/workspace" -w /workspace chatnow-ci-builder:ci ./scripts/validate_compose_artifacts.sh compose-artifacts`
+	restoreCommand       = `for service in conversation gateway identity media message presence push relationship transmite; do
   rm -rf "$service/build" "$service/depends"
   cp -a "compose-artifacts/$service/build" "$service/build"
   cp -a "compose-artifacts/$service/depends" "$service/depends"
@@ -250,6 +252,8 @@ func assertServiceArtifactProducer(t *testing.T, job workflowJob) {
 
 	valid := cloneWorkflowJob(job)
 	build := exactUsesStepIndex(valid, "docker/build-push-action@v6")
+	graphCompile := exactRunStepIndex(valid, graphCompileCommand)
+	graphValidate := exactRunStepIndex(valid, graphValidateCommand)
 	native := exactRunStepIndex(valid, nativeBuildCommand)
 	pack := exactRunStepIndex(valid, packageCommand)
 	validate := exactRunStepIndex(valid, validateCommand)
@@ -263,8 +267,16 @@ func assertServiceArtifactProducer(t *testing.T, job workflowJob) {
 		"validation after upload": func(job *workflowJob) {
 			job.Steps[validate], job.Steps[upload] = job.Steps[upload], job.Steps[validate]
 		},
-		"native build bypassed":   func(job *workflowJob) { job.Steps[native].If = "${{ false }}" },
-		"native build duplicated": func(job *workflowJob) { job.Steps = append(job.Steps, job.Steps[native]) },
+		"native build bypassed":       func(job *workflowJob) { job.Steps[native].If = "${{ false }}" },
+		"native build duplicated":     func(job *workflowJob) { job.Steps = append(job.Steps, job.Steps[native]) },
+		"graph compile bypassed":      func(job *workflowJob) { job.Steps[graphCompile].If = "${{ false }}" },
+		"graph check allowed to fail": func(job *workflowJob) { job.Steps[graphValidate].ContinueOnError = true },
+		"graph check skips native configuration": func(job *workflowJob) {
+			job.Steps[graphValidate].Run = strings.ReplaceAll(graphValidateCommand, "-e CHATNOW_CMAKE_SOURCE=/workspace ", "")
+		},
+		"graph check after native build": func(job *workflowJob) {
+			job.Steps[graphValidate], job.Steps[native] = job.Steps[native], job.Steps[graphValidate]
+		},
 	} {
 		t.Run("producer rejects "+name, func(t *testing.T) {
 			invalid := cloneWorkflowJob(valid)
@@ -285,6 +297,9 @@ func validateServiceArtifactProducer(job workflowJob) error {
 		{"checkout", exactUsesStepIndex(job, "actions/checkout@v4")},
 		{"Buildx setup", exactUsesStepIndex(job, "docker/setup-buildx-action@v3")},
 		{"builder image build", exactUsesStepIndex(job, "docker/build-push-action@v6")},
+		{"Go setup", exactUsesStepIndex(job, "actions/setup-go@v5")},
+		{"build graph test compilation", exactRunStepIndex(job, graphCompileCommand)},
+		{"build graph validation", exactRunStepIndex(job, graphValidateCommand)},
 		{"native service build", exactRunStepIndex(job, nativeBuildCommand)},
 		{"artifact package", exactRunStepIndex(job, packageCommand)},
 		{"artifact validation", exactRunStepIndex(job, validateCommand)},
