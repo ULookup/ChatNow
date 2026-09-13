@@ -173,7 +173,11 @@ inline JwtClaims JwtCodec::verify(const std::string& token, bool require_refresh
         if (decoded.get_expires_at() <= now) {
             // 仍需先校验签名，避免泄漏过期 token 也被接受的可能。
             try {
-                auto v = jwt::verify().allow_algorithm(jwt::algorithm::hs256{it->second}).leeway(60);
+                // This branch always rejects expiration below. Verify the signature
+                // and other time claims without reclassifying an old exp as invalid.
+                auto v = jwt::verify().allow_algorithm(jwt::algorithm::hs256{it->second})
+                    .leeway(0)
+                    .with_claim("exp", [](const auto&, std::error_code&) {});
                 v.verify(decoded);
             } catch (const std::exception&) {
                 throw ServiceError(kAuthTokenInvalid, "signature invalid");

@@ -25,7 +25,7 @@
 
 #include <bthread/bthread.h>
 
-#include <cassert>
+#include <cstdlib>
 #include <string>
 
 namespace chatnow::log {
@@ -48,7 +48,10 @@ inline bthread_key_t& log_fields_key() {
     struct KeyInit {
         bthread_key_t key;
         KeyInit() {
-            assert(0 == bthread_key_create(&key, &log_fields_dtor));
+            // Release builds must initialize the key too; assert removes its expression.
+            if (bthread_key_create(&key, &log_fields_dtor) != 0) {
+                std::abort();
+            }
         }
     };
     static KeyInit init;

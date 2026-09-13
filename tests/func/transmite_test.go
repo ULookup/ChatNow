@@ -5,6 +5,7 @@ package func_test
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -359,6 +360,9 @@ func TestSendMessage_Idempotent(t *testing.T) {
 	require.NotNil(t, rsp1.Message)
 
 	// Second send with same client_msg_id (new request_id).
+	db := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer db.Close()
+	db.WaitMessageExists(t, rsp1.Message.MessageId, 10*time.Second)
 	req2 := &transmite.SendMessageReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
@@ -374,6 +378,8 @@ func TestSendMessage_Idempotent(t *testing.T) {
 	require.True(t, rsp2.Header.Success)
 	require.NotNil(t, rsp2.Message)
 	assert.Equal(t, rsp1.Message.MessageId, rsp2.Message.MessageId, "same client_msg_id should return same message_id")
+	require.NotZero(t, rsp1.Message.SeqId)
+	assert.Equal(t, rsp1.Message.SeqId, rsp2.Message.SeqId)
 }
 
 // ---------------------------------------------------------------------------

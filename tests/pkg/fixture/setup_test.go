@@ -14,7 +14,7 @@ import (
 var HTTP *client.HTTPClient
 
 func TestMain(m *testing.M) {
-	cfg := client.LoadConfig("")
+	cfg := client.LoadConfig("../../config.yaml")
 	HTTP = client.NewHTTPClient(cfg)
 	if err := cleanup.WaitForStackReady(cfg, 120*1e9); err != nil {
 		panic(err)

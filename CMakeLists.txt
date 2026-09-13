@@ -18,6 +18,6 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/relationship)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/conversation)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/gateway)
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/push)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/common/test)
+# common/test is historical; maintained behavioral tests live under tests/ in Go.
 # 4.
 set(CMAKE_INSTALL_PREFIX ${CMAKE_CURRENT_BINARY_DIR})

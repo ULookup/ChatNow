@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,6 +13,7 @@ import (
 
 	"chatnow-tests/pkg/client"
 	"chatnow-tests/pkg/fixture"
+	"chatnow-tests/pkg/verify"
 	identity "chatnow-tests/proto/chatnow/identity"
 	media "chatnow-tests/proto/chatnow/media"
 )
@@ -506,10 +506,10 @@ func TestFN_ID_UpdateProfileAvatarUpload(t *testing.T) {
 	}
 	rsp := &identity.UpdateProfileRsp{}
 	require.NoError(t, authed.DoAuth("/service/identity/update_profile", req, rsp))
-	require.True(t, rsp.Header.Success)
+	require.True(t, rsp.Header.Success, "update profile: code=%d message=%s", rsp.Header.ErrorCode, rsp.Header.ErrorMessage)
 	require.NotNil(t, rsp.UserInfo)
 	require.NotEmpty(t, rsp.UserInfo.AvatarUrl)
-	assert.True(t, strings.HasSuffix(rsp.UserInfo.AvatarUrl, "/avatar/"+fileID))
+	verify.FileURLContentEquals(t, rsp.UserInfo.AvatarUrl, content)
 
 	getRsp := &identity.GetProfileRsp{}
 	require.NoError(t, authed.DoAuth(

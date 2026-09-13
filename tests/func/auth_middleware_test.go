@@ -69,7 +69,7 @@ func TestJWTRequired_GetProfile_NoToken(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestJWTRequired_ExpiredToken(t *testing.T) {
+func TestJWTRequired_InvalidToken(t *testing.T) {
 	expiredClient := client.NewHTTPClient(HTTP.Config())
 	expiredClient.AccessToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
 	req := &identity.GetProfileReq{RequestId: client.NewRequestID()}

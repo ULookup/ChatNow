@@ -45,22 +45,28 @@ sudo apt install -y build-essential cmake libprotobuf-dev libbrpc-dev \
 sudo bash scripts/install_aws_sdk_linux.sh
 ```
 
-### 2. 启动中间件
+### 2. Start the Compose runtime
+
+The root Compose profile contains the infrastructure and all nine ChatNow processes. Prepare synthetic local secret inputs as described in [Runtime Secret Management](docs/operations/runtime-secrets.md); never use production values in this profile.
 
 ```bash
-# 一键启动: MySQL + Redis Cluster(6n) + ES + RabbitMQ + etcd + MinIO
-docker compose up -d
+docker compose config
+docker compose up -d --build
+./scripts/wait_for_services.sh
 ```
 
-### 3. 编译
+Compose expects the nine service binaries and their dependency directories to be prepared first, as described in [Compose Runtime Operations](docs/operations/compose-runtime.md). CI builds and restores those artifacts into each disposable test job. Consult PR #89 for current gate results; this local profile is not a production deployment.
+
+### 3. Optional native build
+
+The CI builder compiles the nine services before Compose packages their runtime images. The default build excludes historical `common/test/` C++ targets. For host-side development with the native dependencies installed:
 
 ```bash
-mkdir build && cd build
-cmake ..
-cmake --build . -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
 
-### 4. 启动服务
+### 4. Optional native service startup
 
 ```bash
 # 例: 以 flagfile 启动某个服务
@@ -69,14 +75,17 @@ cmake --build . -j$(nproc)
 # ... 共 9 个服务，全部配置文件见 conf/
 ```
 
-### 5. 跑测试
+### 5. Run tests
+
+The maintained test framework uses Go 1.24. Start the synthetic stack before the BVT and Functional gates. The optional build-graph check also requires native build dependencies.
 
 ```bash
-# C++ 单元测试
-./build/common/test/common_tests
-
-# Go 功能测试 (需要 Go 1.21+)
-cd tests && go test -tags=func -v ./func/
+cd tests
+make proto
+make test-bvt
+make test-func
+# Optional native build-graph contract; configures CMake without starting services.
+CHATNOW_CMAKE_SOURCE="$(cd .. && pwd)" go test ./pkg/buildcontract -v -count=1
 ```
 
 ## 架构
@@ -174,7 +183,8 @@ ChatNow/
 | [设计 Spec](docs/superpowers/specs/) | 20+ 份设计文档，覆盖缓存 / MQ / Proto / 可靠性 |
 | [实施 Plan](docs/superpowers/plans/) | 15+ 份实施计划，按分支独立 |
 | [运维 Runbook](docs/operations/) | JWT 轮换 / 日志规范 / 监控 / 烟雾测试 |
-| [API 交接](API_HANDOVER.md) | 客户端 SDK 契约 & 错误码 |
+| [Compose runtime operations](docs/operations/compose-runtime.md) | Root topology, bootstrap, semantic readiness, persistence, and evidence status |
+| [Client retry and error handling](docs/client-sdk/error-retry.md) | Client retry boundaries and error categories |
 
 ### 运维
 
