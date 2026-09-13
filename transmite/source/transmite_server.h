@@ -338,7 +338,8 @@ public:
             std::make_shared<std::atomic<bool>>(false);
         try {
             std::map<std::string, std::string> _mq_headers;
-            ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
+            // Capture the authenticated trace explicitly at the asynchronous MQ boundary.
+            if (!auth.trace_id.empty()) _mq_headers[::chatnow::mq::kTraceHeader] = auth.trace_id;
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
                 [async_done, response, rid, done_called, redis, idem_key, msg_id](PublishStatus status, const std::string &mq_msg) {
@@ -413,6 +414,15 @@ public:
                                       randomized_ttl(std::chrono::seconds(60)));
     };
 
+    auto fetch_uncached_members = [&]() -> MembersResult {
+        // An unavailable cache cannot authorize from stale L1 state. Consult the
+        // authoritative service for this request, without publishing an unfenced fill.
+        auto members = fetch_members_from_conversation_service_(
+            chat_session_id, rid, caller_cntl);
+        if (!members) return {};
+        return {std::move(*members), false, kUnknownCacheVersion};
+    };
+
     // ① L1 hit → fast path
     if (auto local = try_local()) return *local;
 
@@ -437,6 +447,7 @@ public:
         if (!snap.stable) {
             metrics::g_members_cache_snapshot_race_total << 1;
             release_guard();
+            if (!cache_version_is_known(snap.version)) return fetch_uncached_members();
             return {};
         }
         auto members = std::move(snap.members);
@@ -500,6 +511,7 @@ public:
         auto snap = _members_cache->list_snapshot(chat_session_id);
         if (!snap.stable) {
             metrics::g_members_cache_snapshot_race_total << 1;
+            if (!cache_version_is_known(snap.version)) return fetch_uncached_members();
             return {};
         }
         auto members = std::move(snap.members);
@@ -891,7 +903,7 @@ public:
         }
         _exchange_name = exchange_name;
         _routing_key.clear();  // publisher-only：FANOUT 路由忽略 routing_key，固定空串
-        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, password, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         declare_settings settings {
             .exchange = exchange_name,

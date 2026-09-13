@@ -14,6 +14,9 @@
 #include "common/error.pb.h"
 #include "common/envelope.pb.h"
 #include "identity/identity_service.pb.h"
+#include "media/media_service.pb.h"
+#include "auth/forward_auth.hpp"
+#include "mq/channel.hpp"
 
 #include "auth/auth_context.hpp"
 #include "auth/jwt_codec.hpp"
@@ -43,7 +46,8 @@ public:
                         const std::shared_ptr<MailClient> &mail_client,
                         const std::shared_ptr<auth::JwtCodec> &jwt_codec,
                         const std::shared_ptr<auth::JwtStore> &jwt_store,
-                        const std::string &media_public_url_prefix,
+                        const ServiceManager::ptr &channels,
+                        const std::string &media_service_name,
                         const ESOutbox::ptr &es_outbox,
                         const std::shared_ptr<elasticlient::Client> &es_reaper_client)
         : _mysql_user(std::make_shared<UserTable>(mysql_client)),
@@ -53,7 +57,7 @@ public:
           _mail_client(mail_client),
           _jwt_codec(jwt_codec),
           _jwt_store(jwt_store),
-          _media_public_url_prefix(media_public_url_prefix),
+          _channels(channels), _media_service_name(media_service_name),
           _es_outbox(es_outbox),
           _es_user_reaper(std::make_shared<ESUser>(es_reaper_client))
     {
@@ -443,7 +447,7 @@ public:
                 throw ServiceError(::chatnow::error::kAuthUserNotFound,
                                    "user not found: " + uid);
             }
-            fill_user_info(response->mutable_user_info(), *user);
+            fill_user_info(response->mutable_user_info(), *user, cntl);
         });
     }
 
@@ -496,7 +500,7 @@ public:
                                              user->nickname(), user->description(),
                                              user->avatar_id());
             });
-            fill_user_info(response->mutable_user_info(), *user);
+            fill_user_info(response->mutable_user_info(), *user, cntl);
         });
     }
 
@@ -516,7 +520,7 @@ public:
             auto* user_map = response->mutable_users_info();
             for (auto& u : users) {
                 ::chatnow::common::UserInfo ui;
-                fill_user_info(&ui, u);
+                fill_user_info(&ui, u, cntl);
                 (*user_map)[ui.user_id()] = ui;
             }
         });
@@ -532,7 +536,7 @@ public:
         HANDLE_RPC(cntl, request, response, {
             auto users = _es_user->search(request->search_key(), {}, 20);
             for (auto& u : users) {
-                fill_user_info(response->add_user_info(), u);
+                fill_user_info(response->add_user_info(), u, cntl);
             }
         });
     }
@@ -545,7 +549,8 @@ private:
     std::shared_ptr<MailClient>         _mail_client;
     std::shared_ptr<auth::JwtCodec>     _jwt_codec;
     std::shared_ptr<auth::JwtStore>     _jwt_store;
-    std::string                         _media_public_url_prefix;
+    ServiceManager::ptr _channels;
+    std::string _media_service_name;
     ESOutbox::ptr                          _es_outbox;
     std::shared_ptr<ESUser>                _es_user_reaper;
     std::shared_ptr<std::atomic<bool>>     _es_reaper_running;
@@ -622,18 +627,30 @@ private:
     // ---- 工具方法 ----
     std::string uuid() { return ::chatnow::uuid(); }
 
-    std::string make_avatar_url(const std::string &avatar_id) {
-        if (avatar_id.empty() || _media_public_url_prefix.empty()) return "";
-        return _media_public_url_prefix + "/" + avatar_id;
+    std::string make_avatar_url(const std::string &avatar_id, brpc::Controller* incoming) {
+        if (avatar_id.empty()) return "";
+        auto channel = _channels->choose(_media_service_name);
+        if (!channel) return "";
+        ::chatnow::media::MediaService_Stub stub(channel.get());
+        ::chatnow::media::GetFileInfoReq request;
+        ::chatnow::media::GetFileInfoRsp response;
+        request.set_request_id(uuid());
+        request.set_file_id(avatar_id);
+        brpc::Controller outgoing;
+        outgoing.set_timeout_ms(1000);
+        ::chatnow::auth::forward_auth_metadata(incoming, &outgoing);
+        stub.GetFileInfo(&outgoing, &request, &response, nullptr);
+        if (outgoing.Failed() || !response.header().success()) return "";
+        return response.file_info().public_url();
     }
 
     // ---- UserInfo 组装（后续 RPC 共用） ----
-    void fill_user_info(::chatnow::common::UserInfo *u, const User &user) {
+    void fill_user_info(::chatnow::common::UserInfo *u, const User &user, brpc::Controller* incoming) {
         u->set_user_id(user.user_id());
         u->set_nickname(user.nickname());
         if (!user.description().empty()) u->set_bio(user.description());
         if (!user.phone().empty()) u->set_phone(user.phone());
-        u->set_avatar_url(make_avatar_url(user.avatar_id()));
+        u->set_avatar_url(make_avatar_url(user.avatar_id(), incoming));
     }
 };
 
@@ -747,11 +764,14 @@ public:
     void make_discovery_object(const std::string &reg_host,
                             const std::string &base_service_name)
     {
-        auto put_cb = [](const std::string &name, const std::string &host) {
-            LOG_INFO("Discovery put: {} @ {}", name, host);
+        _channels = std::make_shared<ServiceManager>();
+        _media_service_name = base_service_name + "/media_service";
+        _channels->declared(_media_service_name);
+        auto put_cb = [channels = _channels](const std::string &name, const std::string &host) {
+            channels->onServiceOnline(name, host);
         };
-        auto del_cb = [](const std::string &name, const std::string &host) {
-            LOG_INFO("Discovery del: {} @ {}", name, host);
+        auto del_cb = [channels = _channels](const std::string &name, const std::string &host) {
+            channels->onServiceOffline(name, host);
         };
         _service_discover = std::make_shared<Discovery>(reg_host, base_service_name, put_cb, del_cb);
     }
@@ -793,7 +813,7 @@ public:
         auto es_reaper_client = ESClientFactory::create(_es_hosts);
         IdentityServiceImpl *identity_service = new IdentityServiceImpl(
             _mysql_client, _es_client, _redis_client, _user_info_cache, _mail_client,
-            _jwt_codec, _jwt_store, _media_public_url_prefix,
+            _jwt_codec, _jwt_store, _channels, _media_service_name,
             _es_outbox, es_reaper_client);
         _service_impl = identity_service;
         int ret = _rpc_server->AddService(identity_service, brpc::ServiceOwnership::SERVER_OWNS_SERVICE);
@@ -841,6 +861,8 @@ private:
     std::shared_ptr<MailClient> _mail_client;
 
     std::string _media_public_url_prefix;
+    ServiceManager::ptr _channels;
+    std::string _media_service_name;
     Discovery::ptr _service_discover;
 
     std::shared_ptr<::chatnow::auth::JwtCodec> _jwt_codec;
