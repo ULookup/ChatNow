@@ -5,6 +5,7 @@ package bvt_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
@@ -78,7 +79,15 @@ func TestBVT_CompleteUpload_Success(t *testing.T) {
 	}
 	putResp, err := http.DefaultClient.Do(httpReq)
 	require.NoError(t, err)
-	require.Equal(t, 200, putResp.StatusCode, "PUT 到 MinIO 失败")
+	if putResp.StatusCode != http.StatusOK {
+		var detail struct {
+			Code    string `xml:"Code"`
+			Message string `xml:"Message"`
+		}
+		_ = xml.NewDecoder(io.LimitReader(putResp.Body, 4096)).Decode(&detail)
+		putResp.Body.Close()
+		t.Fatalf("S3 PUT failed: status=%d code=%s message=%s", putResp.StatusCode, detail.Code, detail.Message)
+	}
 	putResp.Body.Close()
 
 	// Step 3: CompleteUpload

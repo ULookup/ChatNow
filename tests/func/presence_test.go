@@ -120,25 +120,30 @@ func TestSendTyping_GroupChat_Success(t *testing.T) {
 
 // FN-PR-01 | P1 | state transition | 同用户多设备在线，presence 为 online
 func TestFN_PR_GetPresence_MultiDevice(t *testing.T) {
-	authed, _, _ := fixture.RegisterAndLogin(t, HTTP)
-
-	// 设备 A 连接 WS
-	wsA, err := client.NewWSClient(HTTP.Config(), authed.AccessToken, authed.UserID, "device-A")
-	require.NoError(t, err)
-	defer wsA.Close()
-
-	// 设备 B 连接 WS（同用户不同设备）
-	wsB, err := client.NewWSClient(HTTP.Config(), authed.AccessToken, authed.UserID, "device-B")
-	require.NoError(t, err)
-	defer wsB.Close()
-
-	// 查询 presence，应为 ONLINE
-	req := &presence.GetPresenceReq{RequestId: client.NewRequestID(), UserId: authed.UserID}
-	rsp := &presence.GetPresenceRsp{}
-	require.NoError(t, authed.DoAuth("/service/presence/get", req, rsp))
-	require.True(t, rsp.Header.Success)
-	assert.Equal(t, presence.PresenceState_ONLINE, rsp.Presence.AggregatedState)
-	assert.GreaterOrEqual(t, len(rsp.Presence.Devices), 2, "多设备应列出 >=2 个 device")
+	_, username, password := fixture.RegisterAndLogin(t, HTTP)
+	// Each device needs its own Identity-issued JWT; changing the WS payload
+	// alone cannot override the authoritative device claim.
+	deviceA := fixture.LoginUser(t, HTTP, username, password)
+	deviceB := fixture.LoginUser(t, HTTP, username, password)
+	require.NotEqual(t, deviceA.DeviceID, deviceB.DeviceID)
+	fixture.ConnectWS(t, deviceA)
+	fixture.ConnectWS(t, deviceB)
+	require.Eventually(t, func() bool {
+		rsp := &presence.GetPresenceRsp{}
+		err := deviceA.DoAuth("/service/presence/get", &presence.GetPresenceReq{
+			RequestId: client.NewRequestID(), UserId: deviceA.UserID,
+		}, rsp)
+		if err != nil || !rsp.GetHeader().GetSuccess() {
+			return false
+		}
+		devices := map[string]bool{}
+		for _, device := range rsp.GetPresence().GetDevices() {
+			if device.GetState() == presence.PresenceState_ONLINE {
+				devices[device.GetDeviceId()] = true
+			}
+		}
+		return devices[deviceA.DeviceID] && devices[deviceB.DeviceID]
+	}, 5*time.Second, 50*time.Millisecond, "both authenticated devices must be online")
 }
 
 // FN-PR-02 | P1 | state transition | 心跳续期，TTL 刷新

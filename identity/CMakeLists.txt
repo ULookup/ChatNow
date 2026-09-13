@@ -7,7 +7,7 @@ set(target "identity_server")
 # 3. 检测并生成框架代码
 # 3.1 添加所需的proto映射代码文件名称
 set(proto_path ${CMAKE_CURRENT_SOURCE_DIR}/../proto)
-set(proto_files common/types.proto common/error.proto common/envelope.proto common/auth/metadata.proto identity/identity_service.proto)
+set(proto_files common/types.proto common/error.proto common/envelope.proto common/auth/metadata.proto identity/identity_service.proto media/media_service.proto)
 # 3.2 检测框架代码文件是否已经生成
 set(proto_srcs "")
 foreach(proto_file ${proto_files})
@@ -60,11 +60,12 @@ aux_source_directory(${CMAKE_CURRENT_SOURCE_DIR}/source src_files)
 # 5. 声明目标及依赖
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
-target_link_libraries(${target} -lgflags -lspdlog
+find_package(jsoncpp CONFIG REQUIRED)
+target_link_libraries(${target} jsoncpp_lib -lgflags -lspdlog -lglog
     -lfmt -lbrpc -lssl -lcrypto
     -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl -lodb-mysql -lodb -lodb-boost
-    -lredis++ -lhiredis -lcpr -lelasticlient -ljsoncpp
+    -lredis++ -lhiredis -lcpr -lelasticlient
     -lcrypt)
 
 # FIXME(3.0): identity_client test code is stale (references pre-3.0 APIs: MailRegisterReq, UserService_Stub, etc.)

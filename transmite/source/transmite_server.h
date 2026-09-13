@@ -177,15 +177,19 @@ public:
                         state.status == IdempotencyStatus::Persisted) {
                         auto persisted_msg = select_existing_message_by_client_msg_(
                             uid, client_msg_id, rid, static_cast<brpc::Controller*>(controller));
+                        if (!persisted_msg.has_value() || persisted_msg->message_id() == 0 ||
+                            persisted_msg->seq_id() == 0) {
+                            // This request does not own the existing acceptance guard.
+                            // Keep it so a retry can recover the original durable result
+                            // without allocating another sequence or publishing again.
+                            return err_response(rid, chatnow::error::kSystemUnavailable,
+                                                "duplicate request in flight");
+                        }
                         LOG_INFO("请求ID: {} - 命中幂等 client_msg_id={} 直接返回旧消息",
                                  rid, client_msg_id);
                         response->mutable_header()->set_request_id(rid);
                         response->mutable_header()->set_success(true);
-                        if (persisted_msg.has_value()) {
-                            response->mutable_message()->CopyFrom(*persisted_msg);
-                        } else {
-                            response->mutable_message()->set_message_id(state.message_id);
-                        }
+                        response->mutable_message()->CopyFrom(*persisted_msg);
                         return;
                     }
                     if (state.status == IdempotencyStatus::Corrupt) {
@@ -338,7 +342,8 @@ public:
             std::make_shared<std::atomic<bool>>(false);
         try {
             std::map<std::string, std::string> _mq_headers;
-            ::chatnow::mq::mq_inject_trace_headers(_mq_headers);
+            // Capture the authenticated trace explicitly at the asynchronous MQ boundary.
+            if (!auth.trace_id.empty()) _mq_headers[::chatnow::mq::kTraceHeader] = auth.trace_id;
             _publisher->publish_confirm(internal_msg.SerializeAsString(),
                 _mq_headers,
                 [async_done, response, rid, done_called, redis, idem_key, msg_id](PublishStatus status, const std::string &mq_msg) {
@@ -413,6 +418,15 @@ public:
                                       randomized_ttl(std::chrono::seconds(60)));
     };
 
+    auto fetch_uncached_members = [&]() -> MembersResult {
+        // An unavailable cache cannot authorize from stale L1 state. Consult the
+        // authoritative service for this request, without publishing an unfenced fill.
+        auto members = fetch_members_from_conversation_service_(
+            chat_session_id, rid, caller_cntl);
+        if (!members) return {};
+        return {std::move(*members), false, kUnknownCacheVersion};
+    };
+
     // ① L1 hit → fast path
     if (auto local = try_local()) return *local;
 
@@ -437,6 +451,7 @@ public:
         if (!snap.stable) {
             metrics::g_members_cache_snapshot_race_total << 1;
             release_guard();
+            if (!cache_version_is_known(snap.version)) return fetch_uncached_members();
             return {};
         }
         auto members = std::move(snap.members);
@@ -500,6 +515,7 @@ public:
         auto snap = _members_cache->list_snapshot(chat_session_id);
         if (!snap.stable) {
             metrics::g_members_cache_snapshot_race_total << 1;
+            if (!cache_version_is_known(snap.version)) return fetch_uncached_members();
             return {};
         }
         auto members = std::move(snap.members);
@@ -714,6 +730,10 @@ public:
         chatnow::message::SelectByClientMsgIdReq req;
         chatnow::message::SelectByClientMsgIdRsp rsp;
         brpc::Controller cntl;
+        // Leave time for Gateway to return the existing retryable envelope.
+        // A lookup is read-only; recovery retries remain the client's decision.
+        cntl.set_timeout_ms(1000);
+        cntl.set_max_retry(0);
         if (caller_cntl) chatnow::auth::forward_auth_metadata(caller_cntl, &cntl);
         req.set_request_id(rid);
         req.set_client_msg_id(client_msg_id);
@@ -891,7 +911,7 @@ public:
         }
         _exchange_name = exchange_name;
         _routing_key.clear();  // publisher-only：FANOUT 路由忽略 routing_key，固定空串
-        std::string amqp_url = "amqp://" + user + ":" + password + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, password, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         declare_settings settings {
             .exchange = exchange_name,

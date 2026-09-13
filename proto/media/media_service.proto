@@ -36,6 +36,8 @@ message FileInfo {
     int64  file_size      = 3;
     string mime_type      = 4;
     int64  uploaded_at_ms = 5;
+    // Canonical unsigned URL for committed public objects; empty for private files.
+    string public_url = 6;
 }
 
 // ===== 单段三步上传 =====
