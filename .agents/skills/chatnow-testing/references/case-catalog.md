@@ -38,6 +38,8 @@ A reservation means only "claimed for coordination." It does not mean the test e
 
 ## Naming and comments
 
+FN-AM-07 is allocated to `TestFN_AM_ExpiredJWTClassification` in `tests/func/jwt_expiry_test.go` for Issue #28. It covers signed JWT expiration classification and rejection controls through Identity and Gateway. Its synthetic signing fixture is `tests/pkg/fixture/jwt.go`; execution requires the isolated stack's synthetic `CHATNOW_JWT_CONFIG`. The case ID alone is not a passing verification result.
+
 Use a descriptive Go identifier such as `TestFN_MS_UpdateReadAck_Idempotent`, `TestScenario_MessageSearchES`, or `BenchmarkSendMessage`. Place a concise English case comment immediately above it. This example is an existing BVT identity, not a new reservation:
 
 ```go

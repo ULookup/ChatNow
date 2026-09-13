@@ -66,6 +66,8 @@ Relationship emits friend-request and accepted-request notifications, and Conver
 - Tests: `tests/bvt/auth_test.go`, `tests/func/identity_test.go`, `tests/func/auth_middleware_test.go`, `tests/func/security_test.go`, `tests/func/scenarios_test.go`, and `tests/func/ws_notify_test.go` (`FN-WS-09`).
 - Invariants: only Identity issues/refreshes tokens; access and refresh token purposes remain distinct; downstream identity comes from verified claims and forwarded metadata, not request bodies; Push admission must resolve revocation before publishing any authenticated-session side effect.
 
+The shared `JwtCodec` reports `1002` for a correctly signed expired JWT regardless of its age. In the expired branch, signature verification and strict `iat`/`nbf` checks run before the unconditional expiration rejection; that secondary verifier does not check `exp` again. This does not extend token validity or return authenticated claims. Invalid signatures, unknown keys, and invalid future time claims remain rejected with `1003`. FN-AM-07 exercises Identity refresh responses and Gateway rejection using synthetic signed tokens.
+
 ## Runtime secrets
 
 ### Current
