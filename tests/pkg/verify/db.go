@@ -1,6 +1,7 @@
 package verify
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -9,9 +10,54 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 )
 
+// HoldMemberExit stages a synthetic membership exit and exposes an observable
+// lock waiter. Cleanup rolls back if the test exits before committing the fault.
+func (v *DBVerifier) HoldMemberExit(t testing.TB, userID, conversationID string) (func(), func() bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	tx, err := v.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin member exit: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback() })
+	var connectionID uint64
+	if err := tx.QueryRowContext(ctx, "SELECT CONNECTION_ID()").Scan(&connectionID); err != nil {
+		t.Fatalf("read lock owner: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE conversation_member SET is_quit = true WHERE user_id = ? AND conversation_id = ?", userID, conversationID); err != nil {
+		t.Fatalf("stage member exit: %v", err)
+	}
+	return func() {
+			if err := tx.Commit(); err != nil {
+				t.Fatalf("commit member exit: %v", err)
+			}
+		}, func() bool {
+			var count int
+			err := v.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM performance_schema.data_lock_waits w
+JOIN performance_schema.threads t ON t.THREAD_ID = w.BLOCKING_THREAD_ID
+WHERE t.PROCESSLIST_ID = ?`, connectionID).Scan(&count)
+			if err != nil {
+				t.Fatalf("observe member lock waiter: %v", err)
+			}
+			return count > 0
+		}
+}
+
 // DBVerifier 直查 MySQL 验证 HTTP 响应与底层存储一致。
 type DBVerifier struct {
 	db *sql.DB
+}
+
+// QuestionCount samples server-wide MySQL statements on a disposable benchmark stack.
+func (v *DBVerifier) QuestionCount(t testing.TB) uint64 {
+	t.Helper()
+	var name string
+	var count uint64
+	if err := v.db.QueryRow("SHOW GLOBAL STATUS LIKE 'Questions'").Scan(&name, &count); err != nil {
+		t.Fatalf("read MySQL statement counter: %v", err)
+	}
+	return count
 }
 
 type MediaFileRecord struct {
@@ -144,6 +190,15 @@ func (v *DBVerifier) LastReadSeq(t testing.TB, userID, conversationID string, ex
 
 // LastAckSeq verifies the delivery acknowledgement cursor.
 func (v *DBVerifier) LastAckSeq(t testing.TB, userID, conversationID string, expected uint64) {
+	seq := v.ReadLastAckSeq(t, userID, conversationID)
+	if seq != expected {
+		t.Fatalf("delivery acknowledgement cursor: expected %d, got %d", expected, seq)
+	}
+}
+
+// ReadLastAckSeq reads the durable delivery cursor for convergence assertions.
+func (v *DBVerifier) ReadLastAckSeq(t testing.TB, userID, conversationID string) uint64 {
+	t.Helper()
 	var seq uint64
 	err := v.db.QueryRow(
 		"SELECT last_ack_seq FROM conversation_member WHERE user_id = ? AND conversation_id = ?",
@@ -152,9 +207,7 @@ func (v *DBVerifier) LastAckSeq(t testing.TB, userID, conversationID string, exp
 	if err != nil {
 		t.Fatalf("query last_ack_seq: %v", err)
 	}
-	if seq != expected {
-		t.Fatalf("last_ack_seq user=%s conv=%s 期望 %d，实际 %d", userID, conversationID, expected, seq)
-	}
+	return seq
 }
 
 // UnreadCount 计算并验证未读数 = max(message.seq_id) - last_read_seq。

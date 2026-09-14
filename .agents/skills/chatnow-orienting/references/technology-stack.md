@@ -67,6 +67,8 @@ The source topology and static contracts do not prove a successful clean-slate s
 
 ## Verification entry points
 
+Issue #58 ACK state, candidate `3.0-dev`, 2026-09-14: MySQL owns the monotonic delivery cursor; Redis retains exact per-device delivery payloads until Message confirms convergence. Existing unacked TTLs and client heartbeat/re-ACK recovery still apply. Push exports `push_delivery_ack_rejected_total`, `push_delivery_ack_failure_total`, and `push_delivery_ack_converged_total` through its existing bvar endpoint. These are outcome counters, not an inventory of disconnected-device backlog or its oldest pending age; that monitoring acceptance remains unverified. See `core-flows.md` for the transaction and retry boundaries.
+
 The current test framework is entirely Go. New or restored C++ test suites are prohibited.
 
 | Layer | Location/tag | Runnable entry point |

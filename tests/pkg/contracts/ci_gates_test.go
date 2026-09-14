@@ -124,9 +124,11 @@ func TestReadAckUsesConversationSequenceWatermark(t *testing.T) {
 	end = strings.Index(clientNotify[start:], "\n    void shutdown_cleanup()")
 	require.Greater(t, end, 0)
 	clientNotify = clientNotify[start : start+end]
-	require.Contains(t, clientNotify, "closure->req.set_seq_id(ack.seq_id())")
+	require.Contains(t, clientNotify, "closure->req.set_seq_id(message.seq_id())")
 	require.NotContains(t, clientNotify, "closure->req.set_message_id(")
-	require.Contains(t, clientNotify, "ack.seq_id() > 0 && !ack.conversation_id().empty()")
+	require.Contains(t, clientNotify, "_unacked->payload(conn_uid, conn_did, ack.user_seq())")
+	require.Contains(t, clientNotify, "c->Failed() || !r.header().success()")
+	require.Contains(t, clientNotify, "unacked->ack_if_matches(uid, did, user_seq, stored_payload)")
 	require.NotContains(t, clientNotify, "conversation read watermark")
 }
 

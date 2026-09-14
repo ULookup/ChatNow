@@ -1848,6 +1848,22 @@ public:
         _c->eval<long long>(kPushLua, keys.begin(), keys.end(),
                             args.begin(), args.end());
     }
+    // Read the exact server-owned delivery. Errors propagate to the ACK boundary.
+    sw::redis::OptionalString payload(const std::string &uid,
+                                      const std::string &device_id,
+                                      unsigned long user_seq) {
+        return _c->hget(idx_key_for(uid, device_id), std::to_string(user_seq));
+    }
+
+    // An asynchronous completion must not remove a replacement delivery.
+    void ack_if_matches(const std::string &uid, const std::string &device_id,
+                        unsigned long user_seq, const std::string &payload_b64) {
+        std::vector<std::string> keys = {
+            key_for(uid, device_id), idx_key_for(uid, device_id), repair_key_for(uid, device_id)};
+        std::vector<std::string> args = {std::to_string(user_seq), payload_b64};
+        _c->eval<long long>(kAckLua, keys.begin(), keys.end(), args.begin(), args.end());
+    }
+
     /* brief: 客户端 ACK 后移除（per-device，O(1) via HASH index） */
     void ack(const std::string &uid, const std::string &device_id,
              unsigned long user_seq) {
@@ -2043,6 +2059,7 @@ local zt = key_type(KEYS[1])
 local ht = key_type(KEYS[2])
 if zt ~= 'none' and zt ~= 'zset' then return redis.error_reply('unacked key wrong type') end
 if ht ~= 'none' and ht ~= 'hash' then return redis.error_reply('unacked index wrong type') end
+if ARGV[2] and redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
 local removed = redis.call('ZREM', KEYS[1], ARGV[1])
 removed = removed + redis.call('HDEL', KEYS[2], ARGV[1])
 -- HASH mutation invalidates an in-progress HSCAN continuation.

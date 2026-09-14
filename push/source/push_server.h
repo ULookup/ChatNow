@@ -407,25 +407,55 @@ public:
                          ack.user_id(), ack.device_id(), conn_uid, conn_did);
                 return;
             }
-            if (_unacked) _unacked->ack(ack.user_id(), ack.device_id(), ack.user_seq());
-
-            // Non-message pushes still ACK their Unacked entry but carry no
-            // conversation delivery ACK watermark.
-            if (!(ack.seq_id() > 0 && !ack.conversation_id().empty())) return;
+            if (!_unacked) return;
+            std::string stored_payload;
+            NotifyMessage delivered;
+            try {
+                auto payload = _unacked->payload(conn_uid, conn_did, ack.user_seq());
+                if (!payload) return; // Already acknowledged, expired, or never delivered.
+                stored_payload = *payload;
+                if (!delivered.ParseFromString(_utils_base64_decode(stored_payload))) {
+                    metrics::g_push_delivery_ack_rejected_total << 1;
+                    return;
+                }
+                // Control ACKs may carry conversation context, but never advance
+                // a delivery cursor. Preserve their existing removal contract.
+                if (delivered.notify_type() != NotifyType::CHAT_MESSAGE_NOTIFY) {
+                    _unacked->ack_if_matches(conn_uid, conn_did, ack.user_seq(), stored_payload);
+                    return;
+                }
+            } catch (const std::exception &) {
+                metrics::g_push_delivery_ack_failure_total << 1;
+                LOG_WARN("Delivery ACK retained: delivery state unavailable");
+                return;
+            }
+            const auto &message = delivered.new_message_info().message_info();
+            if (!delivered.has_new_message_info() || message.message_id() != ack.message_id() ||
+                message.user_seq() != ack.user_seq() || message.seq_id() == 0 ||
+                message.conversation_id().empty() ||
+                (!ack.conversation_id().empty() && ack.conversation_id() != message.conversation_id()) ||
+                (ack.seq_id() != 0 && ack.seq_id() != message.seq_id())) {
+                metrics::g_push_delivery_ack_rejected_total << 1;
+                LOG_WARN("Delivery ACK rejected: delivery identity mismatch");
+                return;
+            }
 
             // 异步上报会话 seq_id 水位（无入站 RPC context，需手动设置 auth metadata）
             auto channel = _mm_channels->choose(_message_service_name);
             if (!channel) {
-                LOG_WARN("UpdateReadAck: message service 不可达 uid={}", ack.user_id());
+                metrics::g_push_delivery_ack_failure_total << 1;
+                LOG_WARN("Delivery ACK retained: Message service unavailable");
                 return;
             }
             chatnow::message::MessageService_Stub stub(channel.get());
             auto *closure = new SelfDeleteRpcClosure<
                 chatnow::message::UpdateReadAckReq,
                 chatnow::message::UpdateReadAckRsp>();
-            closure->req.set_request_id(ack.user_id());
-            closure->req.set_conversation_id(ack.conversation_id());
-            closure->req.set_seq_id(ack.seq_id());
+            closure->cntl.set_timeout_ms(3000);
+            closure->cntl.set_max_retry(0);
+            closure->req.set_request_id(::chatnow::utils::gen_trace_id());
+            closure->req.set_conversation_id(message.conversation_id());
+            closure->req.set_seq_id(message.seq_id());
             // 手动设置 auth metadata：WS handler 无入站 RPC context，需自行构造 RpcMetadata
             ::chatnow::rpc::RpcMetadata meta;
             meta.set_user_id(conn_uid);
@@ -434,10 +464,22 @@ public:
             std::string data;
             meta.SerializeToString(&data);
             closure->cntl.request_attachment().append(data);
-            closure->on_done = [uid = ack.user_id(), seq = ack.seq_id()]
+            closure->on_done = [channel, unacked = _unacked, uid = conn_uid, did = conn_did,
+                                user_seq = ack.user_seq(), stored_payload]
                 (brpc::Controller *c, const chatnow::message::UpdateReadAckRsp &r) {
-                if (c->Failed()) {
-                    LOG_WARN("UpdateReadAck RPC 失败 uid={} seq_id={}: {}", uid, seq, c->ErrorText());
+                // Keep all callback dependencies alive, including the channel.
+                if (c->Failed() || !r.header().success()) {
+                    metrics::g_push_delivery_ack_failure_total << 1;
+                    LOG_WARN("Delivery ACK retained: rpc_code={} business_code={}",
+                             c->ErrorCode(), r.header().error_code());
+                    return;
+                }
+                try {
+                    unacked->ack_if_matches(uid, did, user_seq, stored_payload);
+                    metrics::g_push_delivery_ack_converged_total << 1;
+                } catch (const std::exception &) {
+                    metrics::g_push_delivery_ack_failure_total << 1;
+                    LOG_WARN("Delivery ACK retained: cleanup unavailable after convergence");
                 }
             };
             stub.UpdateReadAck(&closure->cntl, &closure->req, &closure->rsp, closure);

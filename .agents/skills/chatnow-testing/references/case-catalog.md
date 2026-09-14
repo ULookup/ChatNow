@@ -21,12 +21,14 @@ Case IDs are stable identities, not completion claims. Put the ID in the case co
 | Functional: Security | `FN-SEC-<two digits>` |
 | Functional: Quota | `FN-QT-<two digits>` |
 | Scenario | `SC-01` through `SC-12` |
-| Performance | `PF-01` through `PF-08` |
+| Performance | `PF-01` through `PF-10` |
 | Reliability | `RL-<category>-<number>` |
 
 Reliability has an executable Compose gate in `tests/reliability` (`make -C tests test-reliability`). The existing RL-05 category contains circuit recovery and Push persistence cases; new cases use the category-number allocation below. A reserved ID is never evidence of a successful run.
 
 ## Allocation procedure
+
+Issue #58 allocates FN-WS-10/11/12 and FN-MS-02 to `tests/func/delivery_ack_test.go`, RL-ACK-01 to `tests/reliability/delivery_ack_test.go`, and PF-10 to `tests/perf/delivery_ack_test.go`. PF-09 remains the existing user-info cache benchmark. The Performance range is explicitly extended to PF-10 for the ACK comparison; allocation is not a pass or capacity claim.
 
 `RL-WORKER-01` is allocated to `tests/reliability/worker_test.go` for explicit process fencing after worker lease revocation, including container PID 1 exit diagnostics and delayed recovery observation. Allocation is not a test-pass claim.
 

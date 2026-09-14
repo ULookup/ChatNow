@@ -455,12 +455,14 @@ public:
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
                                               "seq_id required");
             }
-            require_member_(req->conversation_id(), auth.user_id);
-            bool ok = _mysql_member->update_last_ack_seq(
+            auto result = _mysql_member->update_last_ack_seq(
                 req->conversation_id(), auth.user_id, req->seq_id());
-            if (!ok)
-                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                              "update last_ack_seq failed");
+            if (result == ConversationMemberTable::DeliveryAckResult::kNotMember)
+                throw ::chatnow::ServiceError(::chatnow::error::kConversationNotMember,
+                                              "not a conversation member");
+            if (result == ConversationMemberTable::DeliveryAckResult::kUnavailable)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
+                                              "delivery acknowledgement unavailable");
         });
     }
 
