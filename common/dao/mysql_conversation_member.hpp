@@ -304,13 +304,33 @@ public:
         return _atomic_advance_seq("last_read_seq", cid, uid, new_seq);
     }
 
-    /* brief: 推进送达游标（多端送达回执，单调递增）— 原子 UPDATE GREATEST
-     *  - DB 层强保证单调；不会被其它服务的全行 UPDATE 覆盖回退
-     *  - 返回 true 表示 SQL 执行无异常（包括 GREATEST 等值不推进的幂等场景）
-     *  - 不区分"行不存在 vs 等值不推进"：调用方对两者均不重试（已退群 / 幂等重复）
-     */
-    bool update_last_ack_seq(const std::string &ssid, const std::string &uid, unsigned long new_seq) {
-        return _atomic_advance_seq("last_ack_seq", ssid, uid, new_seq);
+    // Distinguish idempotent success, inactive membership, and dependency failure.
+    enum class DeliveryAckResult { kOk, kNotMember, kUnavailable };
+
+    // Membership and the monotonic cursor share one locked transaction.
+    // ODB binds identity values; no Message-table lookup is needed.
+    DeliveryAckResult update_last_ack_seq(const std::string &ssid, const std::string &uid,
+                                         unsigned long new_seq) {
+        try {
+            odb::transaction trans(_db->begin());
+            using query = odb::query<ConversationMember>;
+            std::shared_ptr<ConversationMember> member(_db->query_one<ConversationMember>(
+                (query::conversation_id == ssid && query::user_id == uid && query::is_quit == false)
+                + " FOR UPDATE"));
+            if (!member) {
+                trans.commit();
+                return DeliveryAckResult::kNotMember;
+            }
+            if (member->last_ack_seq() < new_seq) {
+                member->last_ack_seq(new_seq);
+                _db->update(*member);
+            }
+            trans.commit();
+            return DeliveryAckResult::kOk;
+        } catch (const std::exception &) {
+            LOG_ERROR("Delivery ACK transaction unavailable");
+            return DeliveryAckResult::kUnavailable;
+        }
     }
 
 private:

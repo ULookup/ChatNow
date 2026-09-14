@@ -35,6 +35,9 @@ inline bvar::Adder<long> g_push_message_requeue_total("push_message_requeue_tota
 inline bvar::Adder<long> g_push_auth_revoked_total("push_auth_revoked_total");
 inline bvar::Adder<long> g_push_auth_revocation_unavailable_total(
     "push_auth_revocation_unavailable_total");
+inline bvar::Adder<long> g_push_delivery_ack_rejected_total("push_delivery_ack_rejected_total");
+inline bvar::Adder<long> g_push_delivery_ack_failure_total("push_delivery_ack_failure_total");
+inline bvar::Adder<long> g_push_delivery_ack_converged_total("push_delivery_ack_converged_total");
 
 template <typename V>
 inline typename ::chatnow::LocalCache<V>::MetricsSink local_cache_metrics_sink() {

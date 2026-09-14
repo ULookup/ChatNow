@@ -26,7 +26,7 @@ DEFINE_int32(mysql_port, 0, "MySQL服务器访问端口");
 DEFINE_int32(mysql_pool_count, 4, "MySQL连接池最大连接数量");
 
 DEFINE_string(mq_user, "root", "消息队列服务器访问用户名");
-DEFINE_string(mq_host, "127.0.0.1:5672", "消息队列服务器访问地址");
+DEFINE_string(mq_host, "127.0.0.1", "RabbitMQ hostname (port is fixed at 5672)");
 DEFINE_string(mq_msg_exchange, "chat_msg_exchange", "持久化消息的发布交换机名称");
 DEFINE_string(mq_msg_queue_db, "msg_queue_db", "持久化DB消息的发布队列名称");
 DEFINE_string(mq_msg_queue_es, "msg_queue_es", "持久化ES消息的发布队列名称");

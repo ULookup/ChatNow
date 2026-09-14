@@ -66,7 +66,7 @@ find_package(jsoncpp CONFIG REQUIRED)
 add_executable(${target} ${src_files} ${proto_srcs} ${odb_srcs})
 
 target_link_libraries(${target}
-    -lgflags -lspdlog -lfmt
+    -lgflags -lspdlog -lfmt -lglog
     -lbrpc -lssl -lcrypto -lprotobuf -lleveldb -letcd-cpp-api
     -lcpprest -lcurl
     -lodb-mysql -lodb -lodb-boost

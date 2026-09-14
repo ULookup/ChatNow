@@ -32,6 +32,7 @@
 #include "dao/mysql_message.hpp"
 #include "dao/mysql_user_timeline.hpp"
 #include "dao/mysql_conversation_member.hpp"
+#include "conversation-odb.hxx"
 #include "dao/mysql_message_reaction.hpp"
 #include "dao/mysql_message_pin.hpp"
 #include "dao/data_es.hpp"
@@ -454,12 +455,14 @@ public:
                 throw ::chatnow::ServiceError(::chatnow::error::kSystemInvalidArgument,
                                               "seq_id required");
             }
-            require_member_(req->conversation_id(), auth.user_id);
-            bool ok = _mysql_member->update_last_ack_seq(
+            auto result = _mysql_member->update_last_ack_seq(
                 req->conversation_id(), auth.user_id, req->seq_id());
-            if (!ok)
-                throw ::chatnow::ServiceError(::chatnow::error::kSystemInternalError,
-                                              "update last_ack_seq failed");
+            if (result == ConversationMemberTable::DeliveryAckResult::kNotMember)
+                throw ::chatnow::ServiceError(::chatnow::error::kConversationNotMember,
+                                              "not a conversation member");
+            if (result == ConversationMemberTable::DeliveryAckResult::kUnavailable)
+                throw ::chatnow::ServiceError(::chatnow::error::kSystemUnavailable,
+                                              "delivery acknowledgement unavailable");
         });
     }
 
@@ -558,6 +561,17 @@ public:
             _mysql_msg->insert(msg);
             if (!timeline_list.empty()) {
                 _mysql_user_timeline->insert(timeline_list);
+            }
+            // Commit the conversation watermark with the message and timelines.
+            // A row lock and monotonic update make duplicate/reordered delivery safe.
+            using conversation_query = odb::query<::chatnow::Conversation>;
+            std::shared_ptr<::chatnow::Conversation> conversation(
+                _odb_db->query_one<::chatnow::Conversation>(
+                    (conversation_query::conversation_id == msg_pb.conversation_id()) + " FOR UPDATE"));
+            if (!conversation) throw std::runtime_error("conversation missing during persistence");
+            if (conversation->max_seq() < session_seq) {
+                conversation->max_seq(session_seq);
+                _odb_db->update(*conversation);
             }
             if (trans) trans->commit();
             mark_idempotency_persisted_(msg_pb.sender_id(), client_msg_id, msg_pb.message_id());
@@ -1000,7 +1014,7 @@ public:
             LOG_ERROR("Message MQ exchange 不能为空");
             abort();
         }
-        std::string amqp_url = "amqp://" + user + ":" + pwd + "@" + host + ":5672/";
+        std::string amqp_url = make_amqp_url(user, pwd, host);
         _mq_client = std::make_shared<MQClient>(amqp_url);
         _db_queue_settings = {
             .exchange = exchange_name,

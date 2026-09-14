@@ -4,6 +4,7 @@ package func_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -437,26 +438,24 @@ func TestSaveDraft_Success(t *testing.T) {
 func TestSearchConversations_Success(t *testing.T) {
 	owner, _, _ := fixture.RegisterAndLogin(t, HTTP)
 	member, _, _ := fixture.RegisterAndLogin(t, HTTP)
-	convID := fixture.CreateGroupWithMembers(t, owner, []*client.HTTPClient{member}, "test_group")
-
-	// Search by conversation name (partial match via ik_max_word analyzer).
-	searchKey := "test_group"
+	searchKey := "searchgroup" + client.NewRequestID()
+	convID := fixture.CreateGroupWithMembers(t, owner, []*client.HTTPClient{member}, searchKey)
 	req := &conversation.SearchConversationsReq{
 		RequestId: client.NewRequestID(),
 		SearchKey: searchKey,
 	}
-	rsp := &conversation.SearchConversationsRsp{}
-	err := owner.DoAuth("/service/conversation/search", req, rsp)
-	require.NoError(t, err)
-	assert.True(t, rsp.Header.Success)
-	found := false
-	for _, c := range rsp.Conversations {
-		if c.ConversationId == convID {
-			found = true
-			break
+	require.Eventually(t, func() bool {
+		rsp := &conversation.SearchConversationsRsp{}
+		if err := owner.DoAuth("/service/conversation/search", req, rsp); err != nil || !rsp.GetHeader().GetSuccess() {
+			return false
 		}
-	}
-	assert.True(t, found, "search by partial convID should find the conversation")
+		for _, c := range rsp.Conversations {
+			if c.ConversationId == convID {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "search must find the indexed conversation by name")
 }
 
 // ---------------------------------------------------------------------------

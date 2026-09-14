@@ -30,7 +30,7 @@ DEFINE_bool(redis_keep_alive, true, "Redis 长连接");
 DEFINE_int32(redis_pool_size, 8, "Redis 连接池大小");
 
 DEFINE_string(mq_user, "root", "消息队列服务器访问用户名");
-DEFINE_string(mq_host, "127.0.0.1:5672", "消息队列服务器访问地址");
+DEFINE_string(mq_host, "127.0.0.1", "RabbitMQ hostname (port is fixed at 5672)");
 // publisher-only：exchange 必须与 message 服务 mq_msg_exchange 一致
 DEFINE_string(mq_msg_exchange, "chat_msg_exchange", "持久化消息的发布交换机名称（FANOUT，必须与 message.mq_msg_exchange 完全一致）");
 DEFINE_string(mq_msg_queue, "", "publisher-only：留空，避免声明孤儿队列");

@@ -124,9 +124,11 @@ func TestReadAckUsesConversationSequenceWatermark(t *testing.T) {
 	end = strings.Index(clientNotify[start:], "\n    void shutdown_cleanup()")
 	require.Greater(t, end, 0)
 	clientNotify = clientNotify[start : start+end]
-	require.Contains(t, clientNotify, "closure->req.set_seq_id(ack.seq_id())")
+	require.Contains(t, clientNotify, "closure->req.set_seq_id(message.seq_id())")
 	require.NotContains(t, clientNotify, "closure->req.set_message_id(")
-	require.Contains(t, clientNotify, "ack.seq_id() > 0 && !ack.conversation_id().empty()")
+	require.Contains(t, clientNotify, "_unacked->payload(conn_uid, conn_did, ack.user_seq())")
+	require.Contains(t, clientNotify, "c->Failed() || !r.header().success()")
+	require.Contains(t, clientNotify, "unacked->ack_if_matches(uid, did, user_seq, stored_payload)")
 	require.NotContains(t, clientNotify, "conversation read watermark")
 }
 
@@ -201,6 +203,9 @@ func TestCIGates(t *testing.T) {
 	require.True(t, ok, "RL-05 must have a dedicated reliability job")
 	require.Equal(t, "service-artifacts", reliability.Needs)
 	require.Equal(t, "github.event_name == 'pull_request' || github.event_name == 'schedule'", reliability.If)
+
+	require.Equal(t, "8", gateEnv(t, reliability, "TRANSMITE_RATE_LIMIT_USER_MAX"))
+	require.Equal(t, "40", gateEnv(t, reliability, "TRANSMITE_RATE_LIMIT_SESSION_MAX"))
 
 	perfCache, ok := workflow.Jobs["perf-cache"]
 	require.True(t, ok, "PF-09 must have a dedicated perf-cache job")

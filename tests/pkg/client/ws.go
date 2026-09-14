@@ -25,6 +25,21 @@ type WSClient struct {
 	closed    bool
 	closedCh  chan struct{}
 	closeOnce sync.Once
+	writeMu   sync.Mutex
+}
+
+// SendNotify sends one Protobuf frame with a bounded write deadline.
+func (w *WSClient) SendNotify(notify *push.NotifyMessage) error {
+	payload, err := proto.Marshal(notify)
+	if err != nil {
+		return err
+	}
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	if err := w.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+	return w.conn.WriteMessage(websocket.BinaryMessage, payload)
 }
 
 // NewWSClient 连接 gateway WS，发送 CLIENT_AUTH 鉴权帧，启动 readLoop。

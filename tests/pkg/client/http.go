@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -68,6 +69,11 @@ func (c *HTTPClient) do(path string, req proto.Message, resp proto.Message, acce
 }
 
 func (c *HTTPClient) doURL(endpoint string, req proto.Message, resp proto.Message, accessToken, traceID string) (http.Header, error) {
+	diagnosticTrace := ""
+	if os.Getenv("CHATNOW_TEST_DIAGNOSTICS") == "1" && traceID == "" {
+		diagnosticTrace = NewRequestID()
+		traceID = diagnosticTrace
+	}
 	body, err := proto.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
@@ -103,6 +109,9 @@ func (c *HTTPClient) doURL(endpoint string, req proto.Message, resp proto.Messag
 
 	if err := proto.Unmarshal(respBody, resp); err != nil {
 		return headers, fmt.Errorf("unmarshal response: %w", err)
+	}
+	if os.Getenv("CHATNOW_TEST_DIAGNOSTICS") == "1" {
+		recordResponseFailure(resp, diagnosticTrace)
 	}
 	return headers, nil
 }

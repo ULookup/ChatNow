@@ -13,26 +13,12 @@ import (
 	"chatnow-tests/pkg/fixture"
 	"chatnow-tests/pkg/verify"
 	msg "chatnow-tests/proto/chatnow/message"
-	transmite "chatnow-tests/proto/chatnow/transmite"
 )
 
-// Helper: sends a text message and returns the message_id and seq_id.
+// Message API tests require the shared fixture's durable-message boundary.
 func sendMsg(t *testing.T, c *client.HTTPClient, convID string, text string) (msgID int64, seqID uint64) {
 	t.Helper()
-	req := &transmite.SendMessageReq{
-		RequestId:      client.NewRequestID(),
-		ConversationId: convID,
-		Content: &msg.MessageContent{
-			Type: msg.MessageType_TEXT,
-			Body: &msg.MessageContent_Text{Text: &msg.TextContent{Text: text}},
-		},
-		ClientMsgId: client.NewRequestID(),
-	}
-	rsp := &transmite.SendMessageRsp{}
-	require.NoError(t, c.DoAuth("/service/transmite/send", req, rsp))
-	require.True(t, rsp.GetHeader().GetSuccess())
-	require.NotNil(t, rsp.GetMessage())
-	return rsp.GetMessage().GetMessageId(), rsp.GetMessage().GetSeqId()
+	return fixture.SendTextMessage(t, c, convID, text)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,19 +91,22 @@ func TestGetMessagesById_Success(t *testing.T) {
 
 func TestSearchMessages_Success(t *testing.T) {
 	a, _, convID := setupConv(t)
-	sendMsg(t, a, convID, "unique search term zebra42")
+	keyword := "search" + client.NewRequestID()
+	messageID, _ := sendMsg(t, a, convID, keyword)
+	verify.NewESVerifier(Cfg.Database.ESURL).MessageIndexed(t, messageID, keyword)
 
 	req := &msg.SearchMessagesReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
-		Keyword:        "zebra42",
+		Keyword:        keyword,
 		Limit:          20,
 	}
 	rsp := &msg.SearchMessagesRsp{}
 	err := a.DoAuth("/service/message/search", req, rsp)
 	require.NoError(t, err)
-	// Search may return empty if ES is not available; verify response is valid.
-	assert.True(t, rsp.GetHeader().GetSuccess() || !rsp.GetHeader().GetSuccess(), "response received")
+	require.True(t, rsp.GetHeader().GetSuccess(), "search failed with code %d", rsp.GetHeader().GetErrorCode())
+	require.Len(t, rsp.GetMessages(), 1)
+	assert.Equal(t, messageID, rsp.GetMessages()[0].GetMessageId())
 }
 
 // ---------------------------------------------------------------------------
@@ -379,6 +368,9 @@ func TestFN_MS_SyncMessages_NotMember(t *testing.T) {
 func TestFN_MS_RecallMessage_ByNonAuthor(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
 	msgID, _ := fixture.SendTextMessage(t, alice, convID, "will-try-recall")
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, msgID, 10*time.Second)
 
 	// bob（非发送者）尝试撤回 alice 的消息
 	req := &msg.RecallMessageReq{
@@ -393,12 +385,17 @@ func TestFN_MS_RecallMessage_ByNonAuthor(t *testing.T) {
 	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")
 }
 
-// FN-MS-10 | P0 | error path | 删除他人消息应失败
-func TestFN_MS_DeleteMessages_NotOwned(t *testing.T) {
+// FN-MS-10 | P0 | isolation | deleting a received message affects only the caller.
+func TestFN_MS_DeleteMessages_OnlyOwnTimeline(t *testing.T) {
 	alice, bob, convID := fixture.MakeFriends(t, HTTP)
 	msgID, _ := fixture.SendTextMessage(t, alice, convID, "will-try-delete")
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, msgID, 10*time.Second)
+	verifier.UserTimelineExists(t, alice.UserID, convID, 1)
+	verifier.UserTimelineExists(t, bob.UserID, convID, 1)
 
-	// bob 尝试删除 alice 的消息
+	// Bob removes his own view of Alice's message.
 	req := &msg.DeleteMessagesReq{
 		RequestId:      client.NewRequestID(),
 		ConversationId: convID,
@@ -407,15 +404,28 @@ func TestFN_MS_DeleteMessages_NotOwned(t *testing.T) {
 	rsp := &msg.DeleteMessagesRsp{}
 	err := bob.DoAuth("/service/message/delete", req, rsp)
 	require.NoError(t, err)
-	require.False(t, rsp.Header.Success, "删除他人消息应失败")
-	assert.Equal(t, int32(3003), rsp.Header.ErrorCode, "错误码应为 CONVERSATION_NO_PERMISSION(3003)")
+	require.True(t, rsp.GetHeader().GetSuccess())
+	verifier.UserTimelineExists(t, bob.UserID, convID, 0)
+	verifier.UserTimelineExists(t, alice.UserID, convID, 1)
+	verifier.MessageExists(t, msgID)
+	verifier.MessageStatus(t, msgID, 0)
+	outsider, _, _ := fixture.RegisterAndLogin(t, HTTP)
+	denied := &msg.DeleteMessagesRsp{}
+	require.NoError(t, outsider.DoAuth("/service/message/delete", req, denied))
+	require.False(t, denied.GetHeader().GetSuccess())
+	require.Equal(t, int32(3002), denied.GetHeader().GetErrorCode())
+	verifier.UserTimelineExists(t, alice.UserID, convID, 1)
 }
 
 // FN-MS (untested) | P0 | SelectByClientMsgId 查询存在
 func TestFN_MS_SelectByClientMsgId_Found(t *testing.T) {
 	alice, _, convID := fixture.MakeFriends(t, HTTP)
 	clientMsgID := client.NewRequestID()
-	msgID, _, _ := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "select-by-client-msg-id", clientMsgID)
+	msgID, _, accepted := fixture.SendTextMessageWithClientMsgId(t, alice, convID, "select-by-client-msg-id", clientMsgID)
+	require.True(t, accepted)
+	verifier := verify.NewDBVerifier(Cfg.Database.MySQLDSN)
+	defer verifier.Close()
+	verifier.WaitMessageExists(t, msgID, 10*time.Second)
 
 	req := &msg.SelectByClientMsgIdReq{
 		RequestId:   client.NewRequestID(),
